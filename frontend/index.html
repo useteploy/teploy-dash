@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>teploy ui</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script defer src="/js/alpine.js"></script>
+  <script src="/js/app.js"></script>
+</head>
+<body x-data>
+
+<!-- Navbar -->
+<nav class="navbar">
+  <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('projects')">teploy ui</a>
+  <ul class="navbar-nav">
+    <li><a href="#" :class="{ active: $store.router.page === 'projects' }" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'settings' }" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
+  </ul>
+  <div class="navbar-spacer"></div>
+  <button class="theme-toggle" @click="$store.theme.toggle()" x-text="$store.theme.mode === 'dark' ? '&#9790;' : '&#9788;'"></button>
+</nav>
+
+<!-- Content -->
+<div class="content">
+
+  <!-- ═══ Projects Page ═══ -->
+  <template x-if="$store.router.page === 'projects'">
+    <div x-data="projectsPage">
+      <div class="page-header">
+        <h1 class="page-title">Deployments</h1>
+        <div style="display: flex; gap: 12px; align-items: center; flex: 1; max-width: 500px; margin: 0 24px;">
+          <input type="text" class="search-input" placeholder="Search apps..." x-model="search" style="flex: 1;">
+        </div>
+        <button class="btn" @click="createGroup">+ Group</button>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading">
+        <div>
+          <!-- Groups with their apps -->
+          <template x-for="group in groupedApps()" :key="group.name">
+            <div style="margin-bottom: 32px;">
+              <div class="section-header">
+                <h2 class="section-title" x-text="group.name"></h2>
+                <div style="display: flex; gap: 8px;" x-show="!group.system">
+                  <button class="btn btn-sm" @click="createProject(group.name)">+ Project</button>
+                  <button class="btn btn-sm btn-primary" @click="openDeployForm(group.name)">+ Deploy</button>
+                </div>
+              </div>
+
+              <!-- Inline deploy form for this group -->
+              <template x-if="deployingToGroup === group.name">
+                <div class="table-wrap" style="padding: 20px; margin-bottom: 16px;">
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label class="form-label">App name</label>
+                      <input class="form-input" placeholder="myapp" x-model="deployForm.app">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label">Docker image</label>
+                      <input class="form-input" placeholder="nginx:latest" x-model="deployForm.image">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label">Domain</label>
+                      <input class="form-input" placeholder="myapp.example.com" x-model="deployForm.domain">
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label class="form-label">Server</label>
+                      <select class="form-input" x-model="deployForm.server">
+                        <option value="">Select a server...</option>
+                        <template x-for="s in serverList" :key="s">
+                          <option :value="s" x-text="s"></option>
+                        </template>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label">Container port</label>
+                      <input class="form-input" type="number" placeholder="80" x-model.number="deployForm.port">
+                    </div>
+                    <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
+                      <button class="btn btn-primary" @click="doDeploy(group.name)" :disabled="deploying" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
+                      <button class="btn" @click="deployingToGroup = null">Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <div class="card-grid">
+                <!-- Project cards -->
+                <template x-for="proj in group.projects" :key="'proj-' + proj.name">
+                  <div class="card card-project" @click="openProject(group.name, proj.name)">
+                    <div class="card-title">
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink: 0;"><path d="M1.5 2A1.5 1.5 0 0 1 3 .5h4.586a1.5 1.5 0 0 1 1.06.44l.914.913a.5.5 0 0 0 .354.147H13A1.5 1.5 0 0 1 14.5 3.5v9A1.5 1.5 0 0 1 13 14H3A1.5 1.5 0 0 1 1.5 12.5V2Z" stroke="currentColor" stroke-width="1.2"/></svg>
+                      <span x-text="proj.name"></span>
+                    </div>
+                    <div class="card-meta" x-text="(proj.resolvedApps || []).length + ' app' + ((proj.resolvedApps || []).length !== 1 ? 's' : '')"></div>
+                  </div>
+                </template>
+                <!-- Direct app cards -->
+                <template x-for="app in group.directApps" :key="app.name">
+                  <div class="card" @click="openApp(app)">
+                    <div class="card-title">
+                      <span class="status-dot" :class="app.status"></span>
+                      <span x-text="app.name"></span>
+                    </div>
+                    <div class="card-meta" x-text="app.server"></div>
+                    <div class="card-hash" x-text="app.version || app.status"></div>
+                  </div>
+                </template>
+              </div>
+              <template x-if="group.directApps.length === 0 && group.projects.length === 0 && deployingToGroup !== group.name">
+                <p style="color: var(--text-muted); font-size: 13px;">No apps in this group yet.</p>
+              </template>
+            </div>
+          </template>
+
+          <!-- Empty state when no groups -->
+          <template x-if="groupedApps().length === 0">
+            <div class="empty-state">
+              <p>No groups yet. Create a group to get started, then deploy apps into it.</p>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ Project Detail Page ═══ -->
+  <template x-if="$store.router.page === 'project-detail'">
+    <div x-data="projectDetailPage">
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Deployments</a>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading">
+        <div>
+          <div class="page-header">
+            <div>
+              <h1 class="page-title" x-text="projectName"></h1>
+              <div class="card-meta" x-text="groupName"></div>
+            </div>
+            <button class="btn btn-primary" @click="openDeployForm()">+ Deploy</button>
+          </div>
+
+          <!-- Inline deploy form -->
+          <template x-if="deployingToProject">
+            <div class="table-wrap" style="padding: 20px; margin-bottom: 16px;">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">App name</label>
+                  <input class="form-input" placeholder="myapp" x-model="deployForm.app">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Docker image</label>
+                  <input class="form-input" placeholder="nginx:latest" x-model="deployForm.image">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Domain</label>
+                  <input class="form-input" placeholder="myapp.example.com" x-model="deployForm.domain">
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">Server</label>
+                  <select class="form-input" x-model="deployForm.server">
+                    <option value="">Select a server...</option>
+                    <template x-for="s in serverList" :key="s">
+                      <option :value="s" x-text="s"></option>
+                    </template>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Container port</label>
+                  <input class="form-input" type="number" placeholder="80" x-model.number="deployForm.port">
+                </div>
+                <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
+                  <button class="btn btn-primary" @click="doDeploy()" :disabled="deploying" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
+                  <button class="btn" @click="deployingToProject = false">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <div class="card-grid">
+            <template x-for="app in projectApps" :key="app.name">
+              <div class="card" @click="openApp(app)">
+                <div class="card-title">
+                  <span class="status-dot" :class="app.status"></span>
+                  <span x-text="app.name"></span>
+                </div>
+                <div class="card-meta" x-text="app.server"></div>
+                <div class="card-hash" x-text="app.version || app.status"></div>
+              </div>
+            </template>
+          </div>
+
+          <template x-if="projectApps.length === 0 && !deployingToProject">
+            <div class="empty-state"><p>No apps in this project yet. Deploy one to get started.</p></div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ App Detail Page ═══ -->
+  <template x-if="$store.router.page === 'app-detail'">
+    <div x-data="appDetailPage">
+      <template x-if="$store.router.params.fromProject">
+        <a href="#" class="back-link" @click.prevent="$store.router.navigate('project-detail', { group: $store.router.params.fromGroup, project: $store.router.params.fromProject })">&larr; <span x-text="$store.router.params.fromProject"></span></a>
+      </template>
+      <template x-if="!$store.router.params.fromProject">
+        <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Deployments</a>
+      </template>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && app">
+        <div>
+          <div class="page-header">
+            <h1 class="page-title" x-text="app.name"></h1>
+            <span class="card-meta" x-text="app.server"></span>
+          </div>
+
+          <!-- Tabs -->
+          <div class="tabs">
+            <button class="tab" :class="{ active: tab === 'general' }" @click="switchTab('general')">General</button>
+            <button class="tab" :class="{ active: tab === 'env' }" @click="switchTab('env')">Environment</button>
+            <button class="tab" :class="{ active: tab === 'logs' }" @click="switchTab('logs')">Logs</button>
+            <button class="tab" :class="{ active: tab === 'deploys' }" @click="switchTab('deploys')">Deploys</button>
+          </div>
+
+          <!-- General Tab -->
+          <template x-if="tab === 'general'">
+            <div>
+              <div class="status-grid">
+                <div class="status-item">
+                  <div class="status-label">Version</div>
+                  <div class="status-value mono" x-text="app.version || 'N/A'"></div>
+                </div>
+                <div class="status-item">
+                  <div class="status-label">Port</div>
+                  <div class="status-value mono" x-text="app.port || 'N/A'"></div>
+                </div>
+                <div class="status-item">
+                  <div class="status-label">Containers</div>
+                  <div class="status-value" x-text="containerCount()"></div>
+                </div>
+                <div class="status-item">
+                  <div class="status-label">Locked</div>
+                  <div class="status-value" x-text="app.locked ? 'Yes' : 'No'"></div>
+                </div>
+              </div>
+
+              <div class="btn-group" style="margin-bottom: 24px;">
+                <button class="btn" @click="doAction('restart')" :disabled="actionLoading">Restart</button>
+                <button class="btn" @click="doAction('stop')" :disabled="actionLoading">Stop</button>
+                <button class="btn" @click="doAction('start')" :disabled="actionLoading">Start</button>
+                <button class="btn" @click="doAction('rollback')" :disabled="actionLoading">Rollback</button>
+                <button class="btn" @click="doAction(app.locked ? 'unlock' : 'lock')" :disabled="actionLoading" x-text="app.locked ? 'Unlock' : 'Lock'"></button>
+                <button class="btn" @click="doAction('maintenance/on')" :disabled="actionLoading">Maintenance On</button>
+                <button class="btn" @click="doAction('maintenance/off')" :disabled="actionLoading">Maintenance Off</button>
+              </div>
+
+              <!-- Containers Table -->
+              <template x-if="app.containers && app.containers.length > 0">
+                <div>
+                  <h3 style="margin-bottom: 12px; font-size: 15px;">Containers</h3>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Image</th>
+                          <th>State</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="c in app.containers" :key="c.ID">
+                          <tr>
+                            <td style="font-family: var(--mono); font-size: 12px;" x-text="c.Name"></td>
+                            <td x-text="c.Image"></td>
+                            <td>
+                              <span class="status-dot" :class="c.State === 'running' ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
+                              <span x-text="c.State"></span>
+                            </td>
+                            <td x-text="c.Status"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Accessories Table -->
+              <template x-if="accessories && accessories.length > 0">
+                <div style="margin-top: 24px;">
+                  <h3 style="margin-bottom: 12px; font-size: 15px;">Accessories</h3>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Image</th>
+                          <th>State</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="a in accessories" :key="a.ID">
+                          <tr>
+                            <td style="font-family: var(--mono); font-size: 12px;" x-text="a.Name"></td>
+                            <td x-text="a.Image"></td>
+                            <td>
+                              <span class="status-dot" :class="a.State === 'running' ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
+                              <span x-text="a.State"></span>
+                            </td>
+                            <td>
+                              <button class="btn btn-sm" @click="doAction('accessories/' + a.Name.split('-').pop() + '/start')">Start</button>
+                              <button class="btn btn-sm" @click="doAction('accessories/' + a.Name.split('-').pop() + '/stop')">Stop</button>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Environment Tab -->
+          <template x-if="tab === 'env'">
+            <div>
+              <div class="form-row" style="margin-bottom: 16px;">
+                <div class="form-group">
+                  <input class="form-input" placeholder="KEY" x-model="newEnvKey">
+                </div>
+                <div class="form-group">
+                  <input class="form-input" placeholder="value" x-model="newEnvValue">
+                </div>
+                <button class="btn btn-primary" @click="addEnvVar" >Add</button>
+              </div>
+
+              <template x-if="envVars && envVars.length > 0">
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Key</th>
+                        <th>Value</th>
+                        <th style="width: 80px;"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="v in envVars" :key="v.key">
+                        <tr>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="v.key"></td>
+                          <td>
+                            <span x-data="{ show: false }" style="font-family: var(--mono); font-size: 12px; cursor: pointer;" @click="show = !show" x-text="show ? v.value : '--------'"></span>
+                          </td>
+                          <td>
+                            <button class="btn btn-sm btn-danger" @click="deleteEnvVar(v.key)">Remove</button>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <template x-if="!envVars || envVars.length === 0">
+                <div class="empty-state"><p>No environment variables set.</p></div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Logs Tab -->
+          <template x-if="tab === 'logs'">
+            <div x-data="logViewer" @start-logs.window="connect()">
+              <div class="log-controls">
+                <select @change="switchProcess($event.target.value)">
+                  <option value="web">web</option>
+                  <option value="worker">worker</option>
+                </select>
+                <select x-model="lineCount" @change="connect()">
+                  <option value="50">50 lines</option>
+                  <option value="100" selected>100 lines</option>
+                  <option value="500">500 lines</option>
+                  <option value="1000">1000 lines</option>
+                </select>
+                <button class="btn btn-sm" @click="togglePause()" x-text="paused ? 'Resume' : 'Pause'"></button>
+                <button class="btn btn-sm" @click="clear()">Clear</button>
+                <span class="ws-indicator" :class="connected ? 'connected' : 'disconnected'"></span>
+                <span style="font-size: 12px; color: var(--text-muted);" x-text="connected ? 'Connected' : 'Disconnected'"></span>
+              </div>
+              <div class="log-viewer" x-ref="logContent"><template x-for="(line, i) in lines" :key="i"><span x-text="line"></span></template></div>
+            </div>
+          </template>
+
+          <!-- Deploys Tab -->
+          <template x-if="tab === 'deploys'">
+            <div>
+              <template x-if="deployLog && deployLog.length > 0">
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Type</th>
+                        <th>Version</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="entry in deployLog" :key="entry.ts">
+                        <tr>
+                          <td x-text="new Date(entry.ts).toLocaleString()"></td>
+                          <td x-text="entry.type"></td>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="entry.hash || '-'"></td>
+                          <td>
+                            <span class="status-dot" :class="entry.success ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
+                            <span x-text="entry.success ? 'Success' : 'Failed'"></span>
+                          </td>
+                          <td x-text="entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '-'"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <template x-if="!deployLog || deployLog.length === 0">
+                <div class="empty-state"><p>No deploy history yet.</p></div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ Monitors Page ═══ -->
+  <template x-if="$store.router.page === 'monitors'">
+    <div x-data="monitorsPage">
+
+      <!-- Monitor List View (when no monitor is selected) -->
+      <template x-if="!selectedMonitor">
+        <div>
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">Uptime Monitors</h1>
+              <p class="subtitle" x-text="monitors.length ? monitors.length + ' monitor' + (monitors.length !== 1 ? 's' : '') : 'No monitors configured'"></p>
+            </div>
+            <div class="header-actions">
+              <span class="cli-status" x-show="cliStatus">
+                <span class="dot" :class="cliStatus?.installed ? 'green' : 'gray'"></span>
+                CLI <span x-text="cliStatus?.version || 'not installed'"></span>
+              </span>
+              <button class="btn btn-primary" @click="showCreateDialog = true">Add Monitor</button>
+            </div>
+          </div>
+
+          <template x-if="loading">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
+
+          <!-- Monitor List -->
+          <template x-if="!loading && monitors.length > 0">
+            <div class="monitor-list">
+              <template x-for="m in monitors" :key="m.id">
+                <div class="monitor-card" @click="selectMonitor(m.id)">
+                  <div class="monitor-header">
+                    <div class="monitor-status">
+                      <span class="dot" :class="getMonitorDot(m)"></span>
+                      <span class="monitor-name" x-text="m.name"></span>
+                      <span class="monitor-type badge" x-text="m.type"></span>
+                    </div>
+                    <div class="monitor-uptime">
+                      <span class="uptime-pct" x-text="m.stats ? m.stats.uptime_percent.toFixed(1) + '%' : '--'"></span>
+                      <span class="uptime-label">24h uptime</span>
+                    </div>
+                  </div>
+                  <div class="monitor-target" x-text="m.target"></div>
+                  <div class="monitor-meta">
+                    <span x-text="'Every ' + formatInterval(m.interval)"></span>
+                    <span x-show="m.stats" x-text="m.stats ? 'Avg ' + m.stats.avg_response + 'ms' : ''"></span>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Empty State -->
+          <template x-if="!loading && monitors.length === 0">
+            <div class="empty-state">
+              <div class="empty-icon">
+                <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                </svg>
+              </div>
+              <h3>No monitors yet</h3>
+              <p>Add your first uptime monitor to start tracking availability.</p>
+              <button class="btn btn-primary" @click="showCreateDialog = true">Add Monitor</button>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Monitor Detail View -->
+      <template x-if="selectedMonitor">
+        <div>
+          <div class="page-header">
+            <div>
+              <a href="#" class="back-link" @click.prevent="selectedMonitor = null">&larr; Monitors</a>
+              <h1 class="page-title" x-text="selectedMonitor?.monitor?.name"></h1>
+              <p class="subtitle" x-text="selectedMonitor?.monitor?.target"></p>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-danger" @click="deleteMonitor(selectedMonitor.monitor.id)">Delete</button>
+            </div>
+          </div>
+
+          <!-- Stats -->
+          <template x-if="selectedMonitor?.stats">
+            <div class="stats-grid">
+              <div class="stat-card">
+                <div class="stat-value" x-text="selectedMonitor.stats.uptime_percent?.toFixed(2) + '%'"></div>
+                <div class="stat-label">Uptime (24h)</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" x-text="selectedMonitor.stats.total_checks || 0"></div>
+                <div class="stat-label">Total Checks</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" x-text="selectedMonitor.stats.avg_response || '--'"></div>
+                <div class="stat-label">Avg Response</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" x-text="selectedMonitor.stats.down_checks || 0"></div>
+                <div class="stat-label">Downtime Events</div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Check History -->
+          <div class="section">
+            <h2>Recent Checks</h2>
+            <div class="check-list">
+              <template x-for="check in (selectedMonitor?.checks || [])" :key="check.checked_at">
+                <div class="check-row">
+                  <span class="dot" :class="check.status === 'up' ? 'green' : 'red'"></span>
+                  <span class="check-status" x-text="check.status"></span>
+                  <span class="check-code" x-show="check.status_code" x-text="check.status_code"></span>
+                  <span class="check-time" x-text="check.response_time"></span>
+                  <span class="check-date" x-text="formatDate(check.checked_at)"></span>
+                  <span class="check-msg" x-show="check.message" x-text="check.message"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Create Monitor Dialog -->
+      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="showCreateDialog = false" x-cloak>
+        <div class="dialog">
+          <h2>Add Monitor</h2>
+          <form @submit.prevent="createMonitor()">
+            <div class="field">
+              <label>Name</label>
+              <input type="text" x-model="newMonitor.name" placeholder="My API" required>
+            </div>
+            <div class="field">
+              <label>Type</label>
+              <select x-model="newMonitor.type">
+                <option value="http">HTTP</option>
+                <option value="tcp">TCP</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Target</label>
+              <input type="text" x-model="newMonitor.target"
+                :placeholder="newMonitor.type === 'http' ? 'https://example.com' : 'example.com:5432'" required>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label>Check Interval</label>
+                <select x-model="newMonitor.interval">
+                  <option value="30000">30 seconds</option>
+                  <option value="60000" selected>1 minute</option>
+                  <option value="300000">5 minutes</option>
+                  <option value="600000">10 minutes</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Timeout</label>
+                <select x-model="newMonitor.timeout">
+                  <option value="5000">5 seconds</option>
+                  <option value="10000" selected>10 seconds</option>
+                  <option value="30000">30 seconds</option>
+                </select>
+              </div>
+            </div>
+            <div class="field" x-show="newMonitor.type === 'http'">
+              <label>Expected Status</label>
+              <input type="number" x-model="newMonitor.expected_status" placeholder="200">
+            </div>
+            <div class="dialog-actions">
+              <button type="button" class="btn" @click="showCreateDialog = false">Cancel</button>
+              <button type="submit" class="btn btn-primary" :disabled="creating">
+                <span x-show="!creating">Create</span>
+                <span x-show="creating">Creating...</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+    </div>
+  </template>
+
+  <!-- ═══ Servers Page ═══ -->
+  <template x-if="$store.router.page === 'servers'">
+    <div x-data="serversPage">
+      <div class="page-header">
+        <h1 class="page-title">Servers</h1>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && (!servers || servers.length === 0)">
+        <div class="empty-state"><p>No servers configured. Add servers in Settings.</p></div>
+      </template>
+
+      <template x-if="!loading && servers && servers.length > 0">
+        <div class="card-grid">
+          <template x-for="s in servers" :key="s.name">
+            <div class="card" @click="openServer(s.name)">
+              <div class="card-title">
+                <span class="status-dot" :class="s.online ? 'online' : 'offline'"></span>
+                <span x-text="s.name"></span>
+              </div>
+              <div class="card-meta" x-text="s.host"></div>
+              <div class="card-hash" x-text="s.role === 'lb' ? 'Load Balancer' : 'Standard'"></div>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ Server Detail Page ═══ -->
+  <template x-if="$store.router.page === 'server-detail'">
+    <div x-data="serverDetailPage">
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('servers')">&larr; Servers</a>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && status">
+        <div>
+          <div class="page-header">
+            <h1 class="page-title" x-text="status.name"></h1>
+            <span class="card-meta" x-text="status.host"></span>
+          </div>
+
+          <!-- Tabs -->
+          <div class="tabs">
+            <button class="tab" :class="{ active: tab === 'overview' }" @click="switchTab('overview')">Overview</button>
+            <button class="tab" :class="{ active: tab === 'proxy' }" @click="switchTab('proxy')">Proxy</button>
+          </div>
+
+          <!-- Overview Tab -->
+          <template x-if="tab === 'overview'">
+            <div>
+              <div class="status-grid">
+                <div class="status-item">
+                  <div class="status-label">Uptime</div>
+                  <div class="status-value" style="font-size: 14px;" x-text="status.uptime || 'N/A'"></div>
+                </div>
+                <div class="status-item">
+                  <div class="status-label">CPU Load</div>
+                  <div class="status-value mono" x-text="status.cpu_load || 'N/A'"></div>
+                </div>
+              </div>
+
+              <!-- Memory -->
+              <div style="margin-bottom: 16px;">
+                <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
+                  <span>Memory</span>
+                  <span x-text="(status.mem_used || '?') + ' / ' + (status.mem_total || '?') + ' (' + (status.mem_percent || '?') + ')'"></span>
+                </div>
+                <div class="progress-bar">
+                  <div class="progress-fill" :class="barClass(parsePercent(status.mem_percent))" :style="'width:' + parsePercent(status.mem_percent) + '%'"></div>
+                </div>
+              </div>
+
+              <!-- Disk -->
+              <div style="margin-bottom: 24px;">
+                <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
+                  <span>Disk</span>
+                  <span x-text="(status.disk_used || '?') + ' / ' + (status.disk_total || '?') + ' (' + (status.disk_percent || '?') + ')'"></span>
+                </div>
+                <div class="progress-bar">
+                  <div class="progress-fill" :class="barClass(parsePercent(status.disk_percent))" :style="'width:' + parsePercent(status.disk_percent) + '%'"></div>
+                </div>
+              </div>
+
+              <!-- Containers -->
+              <template x-if="status.containers && status.containers.length > 0">
+                <div>
+                  <h3 style="margin-bottom: 12px; font-size: 15px;">Containers</h3>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Image</th>
+                          <th>State</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="c in status.containers" :key="c.ID">
+                          <tr>
+                            <td style="font-family: var(--mono); font-size: 12px;" x-text="c.Name"></td>
+                            <td x-text="c.Image"></td>
+                            <td>
+                              <span class="status-dot" :class="c.State === 'running' ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
+                              <span x-text="c.State"></span>
+                            </td>
+                            <td x-text="c.Status"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+              <template x-if="!status.containers || status.containers.length === 0">
+                <div class="empty-state"><p>No containers running on this server.</p></div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Proxy Tab -->
+          <template x-if="tab === 'proxy'">
+            <div>
+              <div class="status-grid" style="margin-bottom: 24px;">
+                <div class="status-item">
+                  <div class="status-label">Caddy</div>
+                  <div class="status-value" style="display: flex; align-items: center; gap: 8px;">
+                    <span class="status-dot" :class="proxy && proxy.running ? 'running' : 'stopped'"></span>
+                    <span x-text="proxy && proxy.running ? 'Running' : 'Not running'"></span>
+                  </div>
+                </div>
+                <div class="status-item">
+                  <div class="status-label">Routes</div>
+                  <div class="status-value" x-text="proxy ? proxy.routes.length : 0"></div>
+                </div>
+              </div>
+
+              <template x-if="proxy && proxy.routes.length > 0">
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Domain</th>
+                        <th>Upstream</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="route in proxy.routes" :key="route.id">
+                        <tr>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="(route.domains || []).join(', ') || '-'"></td>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="(route.upstreams || []).join(', ') || '-'"></td>
+                          <td x-text="route.handler || '-'"></td>
+                          <td>
+                            <template x-if="route.maintenance">
+                              <span style="color: var(--yellow); font-weight: 500;">Maintenance</span>
+                            </template>
+                            <template x-if="!route.maintenance">
+                              <span style="color: var(--green);">Active</span>
+                            </template>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <template x-if="!proxy || proxy.routes.length === 0">
+                <div class="empty-state">
+                  <template x-if="proxy && proxy.running">
+                    <p>Caddy is running but no routes are configured. Deploy an app to add routes.</p>
+                  </template>
+                  <template x-if="!proxy || !proxy.running">
+                    <p>Caddy is not running. Run <code style="background: var(--bg-input); padding: 2px 6px; border-radius: 4px;">teploy setup</code> to install it.</p>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ Settings Page ═══ -->
+  <template x-if="$store.router.page === 'settings'">
+    <div x-data="settingsPage">
+      <div class="page-header">
+        <h1 class="page-title">Settings</h1>
+      </div>
+
+      <div class="tabs">
+        <button class="tab" :class="{ active: tab === 'servers' }" @click="tab = 'servers'">Servers</button>
+        <button class="tab" :class="{ active: tab === 'groups' }" @click="tab = 'groups'">Groups</button>
+        <button class="tab" :class="{ active: tab === 'notifications' }" @click="tab = 'notifications'">Notifications</button>
+        <button class="tab" :class="{ active: tab === 'registry' }" @click="tab = 'registry'">Registry</button>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <!-- Servers Tab -->
+      <template x-if="!loading && tab === 'servers'">
+        <div>
+          <div class="form-row" style="margin-bottom: 16px;">
+            <div class="form-group">
+              <label class="form-label">Name</label>
+              <input class="form-input" x-model="newServer.name" placeholder="prod">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Host</label>
+              <input class="form-input" x-model="newServer.host" placeholder="192.168.1.100">
+            </div>
+            <div class="form-group">
+              <label class="form-label">User</label>
+              <input class="form-input" x-model="newServer.user" placeholder="root">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Role</label>
+              <select class="form-input" x-model="newServer.role">
+                <option value="app">Standard</option>
+                <option value="lb">Load Balancer</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" @click="addServer()" >Add</button>
+          </div>
+
+          <template x-if="serverList().length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Host</th>
+                    <th>User</th>
+                    <th>Role</th>
+                    <th style="width: 80px;"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="s in serverList()" :key="s.name">
+                    <tr>
+                      <td x-text="s.name"></td>
+                      <td style="font-family: var(--mono); font-size: 12px;" x-text="s.host"></td>
+                      <td x-text="s.user || 'root'"></td>
+                      <td x-text="(s.role || 'app') === 'lb' ? 'Load Balancer' : 'Standard'"></td>
+                      <td>
+                        <button class="btn btn-sm btn-danger" @click="deleteServer(s.name)">Remove</button>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Groups Tab -->
+      <template x-if="!loading && tab === 'groups'">
+        <div>
+          <div class="form-row" style="margin-bottom: 16px;">
+            <div class="form-group">
+              <input class="form-input" x-model="newGroupName" placeholder="Group name">
+            </div>
+            <button class="btn btn-primary" @click="createGroup()" >Create</button>
+          </div>
+
+          <template x-if="groups && groups.length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Apps</th>
+                    <th style="width: 80px;"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="g in groups" :key="g.name">
+                    <tr>
+                      <td x-text="g.name"></td>
+                      <td x-text="(g.apps || []).length"></td>
+                      <td>
+                        <button class="btn btn-sm btn-danger" @click="deleteGroup(g.name)">Delete</button>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+
+          <template x-if="!groups || groups.length === 0">
+            <div class="empty-state"><p>No groups. Create one to organize your apps.</p></div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Notifications Tab -->
+      <template x-if="!loading && tab === 'notifications'">
+        <div>
+          <div class="form-group">
+            <label class="form-label">Webhook URL</label>
+            <input class="form-input" x-model="notifications.webhook_url" placeholder="https://hooks.slack.com/...">
+          </div>
+          <button class="btn btn-primary" @click="saveNotifications()">Save</button>
+        </div>
+      </template>
+
+      <!-- Registry Tab -->
+      <template x-if="!loading && tab === 'registry'">
+        <div>
+          <div class="form-row" style="margin-bottom: 16px;">
+            <div class="form-group">
+              <label class="form-label">Server</label>
+              <input class="form-input" x-model="newReg.server" placeholder="ghcr.io">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Username</label>
+              <input class="form-input" x-model="newReg.username" placeholder="username">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Password</label>
+              <input class="form-input" type="password" x-model="newReg.password" placeholder="token">
+            </div>
+            <button class="btn btn-primary" @click="addRegistry()" >Add</button>
+          </div>
+
+          <template x-if="registries && registries.length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Server</th>
+                    <th>Username</th>
+                    <th style="width: 80px;"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="r in registries" :key="r.server">
+                    <tr>
+                      <td x-text="r.server"></td>
+                      <td x-text="r.username"></td>
+                      <td>
+                        <button class="btn btn-sm btn-danger" @click="deleteRegistry(r.server)">Remove</button>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+
+          <template x-if="!registries || registries.length === 0">
+            <div class="empty-state"><p>No registries configured.</p></div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
+</div>
+
+<!-- Toast Container -->
+<div id="toast-container" class="toast-container"></div>
+
+</body>
+</html>
