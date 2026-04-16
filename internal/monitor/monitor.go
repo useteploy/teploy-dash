@@ -9,22 +9,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/useteploy/teploy-ui/internal/alert"
 	"github.com/useteploy/teploy-ui/internal/store"
 )
 
 // Runner manages uptime monitors and runs checks on their intervals.
 type Runner struct {
-	store   store.Store
-	client  *http.Client
-	timers  map[string]*time.Ticker
-	stopChs map[string]chan struct{}
-	mu      sync.Mutex
+	store    store.Store
+	alerter  *alert.Dispatcher
+	client   *http.Client
+	timers   map[string]*time.Ticker
+	stopChs  map[string]chan struct{}
+	lastStat map[string]string // last known status per monitor (for transition detection)
+	mu       sync.Mutex
 }
 
 // New creates a monitor runner.
 func New(st store.Store) *Runner {
 	return &Runner{
-		store: st,
+		store:    st,
+		lastStat: make(map[string]string),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -56,6 +60,13 @@ func (r *Runner) Start() {
 		}
 	}
 	log.Printf("[monitor] Started %d monitors", len(monitors))
+}
+
+// SetAlerter configures the alert dispatcher for state-change notifications.
+func (r *Runner) SetAlerter(d *alert.Dispatcher) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.alerter = d
 }
 
 // Stop stops all running monitors.
@@ -144,6 +155,23 @@ func (r *Runner) runCheck(m store.Monitor) {
 
 	if err := r.store.SaveCheck(result); err != nil {
 		log.Printf("[monitor] Failed to save check for %s: %v", m.ID, err)
+	}
+
+	// Fire alert on state transition (up->down or down->up).
+	r.mu.Lock()
+	prev := r.lastStat[m.ID]
+	r.lastStat[m.ID] = result.Status
+	alerter := r.alerter
+	r.mu.Unlock()
+
+	if alerter != nil && prev != "" && prev != result.Status {
+		alerter.Send(alert.Event{
+			MonitorID:   m.ID,
+			MonitorName: m.Name,
+			Status:      result.Status,
+			Message:     result.Message,
+			OccurredAt:  result.CheckedAt,
+		})
 	}
 }
 

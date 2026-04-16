@@ -392,10 +392,10 @@
           <template x-if="tab === 'logs'">
             <div x-data="logViewer" @start-logs.window="connect()">
               <div class="log-controls">
-                <select @change="switchProcess($event.target.value)">
-                  <option value="web">web</option>
-                  <option value="worker">worker</option>
-                </select>
+                <input type="text" class="process-input" :value="process" placeholder="web"
+                  @keydown.enter="switchProcess($event.target.value)"
+                  @change="switchProcess($event.target.value)"
+                  style="width: 100px; font-size: 12px;">
                 <select x-model="lineCount" @change="connect()">
                   <option value="50">50 lines</option>
                   <option value="100" selected>100 lines</option>

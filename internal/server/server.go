@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/useteploy/teploy-ui/internal/alert"
 	"github.com/useteploy/teploy-ui/internal/cli"
 	"github.com/useteploy/teploy-ui/internal/monitor"
 	"github.com/useteploy/teploy-ui/internal/remote"
@@ -968,11 +969,52 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func notificationsFilePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".teploy", "notifications.json")
+}
+
+// LoadNotificationsConfig reads alert configuration from ~/.teploy/notifications.json.
+func LoadNotificationsConfig() alert.Config {
+	return loadNotificationsConfig()
+}
+
+func loadNotificationsConfig() alert.Config {
+	raw, err := os.ReadFile(notificationsFilePath())
+	if err != nil {
+		return alert.Config{}
+	}
+	var cfg alert.Config
+	json.Unmarshal(raw, &cfg)
+	return cfg
+}
+
+func saveNotificationsConfig(cfg alert.Config) error {
+	path := notificationsFilePath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	raw, _ := json.MarshalIndent(cfg, "", "  ")
+	return os.WriteFile(path, raw, 0644)
+}
+
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
-		writeData(w, map[string]string{"webhook_url": ""})
+		cfg := loadNotificationsConfig()
+		writeData(w, cfg)
 	case "POST":
+		var cfg alert.Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			writeError(w, "invalid request body")
+			return
+		}
+		if err := saveNotificationsConfig(cfg); err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		// Update the monitor runner's alert dispatcher with the new config.
+		if s.monitor != nil {
+			s.monitor.SetAlerter(alert.New(cfg))
+		}
 		writeData(w, map[string]bool{"saved": true})
 	default:
 		http.Error(w, "method not allowed", 405)

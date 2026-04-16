@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 )
 
 // wsHandler upgrades the connection to WebSocket (RFC 6455, no external dep)
@@ -85,23 +84,4 @@ func writeWSTextFrame(conn net.Conn, rw *bufio.ReadWriter, msg string) {
 	rw.Write(header)
 	rw.Write(payload)
 	rw.Flush()
-}
-
-// stripAnsi removes ANSI escape sequences from docker log output.
-func stripAnsi(s string) string {
-	var b strings.Builder
-	i := 0
-	for i < len(s) {
-		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
-			i += 2
-			for i < len(s) && s[i] != 'm' {
-				i++
-			}
-			i++ // skip 'm'
-			continue
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
 }

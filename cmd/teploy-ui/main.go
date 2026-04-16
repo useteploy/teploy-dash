@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/useteploy/teploy-ui/internal/alert"
 	"github.com/useteploy/teploy-ui/internal/monitor"
 	"github.com/useteploy/teploy-ui/internal/server"
 	"github.com/useteploy/teploy-ui/internal/store"
@@ -49,6 +50,13 @@ func main() {
 		Monitor:        mon,
 		Store:          st,
 	})
+
+	// Load alert config and wire to monitors so state transitions fire notifications.
+	notifCfg := server.LoadNotificationsConfig()
+	if notifCfg.WebhookURL != "" || notifCfg.SMTPHost != "" {
+		mon.SetAlerter(alert.New(notifCfg))
+		log.Printf("Alerts configured")
+	}
 
 	// Start monitor checks
 	mon.Start()
