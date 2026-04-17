@@ -69,6 +69,25 @@ func (r *Runner) SetAlerter(d *alert.Dispatcher) {
 	r.alerter = d
 }
 
+// CheckNow runs a single check against the given monitor config without
+// saving the result or firing alerts. Used by the "test monitor" button
+// so users can verify configuration before enabling.
+func (r *Runner) CheckNow(m store.Monitor) store.CheckResult {
+	switch m.Type {
+	case "http":
+		return r.checkHTTP(m)
+	case "tcp", "ping":
+		return r.checkTCP(m)
+	default:
+		return store.CheckResult{
+			MonitorID: m.ID,
+			CheckedAt: time.Now(),
+			Status:    "down",
+			Message:   fmt.Sprintf("unknown monitor type: %s", m.Type),
+		}
+	}
+}
+
 // Stop stops all running monitors.
 func (r *Runner) Stop() {
 	r.mu.Lock()

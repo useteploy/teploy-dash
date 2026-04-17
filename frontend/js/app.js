@@ -98,6 +98,19 @@ document.addEventListener('alpine:init', () => {
     },
   });
 
+  // ── CLI Status Banner ──
+  Alpine.data('cliStatusBanner', () => ({
+    installed: true,
+    loading: true,
+    async init() {
+      try {
+        const status = await rawFetch.get('/api/cli/status');
+        this.installed = !!status?.installed;
+      } catch { this.installed = false; }
+      this.loading = false;
+    },
+  }));
+
   // ── Projects Page ──
   Alpine.data('projectsPage', () => ({
     apps: [],
@@ -220,6 +233,28 @@ document.addEventListener('alpine:init', () => {
         showToast(e.message, 'error');
       }
     },
+
+    async deleteProject(groupName, projectName) {
+      if (!confirm(`Delete project "${projectName}"? Apps inside remain in the group.`)) return;
+      try {
+        await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`);
+        showToast('Project deleted', 'success');
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    async unassignFromGroup(groupName, appName) {
+      if (!confirm(`Remove "${appName}" from group "${groupName}"?`)) return;
+      try {
+        await api.del(`/api/groups/${encodeURIComponent(groupName)}/apps/${encodeURIComponent(appName)}`);
+        showToast('App removed from group', 'success');
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
   }));
 
   // ── Project Detail Page ──
@@ -264,6 +299,28 @@ document.addEventListener('alpine:init', () => {
 
     openApp(app) {
       Alpine.store('router').navigate('app-detail', { name: app.name, server: app.server, fromProject: this.projectName, fromGroup: this.groupName });
+    },
+
+    async unassignFromProject(appName) {
+      if (!confirm(`Remove "${appName}" from project "${this.projectName}"?`)) return;
+      try {
+        await api.del(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}/apps/${encodeURIComponent(appName)}`);
+        showToast('App removed from project', 'success');
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    async deleteThisProject() {
+      if (!confirm(`Delete project "${this.projectName}"? Apps remain in the group.`)) return;
+      try {
+        await api.del(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}`);
+        showToast('Project deleted', 'success');
+        Alpine.store('router').navigate('projects');
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
     },
 
     openDeployForm() {
@@ -529,6 +586,8 @@ document.addEventListener('alpine:init', () => {
     loading: true,
     // Add server form
     newServer: { name: '', host: '', user: 'root', role: 'app' },
+    // Edit server form (null when not editing)
+    editingServer: null,
     // Add registry form
     newReg: { server: '', username: '', password: '' },
     // Add group form
@@ -606,6 +665,48 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    async renameGroup(oldName) {
+      const newName = prompt('New group name:', oldName);
+      if (!newName || newName === oldName) return;
+      try {
+        await api.put(`/api/groups/${encodeURIComponent(oldName)}`, { name: newName });
+        showToast('Group renamed', 'success');
+        await this.loadAll();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    editServer(name) {
+      const srv = this.servers[name] || {};
+      this.editingServer = {
+        originalName: name,
+        name,
+        host: srv.host || '',
+        user: srv.user || 'root',
+        role: srv.role || 'app',
+      };
+    },
+
+    cancelEdit() {
+      this.editingServer = null;
+    },
+
+    async saveEditServer() {
+      const e = this.editingServer;
+      if (!e || !e.name || !e.host) return;
+      try {
+        await api.put(`/api/config/servers/${encodeURIComponent(e.originalName)}`, {
+          name: e.name, host: e.host, user: e.user, role: e.role,
+        });
+        showToast('Server updated', 'success');
+        this.editingServer = null;
+        await this.loadAll();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    },
+
     async saveNotifications() {
       try {
         await api.post('/api/notifications', this.notifications);
@@ -639,6 +740,56 @@ document.addEventListener('alpine:init', () => {
     },
   }));
 
+  // ── Templates Page ──
+  Alpine.data('templatesPage', () => ({
+    templates: [],
+    serverList: [],
+    selected: null,
+    installing: false,
+    loading: true,
+    installForm: { domain: '', server: '', vars: {} },
+
+    async init() {
+      try {
+        const [tpls, servers] = await Promise.all([
+          api.get('/api/templates').catch(() => []),
+          api.get('/api/config/servers').catch(() => ({})),
+        ]);
+        this.templates = tpls || [];
+        this.serverList = Object.keys(servers || {});
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.loading = false;
+    },
+
+    selectTemplate(t) {
+      this.selected = t;
+      this.installForm = { domain: '', server: '', vars: {} };
+    },
+
+    async install() {
+      if (!this.installForm.domain || !this.installForm.server) {
+        showToast('Domain and server are required', 'error');
+        return;
+      }
+      this.installing = true;
+      try {
+        await api.post('/api/templates/install', {
+          template: this.selected.name,
+          domain: this.installForm.domain,
+          server: this.installForm.server,
+          vars: this.installForm.vars,
+        });
+        showToast(`Installed ${this.selected.name}`, 'success');
+        this.selected = null;
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.installing = false;
+    },
+  }));
+
   // ── Monitors Page ──
   Alpine.data('monitorsPage', () => ({
     monitors: [],
@@ -648,6 +799,9 @@ document.addEventListener('alpine:init', () => {
     loading: true,
     cliStatus: null,
     refreshInterval: null,
+    testing: false,
+    testResult: null,
+    editingId: null,
     newMonitor: {
       name: '',
       type: 'http',
@@ -694,7 +848,7 @@ document.addEventListener('alpine:init', () => {
     async createMonitor() {
       this.creating = true;
       try {
-        const id = crypto.randomUUID().replace(/-/g, '').slice(0, 21);
+        const id = this.editingId || crypto.randomUUID().replace(/-/g, '').slice(0, 21);
         const body = {
           id,
           name: this.newMonitor.name,
@@ -707,12 +861,17 @@ document.addEventListener('alpine:init', () => {
           method: 'GET',
         };
         await rawFetch.post('/api/monitors', body);
+        const wasEdit = !!this.editingId;
         this.showCreateDialog = false;
+        this.editingId = null;
         this.resetForm();
         await this.loadMonitors();
-        showToast('Monitor created', 'success');
+        if (wasEdit && this.selectedMonitor?.monitor?.id === id) {
+          await this.selectMonitor(id);
+        }
+        showToast(wasEdit ? 'Monitor updated' : 'Monitor created', 'success');
       } catch (e) {
-        showToast('Failed to create monitor', 'error');
+        showToast('Failed to save monitor', 'error');
       }
       this.creating = false;
     },
@@ -727,6 +886,46 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         showToast('Failed to delete monitor', 'error');
       }
+    },
+
+    async toggleEnabled(m) {
+      try {
+        const updated = { ...m, enabled: !m.enabled };
+        await rawFetch.post('/api/monitors', updated);
+        // Refresh detail and list
+        if (this.selectedMonitor?.monitor?.id === m.id) {
+          await this.selectMonitor(m.id);
+        }
+        await this.loadMonitors();
+        showToast(updated.enabled ? 'Monitor enabled' : 'Monitor disabled', 'success');
+      } catch (e) {
+        showToast('Failed to toggle monitor', 'error');
+      }
+    },
+
+    async testMonitor(id) {
+      this.testing = true;
+      this.testResult = null;
+      try {
+        this.testResult = await rawFetch.post('/api/monitors/' + id + '/test', {});
+      } catch (e) {
+        showToast('Test failed to run', 'error');
+      }
+      this.testing = false;
+    },
+
+    startEdit(m) {
+      // Pre-fill the create dialog with existing values; creation is an upsert.
+      this.editingId = m.id;
+      this.newMonitor = {
+        name: m.name,
+        type: m.type,
+        target: m.target,
+        interval: String(m.interval / 1000000),
+        timeout: String(m.timeout / 1000000),
+        expected_status: m.expected_status || 200,
+      };
+      this.showCreateDialog = true;
     },
 
     resetForm() {

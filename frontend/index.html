@@ -16,12 +16,22 @@
   <ul class="navbar-nav">
     <li><a href="#" :class="{ active: $store.router.page === 'projects' }" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'templates' }" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'settings' }" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
   <div class="navbar-spacer"></div>
   <button class="theme-toggle" @click="$store.theme.toggle()" x-text="$store.theme.mode === 'dark' ? '&#9790;' : '&#9788;'"></button>
 </nav>
+
+<!-- Global CLI-missing banner: shown when the teploy binary isn't on this host.
+     Most actions require it; this surfaces the problem up front. -->
+<div x-data="cliStatusBanner" x-init="init()" x-show="!loading && !installed" x-cloak
+     style="padding: 12px 20px; background: var(--obs-warning, #b45309); color: white; text-align: center;">
+  <strong>teploy CLI not installed on this host.</strong>
+  Most actions (deploy, rollback, logs, env) won't work.
+  <a href="https://teploy.dev" style="color: white; text-decoration: underline;">Install instructions</a>
+</div>
 
 <!-- Content -->
 <div class="content">
@@ -96,23 +106,29 @@
               <div class="card-grid">
                 <!-- Project cards -->
                 <template x-for="proj in group.projects" :key="'proj-' + proj.name">
-                  <div class="card card-project" @click="openProject(group.name, proj.name)">
+                  <div class="card card-project" style="position: relative;" @click="openProject(group.name, proj.name)">
                     <div class="card-title">
                       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink: 0;"><path d="M1.5 2A1.5 1.5 0 0 1 3 .5h4.586a1.5 1.5 0 0 1 1.06.44l.914.913a.5.5 0 0 0 .354.147H13A1.5 1.5 0 0 1 14.5 3.5v9A1.5 1.5 0 0 1 13 14H3A1.5 1.5 0 0 1 1.5 12.5V2Z" stroke="currentColor" stroke-width="1.2"/></svg>
                       <span x-text="proj.name"></span>
                     </div>
                     <div class="card-meta" x-text="(proj.resolvedApps || []).length + ' app' + ((proj.resolvedApps || []).length !== 1 ? 's' : '')"></div>
+                    <button title="Delete project"
+                      @click.stop="deleteProject(group.name, proj.name)"
+                      style="position: absolute; top: 8px; right: 8px; background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: 14px; opacity: 0.6;">&times;</button>
                   </div>
                 </template>
                 <!-- Direct app cards -->
                 <template x-for="app in group.directApps" :key="app.name">
-                  <div class="card" @click="openApp(app)">
+                  <div class="card" style="position: relative;" @click="openApp(app)">
                     <div class="card-title">
                       <span class="status-dot" :class="app.status"></span>
                       <span x-text="app.name"></span>
                     </div>
                     <div class="card-meta" x-text="app.server"></div>
                     <div class="card-hash" x-text="app.version || app.status"></div>
+                    <button x-show="!group.system" title="Remove from group"
+                      @click.stop="unassignFromGroup(group.name, app.name)"
+                      style="position: absolute; top: 8px; right: 8px; background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: 14px; opacity: 0.6;">&times;</button>
                   </div>
                 </template>
               </div>
@@ -149,7 +165,10 @@
               <h1 class="page-title" x-text="projectName"></h1>
               <div class="card-meta" x-text="groupName"></div>
             </div>
-            <button class="btn btn-primary" @click="openDeployForm()">+ Deploy</button>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn btn-primary" @click="openDeployForm()">+ Deploy</button>
+              <button class="btn btn-danger" @click="deleteThisProject()">Delete Project</button>
+            </div>
           </div>
 
           <!-- Inline deploy form -->
@@ -193,13 +212,16 @@
 
           <div class="card-grid">
             <template x-for="app in projectApps" :key="app.name">
-              <div class="card" @click="openApp(app)">
+              <div class="card" style="position: relative;" @click="openApp(app)">
                 <div class="card-title">
                   <span class="status-dot" :class="app.status"></span>
                   <span x-text="app.name"></span>
                 </div>
                 <div class="card-meta" x-text="app.server"></div>
                 <div class="card-hash" x-text="app.version || app.status"></div>
+                <button title="Remove from project"
+                  @click.stop="unassignFromProject(app.name)"
+                  style="position: absolute; top: 8px; right: 8px; background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: 14px; opacity: 0.6;">&times;</button>
               </div>
             </template>
           </div>
@@ -530,10 +552,28 @@
               <h1 class="page-title" x-text="selectedMonitor?.monitor?.name"></h1>
               <p class="subtitle" x-text="selectedMonitor?.monitor?.target"></p>
             </div>
-            <div class="header-actions">
+            <div class="header-actions" style="display: flex; gap: 8px; align-items: center;">
+              <label style="display: flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer;">
+                <input type="checkbox" :checked="selectedMonitor.monitor.enabled" @change="toggleEnabled(selectedMonitor.monitor)">
+                <span x-text="selectedMonitor.monitor.enabled ? 'Enabled' : 'Disabled'"></span>
+              </label>
+              <button class="btn" @click="testMonitor(selectedMonitor.monitor.id)" :disabled="testing">
+                <span x-text="testing ? 'Testing...' : 'Test Now'"></span>
+              </button>
+              <button class="btn" @click="startEdit(selectedMonitor.monitor)">Edit</button>
               <button class="btn btn-danger" @click="deleteMonitor(selectedMonitor.monitor.id)">Delete</button>
             </div>
           </div>
+
+          <!-- Test result flash -->
+          <template x-if="testResult">
+            <div class="test-result" :class="testResult.status === 'up' ? 'test-result-up' : 'test-result-down'" style="padding: 12px; border-radius: 6px; margin-bottom: 16px;">
+              <strong x-text="testResult.status === 'up' ? 'UP' : 'DOWN'"></strong>
+              <span x-show="testResult.status_code" x-text="' — HTTP ' + testResult.status_code"></span>
+              <span x-show="testResult.response_time" x-text="' — ' + testResult.response_time"></span>
+              <span x-show="testResult.message" x-text="' — ' + testResult.message"></span>
+            </div>
+          </template>
 
           <!-- Stats -->
           <template x-if="selectedMonitor?.stats">
@@ -827,6 +867,72 @@
     </div>
   </template>
 
+  <!-- ═══ Templates Page ═══ -->
+  <template x-if="$store.router.page === 'templates'">
+    <div x-data="templatesPage">
+      <div class="page-header">
+        <h1 class="page-title">Templates</h1>
+        <p class="subtitle">Install ready-made apps from the teploy catalog.</p>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && (templates || []).length === 0">
+        <div class="empty-state">
+          <p>No templates available. Check that teploy CLI is installed and `teploy template list` returns results.</p>
+        </div>
+      </template>
+
+      <template x-if="!loading && selected">
+        <div class="table-wrap" style="padding: 20px; margin-bottom: 16px;">
+          <h2 class="section-title" x-text="'Install ' + selected.name"></h2>
+          <p class="subtitle" x-text="selected.description"></p>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Domain</label>
+              <input class="form-input" x-model="installForm.domain" placeholder="app.example.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Server</label>
+              <select class="form-input" x-model="installForm.server">
+                <option value="">Select a server...</option>
+                <template x-for="s in serverList" :key="s">
+                  <option :value="s" x-text="s"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+
+          <template x-for="v in (selected.vars || [])" :key="v.key || v">
+            <div class="form-group">
+              <label class="form-label" x-text="v.label || v.key || v"></label>
+              <input class="form-input" :placeholder="v.default || ''" @input="installForm.vars[v.key || v] = $event.target.value">
+            </div>
+          </template>
+
+          <div style="display: flex; gap: 8px; margin-top: 12px;">
+            <button class="btn btn-primary" @click="install()" :disabled="installing" x-text="installing ? 'Installing...' : 'Install'"></button>
+            <button class="btn" @click="selected = null">Cancel</button>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="!loading && !selected && (templates || []).length > 0">
+        <div class="card-grid">
+          <template x-for="t in templates" :key="t.name">
+            <div class="card" @click="selectTemplate(t)">
+              <div class="card-title" x-text="t.name"></div>
+              <div class="card-meta" x-text="t.description"></div>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
   <!-- ═══ Settings Page ═══ -->
   <template x-if="$store.router.page === 'settings'">
     <div x-data="settingsPage">
@@ -890,13 +996,48 @@
                       <td style="font-family: var(--mono); font-size: 12px;" x-text="s.host"></td>
                       <td x-text="s.user || 'root'"></td>
                       <td x-text="(s.role || 'app') === 'lb' ? 'Load Balancer' : 'Standard'"></td>
-                      <td>
+                      <td style="display: flex; gap: 6px; justify-content: flex-end;">
+                        <button class="btn btn-sm" @click="editServer(s.name)">Edit</button>
                         <button class="btn btn-sm btn-danger" @click="deleteServer(s.name)">Remove</button>
                       </td>
                     </tr>
                   </template>
                 </tbody>
               </table>
+            </div>
+          </template>
+
+          <!-- Edit Server Form -->
+          <template x-if="editingServer">
+            <div class="table-wrap" style="padding: 20px; margin-top: 16px;">
+              <h3 class="section-title" style="font-size: 14px;">Edit <span x-text="editingServer.originalName"></span></h3>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">Name</label>
+                  <input class="form-input" x-model="editingServer.name">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Host</label>
+                  <input class="form-input" x-model="editingServer.host">
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">User</label>
+                  <input class="form-input" x-model="editingServer.user">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Role</label>
+                  <select class="form-input" x-model="editingServer.role">
+                    <option value="app">Standard</option>
+                    <option value="lb">Load Balancer</option>
+                  </select>
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: 12px;">
+                <button class="btn btn-primary" @click="saveEditServer()">Save</button>
+                <button class="btn" @click="cancelEdit()">Cancel</button>
+              </div>
             </div>
           </template>
         </div>
@@ -927,7 +1068,8 @@
                     <tr>
                       <td x-text="g.name"></td>
                       <td x-text="(g.apps || []).length"></td>
-                      <td>
+                      <td style="display: flex; gap: 6px; justify-content: flex-end;">
+                        <button class="btn btn-sm" @click="renameGroup(g.name)">Rename</button>
                         <button class="btn btn-sm btn-danger" @click="deleteGroup(g.name)">Delete</button>
                       </td>
                     </tr>
@@ -946,11 +1088,49 @@
       <!-- Notifications Tab -->
       <template x-if="!loading && tab === 'notifications'">
         <div>
+          <p class="subtitle" style="margin-bottom: 16px;">Alerts fire on monitor state changes (up→down, down→up). Configure at least one channel.</p>
+
+          <h3 class="section-title" style="font-size: 14px; margin-top: 8px;">Webhook</h3>
           <div class="form-group">
             <label class="form-label">Webhook URL</label>
-            <input class="form-input" x-model="notifications.webhook_url" placeholder="https://hooks.slack.com/...">
+            <input class="form-input" x-model="notifications.webhook_url" placeholder="https://hooks.slack.com/services/...">
           </div>
-          <button class="btn btn-primary" @click="saveNotifications()">Save</button>
+
+          <h3 class="section-title" style="font-size: 14px; margin-top: 24px;">Email (SMTP)</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">SMTP Host</label>
+              <input class="form-input" x-model="notifications.smtp_host" placeholder="smtp.gmail.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label">SMTP Port</label>
+              <input class="form-input" type="number" x-model.number="notifications.smtp_port" placeholder="587">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">SMTP User</label>
+              <input class="form-input" x-model="notifications.smtp_user" placeholder="alerts@example.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label">SMTP Password</label>
+              <input class="form-input" type="password" x-model="notifications.smtp_pass" placeholder="••••••••">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">From</label>
+              <input class="form-input" x-model="notifications.email_from" placeholder="alerts@example.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label">To</label>
+              <input class="form-input" x-model="notifications.email_to" placeholder="team@example.com">
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 8px; margin-top: 16px;">
+            <button class="btn btn-primary" @click="saveNotifications()">Save</button>
+          </div>
         </div>
       </template>
 

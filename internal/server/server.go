@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -26,6 +27,10 @@ type Config struct {
 	DeploymentsDir string
 	Monitor        *monitor.Runner
 	Store          store.Store
+	// AuthUser and AuthPass enable HTTP Basic Auth on all routes except
+	// /api/health. If both are empty, auth is disabled (dev mode).
+	AuthUser string
+	AuthPass string
 }
 
 // fleetCache caches aggregated multi-server app state to avoid SSH on every request.
@@ -82,7 +87,32 @@ func New(config Config) *Server {
 
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.mux)
+	handler := http.Handler(s.mux)
+	if s.config.AuthUser != "" || s.config.AuthPass != "" {
+		handler = basicAuthMiddleware(s.config.AuthUser, s.config.AuthPass, s.mux)
+	}
+	return http.ListenAndServe(addr, handler)
+}
+
+// basicAuthMiddleware protects all routes except /api/health with HTTP Basic
+// Auth. Health is exempt so liveness probes work without credentials.
+// Uses subtle.ConstantTimeCompare to prevent timing attacks.
+func basicAuthMiddleware(user, pass string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u, p, ok := r.BasicAuth()
+		if !ok ||
+			subtle.ConstantTimeCompare([]byte(u), []byte(user)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(p), []byte(pass)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="teploy-ui"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) routes() {
@@ -614,7 +644,7 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	if !cli.IsInstalled() {
-		writeData(w, []interface{}{})
+		writeError(w, "teploy CLI not installed on this host — install from https://teploy.dev")
 		return
 	}
 	result, err := cli.Run("server", "list", "--json")
@@ -787,38 +817,82 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/groups/")
-	parts := strings.SplitN(path, "/", 4)
+	parts := strings.Split(path, "/")
 	groupName := parts[0]
 
 	if len(parts) == 1 {
-		// DELETE /api/groups/{name}
-		if r.Method != "DELETE" {
-			http.Error(w, "method not allowed", 405)
-			return
-		}
 		data, err := loadGroupsFile()
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
-		filtered := make([]groupEntry, 0, len(data.Groups))
-		for _, g := range data.Groups {
-			if g.Name != groupName {
-				filtered = append(filtered, g)
+		switch r.Method {
+		case "DELETE":
+			// DELETE /api/groups/{name}
+			filtered := make([]groupEntry, 0, len(data.Groups))
+			for _, g := range data.Groups {
+				if g.Name != groupName {
+					filtered = append(filtered, g)
+				}
 			}
+			data.Groups = filtered
+			if err := saveGroupsFile(data); err != nil {
+				writeError(w, err.Error())
+				return
+			}
+			writeData(w, map[string]string{"status": "deleted"})
+		case "PUT":
+			// PUT /api/groups/{name} — rename
+			var body struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+				writeError(w, "name is required")
+				return
+			}
+			for i, g := range data.Groups {
+				if g.Name == groupName {
+					data.Groups[i].Name = body.Name
+					saveGroupsFile(data)
+					writeData(w, map[string]string{"status": "renamed"})
+					return
+				}
+			}
+			writeError(w, "group not found")
+		default:
+			http.Error(w, "method not allowed", 405)
 		}
-		data.Groups = filtered
-		if err := saveGroupsFile(data); err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		writeData(w, map[string]string{"status": "deleted"})
 		return
 	}
 
 	resource := parts[1]
 
 	switch {
+	case resource == "apps" && len(parts) == 3 && r.Method == "DELETE":
+		// DELETE /api/groups/{name}/apps/{app} — unassign app from group
+		appName := parts[2]
+		data, err := loadGroupsFile()
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		for i, g := range data.Groups {
+			if g.Name == groupName {
+				filtered := make([]string, 0, len(g.Apps))
+				for _, a := range g.Apps {
+					if a != appName {
+						filtered = append(filtered, a)
+					}
+				}
+				data.Groups[i].Apps = filtered
+				saveGroupsFile(data)
+				writeData(w, map[string]string{"status": "unassigned"})
+				return
+			}
+		}
+		writeError(w, "group not found")
+		return
+
 	case resource == "apps" && r.Method == "POST":
 		// POST /api/groups/{name}/apps — assign app to group
 		var body struct {
@@ -878,6 +952,91 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeError(w, "group not found")
+
+	case resource == "projects" && len(parts) == 3 && r.Method == "PUT":
+		// PUT /api/groups/{name}/projects/{project} — rename project
+		projectName := parts[2]
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+			writeError(w, "name is required")
+			return
+		}
+		data, err := loadGroupsFile()
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		for i, g := range data.Groups {
+			if g.Name == groupName {
+				for j, p := range g.Projects {
+					if p.Name == projectName {
+						data.Groups[i].Projects[j].Name = body.Name
+						saveGroupsFile(data)
+						writeData(w, map[string]string{"status": "renamed"})
+						return
+					}
+				}
+			}
+		}
+		writeError(w, "group or project not found")
+		return
+
+	case resource == "projects" && len(parts) == 3 && r.Method == "DELETE":
+		// DELETE /api/groups/{name}/projects/{project} — delete project
+		projectName := parts[2]
+		data, err := loadGroupsFile()
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		for i, g := range data.Groups {
+			if g.Name == groupName {
+				filtered := make([]projectEntry, 0, len(g.Projects))
+				for _, p := range g.Projects {
+					if p.Name != projectName {
+						filtered = append(filtered, p)
+					}
+				}
+				data.Groups[i].Projects = filtered
+				saveGroupsFile(data)
+				writeData(w, map[string]string{"status": "deleted"})
+				return
+			}
+		}
+		writeError(w, "group not found")
+		return
+
+	case resource == "projects" && len(parts) == 5 && parts[3] == "apps" && r.Method == "DELETE":
+		// DELETE /api/groups/{name}/projects/{project}/apps/{app} — unassign from project
+		projectName := parts[2]
+		appName := parts[4]
+		data, err := loadGroupsFile()
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		for i, g := range data.Groups {
+			if g.Name == groupName {
+				for j, p := range g.Projects {
+					if p.Name == projectName {
+						filtered := make([]string, 0, len(p.Apps))
+						for _, a := range p.Apps {
+							if a != appName {
+								filtered = append(filtered, a)
+							}
+						}
+						data.Groups[i].Projects[j].Apps = filtered
+						saveGroupsFile(data)
+						writeData(w, map[string]string{"status": "unassigned"})
+						return
+					}
+				}
+			}
+		}
+		writeError(w, "group or project not found")
+		return
 
 	case resource == "projects" && len(parts) >= 3:
 		projectName := parts[2]
@@ -957,14 +1116,41 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/config/servers/")
-	if r.Method == "DELETE" {
+	switch r.Method {
+	case "DELETE":
 		result, err := cli.ServerRemove(name)
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
 		writeData(w, result)
-	} else {
+	case "PUT":
+		// Edit by remove + re-add. CLI doesn't have a dedicated edit; this
+		// is the same approach the embedded UI takes via config.AddServer.
+		var body struct {
+			Name string `json:"name"`
+			Host string `json:"host"`
+			User string `json:"user"`
+			Role string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Host == "" {
+			writeError(w, "host is required")
+			return
+		}
+		newName := body.Name
+		if newName == "" {
+			newName = name
+		}
+		if _, err := cli.ServerRemove(name); err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		if _, err := cli.ServerAdd(newName, body.Host); err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeData(w, map[string]string{"status": "updated"})
+	default:
 		http.Error(w, "method not allowed", 405)
 	}
 }
@@ -1118,7 +1304,26 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := strings.TrimPrefix(r.URL.Path, "/api/monitors/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/monitors/")
+
+	// POST /api/monitors/{id}/test — run one check immediately, don't save.
+	if strings.HasSuffix(path, "/test") && r.Method == "POST" {
+		id := strings.TrimSuffix(path, "/test")
+		m, err := s.store.GetMonitor(id)
+		if err != nil {
+			http.Error(w, "monitor not found", 404)
+			return
+		}
+		if s.monitor == nil {
+			http.Error(w, "monitor runner not available", 500)
+			return
+		}
+		result := s.monitor.CheckNow(*m)
+		writeJSON(w, result)
+		return
+	}
+
+	id := path
 
 	switch r.Method {
 	case "GET":
