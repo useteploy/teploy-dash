@@ -1300,7 +1300,7 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
-		http.Error(w, "monitoring not available in lite mode", 404)
+		http.Error(w, "monitoring not configured (no store)", 404)
 		return
 	}
 
