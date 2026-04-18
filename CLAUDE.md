@@ -1,4 +1,4 @@
-# teploy-ui
+# teploy-dash
 
 Standalone self-hosted dashboard with uptime monitoring. Reads CLI state files, delegates actions to CLI, monitors endpoints independently.
 
@@ -17,7 +17,7 @@ Standalone self-hosted dashboard with uptime monitoring. Reads CLI state files, 
 ## Architecture
 
 ```
-teploy-ui (single Go binary)
+teploy-dash (single Go binary)
 |
 +-- Reads CLI state files (/deployments/*/state.json)
 |     Shows: apps, versions, deploy history, container status
@@ -31,7 +31,7 @@ teploy-ui (single Go binary)
 |     deploy, rollback, logs, env -> shells out to `teploy` binary
 |
 +-- Multi-server fleet (optional)
-      HTTP API pulls status from other teploy-ui instances
+      HTTP API pulls status from other teploy-dash instances
 ```
 
 ## Why No Desync
@@ -41,8 +41,8 @@ CLI writes state to `/deployments/{app}/state.json`. UI reads those files. Wheth
 ## Project Structure
 
 ```
-teploy-ui/
-├── cmd/teploy-ui/main.go       entrypoint, flags, start server
+teploy-dash/
+├── cmd/teploy-dash/main.go       entrypoint, flags, start server
 ├── internal/
 │   ├── server/server.go         HTTP server + API routes
 │   ├── state/reader.go          reads CLI state files (read-only)
@@ -62,11 +62,11 @@ teploy-ui/
 ## Build & Run
 
 ```bash
-make build                                          # builds ./teploy-ui
-./teploy-ui                                         # default: port 3456, reads /deployments/
-./teploy-ui --port 8080                             # custom port
-./teploy-ui --nucleus-url postgresql://localhost:5432/teploy_ui  # use Nucleus
-./teploy-ui --deployments /opt/deployments          # custom state dir
+make build                                          # builds ./teploy-dash
+./teploy-dash                                         # default: port 3456, reads /deployments/
+./teploy-dash --port 8080                             # custom port
+./teploy-dash --nucleus-url postgresql://localhost:5432/teploy_ui  # use Nucleus
+./teploy-dash --deployments /opt/deployments          # custom state dir
 ```
 
 ## API

@@ -13,7 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Client is a minimal SSH client for teploy-ui remote operations.
+// Client is a minimal SSH client for teploy-dash remote operations.
 // Read-only and simple ops only — no file uploads, no deploy logic.
 type Client struct {
 	client *ssh.Client

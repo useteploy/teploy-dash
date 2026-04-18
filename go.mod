@@ -1,4 +1,4 @@
-module github.com/useteploy/teploy-ui
+module github.com/useteploy/teploy-dash
 
 go 1.23
 

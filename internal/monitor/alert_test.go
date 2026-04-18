@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/useteploy/teploy-ui/internal/alert"
-	"github.com/useteploy/teploy-ui/internal/store"
+	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/store"
 )
 
 // mockStore is a minimal in-memory Store for testing check persistence

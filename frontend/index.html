@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>teploy ui</title>
+  <title>teploy dash</title>
   <link rel="stylesheet" href="/css/style.css">
   <script defer src="/js/alpine.js"></script>
   <script src="/js/app.js"></script>
@@ -12,7 +12,7 @@
 
 <!-- Navbar -->
 <nav class="navbar">
-  <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('projects')">teploy ui</a>
+  <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('projects')">teploy dash</a>
   <ul class="navbar-nav">
     <li><a href="#" :class="{ active: $store.router.page === 'projects' }" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>

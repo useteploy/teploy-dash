@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/useteploy/teploy-ui/internal/alert"
-	"github.com/useteploy/teploy-ui/internal/store"
+	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/store"
 )
 
 // Runner manages uptime monitors and runs checks on their intervals.
@@ -211,7 +211,7 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 		result.Message = err.Error()
 		return result
 	}
-	req.Header.Set("User-Agent", "teploy-ui/1.0")
+	req.Header.Set("User-Agent", "teploy-dash/1.0")
 
 	start := time.Now()
 	resp, err := r.client.Do(req)

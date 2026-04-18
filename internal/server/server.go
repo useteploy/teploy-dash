@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/useteploy/teploy-ui/internal/alert"
-	"github.com/useteploy/teploy-ui/internal/cli"
-	"github.com/useteploy/teploy-ui/internal/monitor"
-	"github.com/useteploy/teploy-ui/internal/remote"
-	"github.com/useteploy/teploy-ui/internal/state"
-	"github.com/useteploy/teploy-ui/internal/store"
+	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/monitor"
+	"github.com/useteploy/teploy-dash/internal/remote"
+	"github.com/useteploy/teploy-dash/internal/state"
+	"github.com/useteploy/teploy-dash/internal/store"
 )
 
 // Config holds server configuration.
@@ -61,7 +61,7 @@ func (fc *fleetCache) set(apps []remote.AppState) {
 	}
 }
 
-// Server is the teploy-ui HTTP server.
+// Server is the teploy-dash HTTP server.
 type Server struct {
 	mux     *http.ServeMux
 	config  Config
@@ -107,7 +107,7 @@ func basicAuthMiddleware(user, pass string, next http.Handler) http.Handler {
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(u), []byte(user)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(p), []byte(pass)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="teploy-ui"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="teploy-dash"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

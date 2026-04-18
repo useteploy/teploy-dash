@@ -9,16 +9,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/useteploy/teploy-ui/internal/alert"
-	"github.com/useteploy/teploy-ui/internal/monitor"
-	"github.com/useteploy/teploy-ui/internal/server"
-	"github.com/useteploy/teploy-ui/internal/store"
+	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/monitor"
+	"github.com/useteploy/teploy-dash/internal/server"
+	"github.com/useteploy/teploy-dash/internal/store"
 )
 
 func main() {
 	port := flag.Int("port", 3456, "HTTP server port")
 	host := flag.String("host", "0.0.0.0", "HTTP server host")
-	dataDir := flag.String("data", "/var/teploy-ui", "Data directory for monitor history")
+	dataDir := flag.String("data", "/var/teploy-dash", "Data directory for monitor history")
 	deploymentsDir := flag.String("deployments", "/deployments", "CLI state files directory")
 	nucleusURL := flag.String("nucleus-url", "", "Nucleus database URL (optional, uses JSONL files if not set)")
 	noAuth := flag.Bool("no-auth", false, "disable HTTP Basic Auth (DANGEROUS — local dev only)")
@@ -27,15 +27,15 @@ func main() {
 	// Auth: read credentials from env. Refuse to start without them unless
 	// --no-auth is set. This UI can stop/start/deploy apps, so exposing it
 	// unauthenticated on a network is a security risk.
-	authUser := os.Getenv("TEPLOY_UI_USER")
-	authPass := os.Getenv("TEPLOY_UI_PASSWORD")
+	authUser := os.Getenv("TEPLOY_DASH_USER")
+	authPass := os.Getenv("TEPLOY_DASH_PASSWORD")
 	if authUser == "" {
 		authUser = "admin"
 	}
 	if authPass == "" && !*noAuth {
-		fmt.Fprintln(os.Stderr, "ERROR: TEPLOY_UI_PASSWORD env var is required.")
+		fmt.Fprintln(os.Stderr, "ERROR: TEPLOY_DASH_PASSWORD env var is required.")
 		fmt.Fprintln(os.Stderr, "  Set it to a strong password, or pass --no-auth for local dev.")
-		fmt.Fprintln(os.Stderr, "  Example: TEPLOY_UI_PASSWORD=$(openssl rand -base64 24) ./teploy-ui")
+		fmt.Fprintln(os.Stderr, "  Example: TEPLOY_DASH_PASSWORD=$(openssl rand -base64 24) ./teploy-dash")
 		os.Exit(1)
 	}
 	if *noAuth {
@@ -104,7 +104,7 @@ func main() {
 	// Start server
 	go func() {
 		addr := fmt.Sprintf("%s:%d", *host, *port)
-		log.Printf("teploy-ui listening on http://%s", addr)
+		log.Printf("teploy-dash listening on http://%s", addr)
 		if err := srv.ListenAndServe(addr); err != nil {
 			log.Fatalf("Server error: %v", err)
 		}

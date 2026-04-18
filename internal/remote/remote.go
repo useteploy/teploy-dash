@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	uissh "github.com/useteploy/teploy-ui/internal/ssh"
+	uissh "github.com/useteploy/teploy-dash/internal/ssh"
 )
 
 const deploymentsDir = "/deployments"
