@@ -1,0 +1,29 @@
+                    GNU AFFERO GENERAL PUBLIC LICENSE
+                       Version 3, 19 November 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+teploy-dash is licensed under the GNU Affero General Public License, Version 3
+(AGPLv3).  You may copy, modify, and distribute teploy-dash under the terms
+of that license.
+
+Key terms:
+
+  * You may run teploy-dash for any purpose, including commercial.
+  * You may modify teploy-dash and redistribute your modifications, provided
+    you also distribute the modified source code under AGPLv3.
+  * If you run a modified version of teploy-dash as a network service (for
+    example, a SaaS product derived from teploy-dash), you must offer the
+    complete corresponding source code to every user of that network service.
+
+The complete license text is published at:
+
+    https://www.gnu.org/licenses/agpl-3.0.html
+
+A copy of AGPLv3 accompanies each tagged teploy-dash release.  If you
+redistribute teploy-dash, include a verbatim copy of the license text with
+the distribution.
+
+Copyright (c) 2026 Tyler (teploy-dash project).
