@@ -15,14 +15,14 @@ const deploymentsDir = "/deployments"
 
 // AppState is the state of a deployed app on a remote server.
 type AppState struct {
-	App         string    `json:"app"`
-	Server      string    `json:"server"`
-	Domain      string    `json:"domain"`
-	CurrentHash string    `json:"current_hash"`
-	PreviousHash string   `json:"previous_hash"`
-	CurrentPort int       `json:"port"`
-	Status      string    `json:"status"` // "running", "stopped", "unknown"
-	DeployedAt  time.Time `json:"deployed_at"`
+	App          string    `json:"app"`
+	Server       string    `json:"server"`
+	Domain       string    `json:"domain"`
+	CurrentHash  string    `json:"current_hash"`
+	PreviousHash string    `json:"previous_hash"`
+	CurrentPort  int       `json:"port"`
+	Status       string    `json:"status"` // "running", "stopped", "unknown"
+	DeployedAt   time.Time `json:"deployed_at"`
 }
 
 // ServerConn holds connection details for a server.

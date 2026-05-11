@@ -28,12 +28,12 @@ type Monitor struct {
 
 // UptimeStats represents uptime statistics for a monitor over a period.
 type UptimeStats struct {
-	MonitorID    string  `json:"monitor_id"`
-	TotalChecks  int     `json:"total_checks"`
-	UpChecks     int     `json:"up_checks"`
-	DownChecks   int     `json:"down_checks"`
-	UptimePercent float64 `json:"uptime_percent"`
-	AvgResponse  time.Duration `json:"avg_response"`
+	MonitorID     string        `json:"monitor_id"`
+	TotalChecks   int           `json:"total_checks"`
+	UpChecks      int           `json:"up_checks"`
+	DownChecks    int           `json:"down_checks"`
+	UptimePercent float64       `json:"uptime_percent"`
+	AvgResponse   time.Duration `json:"avg_response"`
 }
 
 // Store is the interface for persisting monitor configs and check results.

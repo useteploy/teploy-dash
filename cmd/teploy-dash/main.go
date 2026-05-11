@@ -1,8 +1,10 @@
 package main
 
 import (
+	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +16,12 @@ import (
 	"github.com/useteploy/teploy-dash/internal/server"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
+
+// frontendFS embeds the SPA shipped with the binary. Without this the
+// binary breaks the moment it runs outside the source tree.
+//
+//go:embed frontend
+var frontendFS embed.FS
 
 func main() {
 	port := flag.Int("port", 3456, "HTTP server port")
@@ -63,6 +71,13 @@ func main() {
 	// Initialize monitor runner
 	mon := monitor.New(st)
 
+	// Strip the embed prefix so the FS is rooted at the frontend/ contents
+	// (index.html sits at "/", css/ and js/ at the expected URL paths).
+	uiFS, err := fs.Sub(frontendFS, "frontend")
+	if err != nil {
+		log.Fatalf("embed frontend: %v", err)
+	}
+
 	// Initialize HTTP server
 	srv := server.New(server.Config{
 		Host:           *host,
@@ -72,6 +87,7 @@ func main() {
 		Store:          st,
 		AuthUser:       authUser,
 		AuthPass:       authPass,
+		Frontend:       uiFS,
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.

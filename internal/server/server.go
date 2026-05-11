@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +32,10 @@ type Config struct {
 	// /api/health. If both are empty, auth is disabled (dev mode).
 	AuthUser string
 	AuthPass string
+	// Frontend is the embedded SPA filesystem (rooted at the frontend/
+	// directory: contains index.html, css/, js/). Required — the binary is
+	// not portable without an embedded UI.
+	Frontend fs.FS
 }
 
 // fleetCache caches aggregated multi-server app state to avoid SSH on every request.
@@ -63,23 +68,25 @@ func (fc *fleetCache) set(apps []remote.AppState) {
 
 // Server is the teploy-dash HTTP server.
 type Server struct {
-	mux     *http.ServeMux
-	config  Config
-	state   *state.Reader
-	monitor *monitor.Runner
-	store   store.Store
-	fleet   *fleetCache
+	mux      *http.ServeMux
+	config   Config
+	state    *state.Reader
+	monitor  *monitor.Runner
+	store    store.Store
+	fleet    *fleetCache
+	frontend fs.FS
 }
 
 // New creates a new server.
 func New(config Config) *Server {
 	s := &Server{
-		mux:     http.NewServeMux(),
-		config:  config,
-		state:   state.NewReader(config.DeploymentsDir),
-		monitor: config.Monitor,
-		store:   config.Store,
-		fleet:   &fleetCache{ttl: 60 * time.Second},
+		mux:      http.NewServeMux(),
+		config:   config,
+		state:    state.NewReader(config.DeploymentsDir),
+		monitor:  config.Monitor,
+		store:    config.Store,
+		fleet:    &fleetCache{ttl: 60 * time.Second},
+		frontend: config.Frontend,
 	}
 	s.routes()
 	return s
@@ -174,12 +181,12 @@ func (s *Server) collectFleetApps(ctx context.Context) []remote.AppState {
 		var apps []remote.AppState
 		for _, a := range localApps {
 			apps = append(apps, remote.AppState{
-				App:         a.App,
-				Server:      "local",
-				Domain:      a.Domain,
-				CurrentHash: a.CurrentHash,
+				App:          a.App,
+				Server:       "local",
+				Domain:       a.Domain,
+				CurrentHash:  a.CurrentHash,
 				PreviousHash: a.PreviousHash,
-				Status:      a.Status,
+				Status:       a.Status,
 			})
 		}
 		return apps
@@ -1373,21 +1380,28 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // ── Frontend ──────────────────────────────────────────────────────────────
 
+// handleFrontend serves the embedded SPA. Unknown paths fall back to
+// index.html so client-side routing works.
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if path == "/" {
-		path = "/index.html"
+	if s.frontend == nil {
+		http.Error(w, "frontend not embedded", http.StatusInternalServerError)
+		return
 	}
 
-	filePath := "frontend" + path
-	data, err := os.ReadFile(filePath)
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		path = "index.html"
+	}
+
+	data, err := fs.ReadFile(s.frontend, path)
 	if err != nil {
-		data, err = os.ReadFile("frontend/index.html")
+		// SPA fallback: serve index.html for unknown routes.
+		data, err = fs.ReadFile(s.frontend, "index.html")
 		if err != nil {
-			http.Error(w, "not found", 404)
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		path = "/index.html"
+		path = "index.html"
 	}
 
 	switch {
@@ -1397,6 +1411,12 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	case strings.HasSuffix(path, ".js"):
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	case strings.HasSuffix(path, ".svg"):
+		w.Header().Set("Content-Type", "image/svg+xml")
+	case strings.HasSuffix(path, ".png"):
+		w.Header().Set("Content-Type", "image/png")
+	case strings.HasSuffix(path, ".ico"):
+		w.Header().Set("Content-Type", "image/x-icon")
 	}
 
 	w.Write(data)

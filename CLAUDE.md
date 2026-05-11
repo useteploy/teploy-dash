@@ -42,7 +42,9 @@ CLI writes state to `/deployments/{app}/state.json`. UI reads those files. Wheth
 
 ```
 teploy-dash/
-├── cmd/teploy-dash/main.go       entrypoint, flags, start server
+├── cmd/teploy-dash/
+│   ├── main.go                  entrypoint, flags, embed FS, start server
+│   └── frontend/                HTML/CSS/JS (Alpine.js) — embedded into binary
 ├── internal/
 │   ├── server/server.go         HTTP server + API routes
 │   ├── state/reader.go          reads CLI state files (read-only)
@@ -54,7 +56,6 @@ teploy-dash/
 │   ├── alert/alert.go           webhook + SMTP alert dispatcher
 │   ├── fleet/aggregator.go      pull status from other instances
 │   └── cli/delegate.go          shell out to teploy CLI
-├── frontend/                    HTML/CSS/JS (Alpine.js)
 ├── go.mod
 └── CLAUDE.md
 ```
