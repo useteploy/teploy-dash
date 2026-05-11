@@ -1,0 +1,26 @@
+# Built binary names (release tarballs are produced by goreleaser into ./dist)
+/teploy-dash
+/teploy-ui
+*.exe
+*.test
+
+# Goreleaser output
+/dist/
+
+# Local data
+/var/teploy-dash/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude Code worktrees + session state — should never be committed
+.claude/
