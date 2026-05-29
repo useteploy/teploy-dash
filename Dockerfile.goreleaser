@@ -1,0 +1,15 @@
+# Runtime-only image for goreleaser. The frontend is embedded in the binary
+# via go:embed, so the image just copies the goreleaser-built binary in — no
+# Go or Node toolchain at image-build time.
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata
+COPY teploy-dash /usr/local/bin/teploy-dash
+
+EXPOSE 3456
+VOLUME ["/var/teploy-dash"]
+
+# /api/health is exempt from basic auth, so the probe needs no credentials.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD wget -q --spider http://localhost:3456/api/health || exit 1
+
+ENTRYPOINT ["teploy-dash"]
