@@ -24,3 +24,7 @@ Thumbs.db
 
 # Claude Code worktrees + session state — should never be committed
 .claude/
+
+# Private notes — local only, never committed
+/_internal/
+/INTERNAL.md
