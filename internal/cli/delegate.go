@@ -59,10 +59,21 @@ func RunJSON(args ...string) (interface{}, error) {
 	return data, nil
 }
 
+// userArgs returns ["--user", user] when user is non-empty, else nil. The CLI
+// defaults to root when --user is absent, so this lets delegate calls target
+// non-root fleets while staying a no-op for root servers.
+func userArgs(user string) []string {
+	if user == "" {
+		return nil
+	}
+	return []string{"--user", user}
+}
+
 // Deploy triggers a deploy via the CLI.
 // Uses the ad-hoc deploy path (--app flag) so no teploy.yml is required.
-func Deploy(server, app, image, domain string, port int) (*Result, error) {
+func Deploy(server, user, app, image, domain string, port int) (*Result, error) {
 	args := []string{"deploy", server, "--app", app}
+	args = append(args, userArgs(user)...)
 	if image != "" {
 		args = append(args, "--image", image)
 	}
@@ -76,38 +87,45 @@ func Deploy(server, app, image, domain string, port int) (*Result, error) {
 }
 
 // Rollback triggers a rollback via the CLI.
-func Rollback(server, app string) (*Result, error) {
-	return Run("rollback", "--host", server, "--app", app)
+func Rollback(server, user, app string) (*Result, error) {
+	args := append([]string{"rollback", "--host", server, "--app", app}, userArgs(user)...)
+	return Run(args...)
 }
 
 // AppAction runs an app lifecycle action (start, stop, restart, lock, unlock).
-func AppAction(server, app, action string) (*Result, error) {
-	return Run(action, "--host", server, "--app", app)
+func AppAction(server, user, app, action string) (*Result, error) {
+	args := append([]string{action, "--host", server, "--app", app}, userArgs(user)...)
+	return Run(args...)
 }
 
 // Logs returns recent logs.
-func Logs(server, app string, lines int) (*Result, error) {
-	return Run("logs", "--host", server, "--app", app, "--tail", fmt.Sprintf("%d", lines))
+func Logs(server, user, app string, lines int) (*Result, error) {
+	args := append([]string{"logs", "--host", server, "--app", app, "--tail", fmt.Sprintf("%d", lines)}, userArgs(user)...)
+	return Run(args...)
 }
 
 // Status returns the current status.
-func Status(server, app string) (interface{}, error) {
-	return RunJSON("status", "--host", server, "--app", app)
+func Status(server, user, app string) (interface{}, error) {
+	args := append([]string{"status", "--host", server, "--app", app}, userArgs(user)...)
+	return RunJSON(args...)
 }
 
 // EnvList returns environment variables.
-func EnvList(server, app string) (interface{}, error) {
-	return RunJSON("env", "list", "--host", server, "--app", app, "--reveal")
+func EnvList(server, user, app string) (interface{}, error) {
+	args := append([]string{"env", "list", "--host", server, "--app", app, "--reveal"}, userArgs(user)...)
+	return RunJSON(args...)
 }
 
 // EnvSet sets an environment variable.
-func EnvSet(server, app, key, value string) (*Result, error) {
-	return Run("env", "set", fmt.Sprintf("%s=%s", key, value), "--host", server, "--app", app)
+func EnvSet(server, user, app, key, value string) (*Result, error) {
+	args := append([]string{"env", "set", fmt.Sprintf("%s=%s", key, value), "--host", server, "--app", app}, userArgs(user)...)
+	return Run(args...)
 }
 
 // EnvUnset removes an environment variable.
-func EnvUnset(server, app, key string) (*Result, error) {
-	return Run("env", "unset", key, "--host", server, "--app", app)
+func EnvUnset(server, user, app, key string) (*Result, error) {
+	args := append([]string{"env", "unset", key, "--host", server, "--app", app}, userArgs(user)...)
+	return Run(args...)
 }
 
 // ServerList returns configured servers.

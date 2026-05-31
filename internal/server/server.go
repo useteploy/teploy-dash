@@ -259,6 +259,29 @@ func (s *Server) lookupServer(name string) (remote.ServerConn, bool) {
 	return remote.ServerConn{}, false
 }
 
+// serverUser returns the configured SSH user for a server, or "" if unknown
+// (the CLI then defaults to root). Threading this into delegate calls lets
+// dash drive non-root fleets, not just root servers.
+func (s *Server) serverUser(name string) string {
+	if srv, ok := s.lookupServer(name); ok {
+		return srv.User
+	}
+	return ""
+}
+
+// cliAppRun runs an app-scoped teploy subcommand, appending --host/--app and
+// --user (when the server has a non-root user). `parts` is the subcommand plus
+// any leading flags/positionals; flag order doesn't matter to cobra so trailing
+// flags like --json can be passed in parts.
+func (s *Server) cliAppRun(serverName, appName string, parts ...string) (*cli.Result, error) {
+	args := append([]string{}, parts...)
+	args = append(args, "--host", serverName, "--app", appName)
+	if u := s.serverUser(serverName); u != "" {
+		args = append(args, "--user", u)
+	}
+	return cli.Run(args...)
+}
+
 // ── App Actions ──────────────────────────────────────────────────────────
 
 // handleAppAction handles /api/apps/{server}/{app}/{action}
@@ -313,7 +336,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.EnvList(serverName, appName)
+		result, err := cli.EnvList(serverName, s.serverUser(serverName), appName)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -330,7 +353,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			Value string `json:"value"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
-		result, err := cli.EnvSet(serverName, appName, body.Key, body.Value)
+		result, err := cli.EnvSet(serverName, s.serverUser(serverName), appName, body.Key, body.Value)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -343,7 +366,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		key := strings.TrimPrefix(action, "env/")
-		result, err := cli.EnvUnset(serverName, appName, key)
+		result, err := cli.EnvUnset(serverName, s.serverUser(serverName), appName, key)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -355,7 +378,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("log", "--host", serverName, "--app", appName, "--json")
+		result, err := s.cliAppRun(serverName, appName, "log", "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -367,7 +390,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("accessory", "list", "--host", serverName, "--app", appName, "--json")
+		result, err := s.cliAppRun(serverName, appName, "accessory", "list", "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -427,7 +450,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("rollback", "--host", serverName, "--app", appName)
+		result, err := s.cliAppRun(serverName, appName, "rollback")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -440,7 +463,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("lock", "--host", serverName, "--app", appName)
+		result, err := s.cliAppRun(serverName, appName, "lock")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -452,7 +475,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("unlock", "--host", serverName, "--app", appName)
+		result, err := s.cliAppRun(serverName, appName, "unlock")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -464,7 +487,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("maintenance", "on", "--host", serverName, "--app", appName)
+		result, err := s.cliAppRun(serverName, appName, "maintenance", "on")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -476,7 +499,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("maintenance", "off", "--host", serverName, "--app", appName)
+		result, err := s.cliAppRun(serverName, appName, "maintenance", "off")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -710,7 +733,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&body)
 
-	result, err := cli.Deploy(body.Server, body.App, body.Image, body.Domain, body.Port)
+	result, err := cli.Deploy(body.Server, s.serverUser(body.Server), body.App, body.Image, body.Domain, body.Port)
 	if err != nil {
 		writeError(w, err.Error())
 		return
