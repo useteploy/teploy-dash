@@ -22,11 +22,13 @@ One binary. ~17MB. Default port 3456.
 brew install useteploy/tap/teploy-dash
 ```
 
-### Scoop (Windows)
+### Docker (GHCR, multi-arch)
 
 ```bash
-scoop bucket add useteploy https://github.com/useteploy/scoop-bucket
-scoop install teploy-dash
+docker run -d -p 3456:3456 \
+  -e TEPLOY_DASH_PASSWORD=$(openssl rand -base64 24) \
+  -v /deployments:/deployments \
+  ghcr.io/useteploy/teploy-dash:latest
 ```
 
 ### Install script
@@ -82,8 +84,8 @@ teploy-dash --no-auth                                   # local dev only
   don't speak WS).
 
 ### Uptime monitoring
-- HTTP and TCP checks with per-monitor interval, timeout, expected
-  status code, expected body substring.
+- HTTP, TCP, and ping checks with per-monitor interval, timeout,
+  expected status code, expected body substring (HTTP).
 - 24-hour stats panel (uptime %, p50 / p95 latency, last incident).
 - Storage: Nucleus over pgwire (preferred) or rolling JSONL files
   (fallback). Daily cleanup for the file store keeps 30 days of checks.

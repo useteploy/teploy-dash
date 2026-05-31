@@ -42,6 +42,11 @@ changelog:
       - '^chore:'
       - '^test:'
 
+# NOTE (2026-05-30): goreleaser 2.x flags `brews:` as deprecated but does not
+# yet ship a 1:1 replacement (homebrew_casks rejects `install:`; no
+# homebrew_formulae key exists). Leaving as-is until goreleaser publishes a
+# clean migration target; release path still works (deprecation, not error).
+# Same situation in useteploy/teploy-cli/.goreleaser.yml.
 brews:
   - name: teploy-dash
     repository:
@@ -58,6 +63,12 @@ brews:
 
 # Docker / GHCR multi-arch images. dash embeds its frontend via go:embed, so
 # the goreleaser-built binary is self-contained — the image just copies it in.
+#
+# NOTE (2026-05-30): goreleaser 2.x flags `dockers:` + `docker_manifests:` as
+# being phased out in favor of `dockers_v2:`. The v2 schema is incompatible
+# (different field set — no `use`, `image_templates`, `build_flag_templates`,
+# `goos`, `goarch`) so it's a full rewrite, not a rename. Deferred until v2
+# stabilizes; current config still works (deprecation, not error).
 dockers:
   - id: teploy-dash-amd64
     goos: linux

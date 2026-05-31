@@ -1,6 +1,6 @@
 # teploy-dash
 
-Standalone self-hosted dashboard with uptime monitoring. Reads CLI state files, delegates actions to CLI, monitors endpoints independently.
+Self-hosted dashboard for the Teploy CLI plus uptime monitoring. One static Go binary, embedded SPA. See README.md for user-facing docs.
 
 ## Quick Reference
 
@@ -8,10 +8,12 @@ Standalone self-hosted dashboard with uptime monitoring. Reads CLI state files, 
 |------|---------|
 | **Type** | Standalone dashboard + uptime monitoring |
 | **Stack** | Go, vanilla HTML/CSS/JS (Alpine.js), Nucleus or JSONL |
-| **State** | Reads CLI state files at `/deployments/` |
-| **Actions** | Shells out to `teploy` CLI binary |
-| **Monitoring** | HTTP/TCP/ping checks with configurable intervals |
-| **Storage** | Nucleus (preferred) or JSONL files (fallback) |
+| **State** | Reads CLI state files from `/deployments/{app}/state` |
+| **Actions** | Shells out to `teploy` CLI binary (delegate model) |
+| **Multi-server** | SSH-polls each server in CLI's servers.yml (60s fleet cache); NOT a peer-pull from other teploy-dash instances |
+| **Monitoring** | HTTP / TCP / ping checks with configurable intervals |
+| **Storage** | Nucleus (pgwire, preferred) or JSONL files (fallback) |
+| **Auth** | HTTP Basic Auth (`subtle.ConstantTimeCompare`); refuses to start without `TEPLOY_DASH_PASSWORD` unless `--no-auth` |
 | **Port** | 3456 (default) |
 
 ## Architecture
@@ -19,24 +21,26 @@ Standalone self-hosted dashboard with uptime monitoring. Reads CLI state files, 
 ```
 teploy-dash (single Go binary)
 |
-+-- Reads CLI state files (/deployments/*/state.json)
++-- Reads CLI state files (/deployments/{app}/state) over SSH per server
 |     Shows: apps, versions, deploy history, container status
+|     60s fleet cache so the page doesn't SSH on every refresh
 |
 +-- Uptime monitoring (Nucleus or JSONL)
-|     HTTP/TCP/ping checks on configurable intervals
+|     HTTP / TCP / ping checks on configurable intervals
 |     Status history, incident tracking
-|     Alerting (webhook, SMTP)
+|     Webhook + SMTP alerts on state transitions
 |
-+-- Delegates actions to CLI
-|     deploy, rollback, logs, env -> shells out to `teploy` binary
++-- Delegates actions to CLI (deploy, rollback, env, etc.)
+|     shells out to `teploy` binary; the CLI stays the source of truth
 |
-+-- Multi-server fleet (optional)
-      HTTP API pulls status from other teploy-dash instances
++-- Multi-server fleet view
+      SSH-polls every server in CLI's servers.yml
+      (NOT peer-pull between teploy-dash instances)
 ```
 
 ## Why No Desync
 
-CLI writes state to `/deployments/{app}/state.json`. UI reads those files. Whether you deploy via CLI, UI button, or webhook — same state files. One source of truth. UI never writes deployment state itself.
+CLI writes state to `/deployments/{app}/state`. Dash reads those files (read-only) and shells out to the CLI for every action. Whether you deploy from terminal, UI button, or CI webhook — same state files. UI never writes deployment state itself.
 
 ## Project Structure
 
@@ -44,18 +48,26 @@ CLI writes state to `/deployments/{app}/state.json`. UI reads those files. Wheth
 teploy-dash/
 ├── cmd/teploy-dash/
 │   ├── main.go                  entrypoint, flags, embed FS, start server
-│   └── frontend/                HTML/CSS/JS (Alpine.js) — embedded into binary
+│   └── frontend/                HTML/CSS/JS (Alpine.js) — embedded via //go:embed
 ├── internal/
-│   ├── server/server.go         HTTP server + API routes
-│   ├── state/reader.go          reads CLI state files (read-only)
-│   ├── monitor/monitor.go       uptime check runner (HTTP/TCP/ping)
+│   ├── server/
+│   │   ├── server.go            HTTP server, auth middleware, all API routes,
+│   │   │                        fleet cache (multi-server aggregator lives here,
+│   │   │                        not in a separate fleet/ package)
+│   │   └── ws.go                WebSocket log streamer
+│   ├── state/reader.go          parses CLI state files
+│   ├── monitor/monitor.go       HTTP / TCP / ping check runner
 │   ├── store/
 │   │   ├── store.go             Store interface
 │   │   ├── nucleus.go           Nucleus implementation (pgwire)
 │   │   └── file.go              JSONL file fallback
 │   ├── alert/alert.go           webhook + SMTP alert dispatcher
-│   ├── fleet/aggregator.go      pull status from other instances
-│   └── cli/delegate.go          shell out to teploy CLI
+│   ├── remote/remote.go         SSH-based fleet querying (ListApps per server)
+│   ├── ssh/client.go            SSH client wrapper used by remote/
+│   └── cli/delegate.go          shells out to `teploy` CLI
+├── scripts/install.sh           POSIX installer with optional systemd unit
+├── Dockerfile.goreleaser        runtime image used by goreleaser dockers block
+├── .goreleaser.yaml             linux+darwin binaries + GHCR multi-arch
 ├── go.mod
 └── CLAUDE.md
 ```
@@ -63,34 +75,33 @@ teploy-dash/
 ## Build & Run
 
 ```bash
-make build                                          # builds ./teploy-dash
-./teploy-dash                                         # default: port 3456, reads /deployments/
-./teploy-dash --port 8080                             # custom port
-./teploy-dash --nucleus-url postgresql://localhost:5432/teploy_ui  # use Nucleus
-./teploy-dash --deployments /opt/deployments          # custom state dir
+make build                                     # builds ./teploy-dash
+./teploy-dash                                  # default: port 3456, reads /deployments/
+./teploy-dash --port 8080                      # custom port
+./teploy-dash --nucleus-url postgresql://localhost:5432/teploy_dash  # use Nucleus
+./teploy-dash --deployments /opt/deployments   # custom state dir
+./teploy-dash --no-auth                        # local dev only
 ```
+
+`TEPLOY_DASH_PASSWORD` is required unless `--no-auth` is set.
 
 ## API
 
-| Endpoint | Method | What |
-|----------|--------|------|
-| `/api/apps` | GET | list deployed apps (from CLI state) |
-| `/api/apps/{name}` | GET | get app details |
-| `/api/monitors` | GET | list uptime monitors with 24h stats |
-| `/api/monitors` | POST | create/update a monitor |
-| `/api/monitors/{id}` | GET | monitor details + check history |
-| `/api/monitors/{id}` | DELETE | delete a monitor |
-| `/api/cli/status` | GET | CLI installed + version |
-| `/api/cli/deploy` | POST | trigger deploy via CLI |
-| `/api/cli/rollback` | POST | trigger rollback via CLI |
-| `/api/health` | GET | health check |
+Full route list at README.md "API" section. Routes are registered in `internal/server/server.go` via `mux.HandleFunc`. All non-`/api/health` routes go through `basicAuthMiddleware` when auth is configured.
 
 ## Key Decisions
 
 | Decision | Choice | Why |
 |----------|--------|-----|
-| State reading | Read CLI files directly | One source of truth, no desync |
-| Actions | Shell out to CLI | CLI is the engine, UI is the dashboard |
-| Storage | Nucleus with JSONL fallback | Dogfood Nucleus, graceful degradation |
-| Frontend | Vanilla + Alpine.js | No build step, same pattern as CLI embedded UI |
-| Multi-server | HTTP pull from other instances | No SSH needed, simple |
+| State reading | Read CLI files directly via SSH | One source of truth, no desync |
+| Actions | Shell out to CLI | CLI is the engine, dash is the dashboard |
+| Storage | Nucleus with JSONL fallback | Dogfood Nucleus; graceful degradation if Nucleus down |
+| Frontend | Vanilla + Alpine.js | No build step, same pattern as CLI's embedded UI |
+| Multi-server | SSH to each server per fleet refresh | No agent on remote needed; cache for 60s |
+| Auth | HTTP Basic with constant-time compare | Simple, no session store; refuses to start unauthenticated by default |
+
+## Where to find more
+
+- **User-facing docs:** README.md (install, run, features, API, flags, env vars).
+- **Cross-session context for Claude:** memory at `~/.claude/projects/.../memory/`. Start with `deployment_system_overview.md` for the broader Teploy ecosystem.
+- **Private notes (gitignored):** `_internal/` at repo root (per [[internal_notes_convention]]).
