@@ -514,13 +514,25 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			}
 			accParts := strings.Split(strings.TrimPrefix(action, "accessories/"), "/")
 			if len(accParts) == 2 {
-				result, err := cli.Run("accessory", accParts[1], accParts[0], "--host", serverName)
-				if err != nil {
-					writeError(w, err.Error())
+				// accParts = [name, subcommand] e.g. ["postgres", "stop"].
+				accName, sub := accParts[0], accParts[1]
+				switch sub {
+				case "stop", "start", "logs":
+					// Address {app}-{accessory} containers by name — resolvable
+					// from server state via --app/--user.
+					result, err := s.cliAppRun(serverName, appName, "accessory", sub, accName)
+					if err != nil {
+						writeError(w, err.Error())
+						return
+					}
+					writeData(w, result)
+					return
+				default:
+					// upgrade/backup/restore need accessory image config from
+					// teploy.yml, which dash doesn't have. Reject clearly.
+					writeError(w, "accessory "+sub+" must be run from the app directory (needs teploy.yml); only stop/start/logs are available from the dashboard")
 					return
 				}
-				writeData(w, result)
-				return
 			}
 		}
 		writeError(w, "unknown action: "+action)
