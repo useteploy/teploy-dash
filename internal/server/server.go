@@ -678,7 +678,8 @@ func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "status", "proxy":
-		result, err := cli.Run("status", "--host", serverName, "--app", appName, "--json")
+		// Server-level status (no specific app in scope here).
+		result, err := cli.Run("status", "--host", serverName, "--json")
 		if err != nil {
 			writeData(w, nil)
 			return
