@@ -2,6 +2,29 @@
 
 All notable changes to teploy-dash are recorded here.
 
+## [Unreleased]
+
+### Fixed
+- `internal/state` was reading `state.json` with JSON parsing, but the teploy CLI writes `state` (no extension) in key=value format. The mismatch silently returned an empty app list from the local-state fallback path in `server.collectFleetApps` (taken when no servers are configured). Rewritten to read the actual filename + format. Includes table-test coverage for the parser + ListApps directory walk.
+
+### Docs
+- README: removed stale Scoop install section (Windows + scoops were dropped from goreleaser in v0.1.1 — the install command was broken). Replaced with Docker / GHCR multi-arch instructions for the image we DO publish.
+- README: monitor section now mentions ping (in addition to HTTP / TCP) — matches what `internal/monitor/monitor.go` actually supports.
+- CLAUDE.md: corrected project structure (fleet aggregator lives in `internal/server/server.go`, not in a separate `internal/fleet/aggregator.go` that doesn't exist); corrected multi-server description (dash SSH-polls each server in CLI's servers.yml, NOT peer-pull between teploy-dash instances).
+- `.goreleaser.yaml`: annotated the goreleaser 2.x deprecations we can't cleanly migrate yet (`brews:`, `dockers:` / `docker_manifests:` → `dockers_v2:`).
+
+### Chore
+- `go mod tidy` added missing `golang.org/x/sys v0.28.0 // indirect`.
+- New: `/_internal/` and `/INTERNAL.md` gitignored at repo root for private notes (per the cross-repo `internal_notes_convention`).
+
+## v0.1.1 — 2026-05-26
+
+### Added
+- Multi-arch Docker images on GHCR: `ghcr.io/useteploy/teploy-dash:{version,latest}` (linux/amd64 + linux/arm64), built via `Dockerfile.goreleaser` + `docker_manifests`. Binary embeds the SPA, so the runtime image is minimal.
+
+### Removed
+- Windows builds + Scoop bucket entry. teploy-dash is server-shaped tooling; Windows users were a small slice and the Scoop manifest was a maintenance tax. Linux + macOS only going forward.
+
 ## v0.1.0 — 2026-05-10
 
 Initial public release. Ships as a single static Go binary with the
