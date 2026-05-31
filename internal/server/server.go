@@ -355,7 +355,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("log", "--host", serverName, "--json")
+		result, err := cli.Run("log", "--host", serverName, "--app", appName, "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -367,7 +367,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("accessory", "list", "--host", serverName, "--json")
+		result, err := cli.Run("accessory", "list", "--host", serverName, "--app", appName, "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -440,7 +440,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("lock", "--host", serverName)
+		result, err := cli.Run("lock", "--host", serverName, "--app", appName)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -452,7 +452,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("unlock", "--host", serverName)
+		result, err := cli.Run("unlock", "--host", serverName, "--app", appName)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -464,7 +464,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("maintenance", "on", "--host", serverName)
+		result, err := cli.Run("maintenance", "on", "--host", serverName, "--app", appName)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -476,7 +476,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.Run("maintenance", "off", "--host", serverName)
+		result, err := cli.Run("maintenance", "off", "--host", serverName, "--app", appName)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -678,7 +678,7 @@ func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "status", "proxy":
-		result, err := cli.Run("status", "--host", serverName, "--json")
+		result, err := cli.Run("status", "--host", serverName, "--app", appName, "--json")
 		if err != nil {
 			writeData(w, nil)
 			return

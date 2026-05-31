@@ -5,6 +5,7 @@ All notable changes to teploy-dash are recorded here.
 ## [Unreleased]
 
 ### Fixed
+- App actions (lock, unlock, maintenance on/off, status, deploy log, accessory list) and the env editor now pass `--app <name>` to the `teploy` CLI. Previously the delegate wrappers and the direct `cli.Run` calls in the server passed only `--host`, so the CLI fell back to loading a `teploy.yml` from its working directory — which dash doesn't have — and the action either failed or targeted the wrong app. Requires teploy-cli ≥ the build that added `--app` to these commands. (The `env` wrappers also gained `--app`; the `logs` wrapper now uses the correct `--tail` flag instead of the nonexistent `--lines`.)
 - `internal/state` was reading `state.json` with JSON parsing, but the teploy CLI writes `state` (no extension) in key=value format. The mismatch silently returned an empty app list from the local-state fallback path in `server.collectFleetApps` (taken when no servers are configured). Rewritten to read the actual filename + format. Includes table-test coverage for the parser + ListApps directory walk.
 
 ### Docs

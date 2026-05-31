@@ -77,37 +77,37 @@ func Deploy(server, app, image, domain string, port int) (*Result, error) {
 
 // Rollback triggers a rollback via the CLI.
 func Rollback(server, app string) (*Result, error) {
-	return Run("rollback", "--host", server)
+	return Run("rollback", "--host", server, "--app", app)
 }
 
 // AppAction runs an app lifecycle action (start, stop, restart, lock, unlock).
 func AppAction(server, app, action string) (*Result, error) {
-	return Run(action, "--host", server)
+	return Run(action, "--host", server, "--app", app)
 }
 
 // Logs returns recent logs.
 func Logs(server, app string, lines int) (*Result, error) {
-	return Run("logs", "--host", server, "--lines", fmt.Sprintf("%d", lines))
+	return Run("logs", "--host", server, "--app", app, "--tail", fmt.Sprintf("%d", lines))
 }
 
 // Status returns the current status.
 func Status(server, app string) (interface{}, error) {
-	return RunJSON("status", "--host", server)
+	return RunJSON("status", "--host", server, "--app", app)
 }
 
 // EnvList returns environment variables.
 func EnvList(server, app string) (interface{}, error) {
-	return RunJSON("env", "list", "--host", server, "--reveal")
+	return RunJSON("env", "list", "--host", server, "--app", app, "--reveal")
 }
 
 // EnvSet sets an environment variable.
 func EnvSet(server, app, key, value string) (*Result, error) {
-	return Run("env", "set", fmt.Sprintf("%s=%s", key, value), "--host", server)
+	return Run("env", "set", fmt.Sprintf("%s=%s", key, value), "--host", server, "--app", app)
 }
 
 // EnvUnset removes an environment variable.
 func EnvUnset(server, app, key string) (*Result, error) {
-	return Run("env", "unset", key, "--host", server)
+	return Run("env", "unset", key, "--host", server, "--app", app)
 }
 
 // ServerList returns configured servers.
