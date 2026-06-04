@@ -100,7 +100,7 @@ func main() {
 	// Start monitor checks
 	mon.Start()
 
-	// Start daily cleanup for file store (removes checks older than 30 days)
+	// Start daily cleanup for file store (removes checks older than store.RetentionDays)
 	var cleanupTicker *time.Ticker
 	if fileStore != nil {
 		cleanupTicker = time.NewTicker(24 * time.Hour)

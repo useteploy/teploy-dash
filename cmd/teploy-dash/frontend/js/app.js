@@ -946,6 +946,14 @@ document.addEventListener('alpine:init', () => {
       return (ms / 1000) + 's';
     },
 
+    // Response times come from the API as Go time.Duration (nanoseconds); the
+    // UI shows them in ms, so divide by 1e6 (they were previously shown raw,
+    // i.e. ~1e6x too large).
+    fmtMs(ns) {
+      if (ns === null || ns === undefined || ns === '') return '--';
+      return Math.round(ns / 1000000) + 'ms';
+    },
+
     formatDate(d) {
       return new Date(d).toLocaleString();
     },

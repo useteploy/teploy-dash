@@ -520,7 +520,7 @@
                   <div class="monitor-target" x-text="m.target"></div>
                   <div class="monitor-meta">
                     <span x-text="'Every ' + formatInterval(m.interval)"></span>
-                    <span x-show="m.stats" x-text="m.stats ? 'Avg ' + m.stats.avg_response + 'ms' : ''"></span>
+                    <span x-show="m.stats" x-text="m.stats ? 'Avg ' + fmtMs(m.stats.avg_response) : ''"></span>
                   </div>
                 </div>
               </template>
@@ -570,7 +570,7 @@
             <div class="test-result" :class="testResult.status === 'up' ? 'test-result-up' : 'test-result-down'" style="padding: 12px; border-radius: 6px; margin-bottom: 16px;">
               <strong x-text="testResult.status === 'up' ? 'UP' : 'DOWN'"></strong>
               <span x-show="testResult.status_code" x-text="' — HTTP ' + testResult.status_code"></span>
-              <span x-show="testResult.response_time" x-text="' — ' + testResult.response_time"></span>
+              <span x-show="testResult.response_time" x-text="' — ' + fmtMs(testResult.response_time)"></span>
               <span x-show="testResult.message" x-text="' — ' + testResult.message"></span>
             </div>
           </template>
@@ -587,7 +587,7 @@
                 <div class="stat-label">Total Checks</div>
               </div>
               <div class="stat-card">
-                <div class="stat-value" x-text="selectedMonitor.stats.avg_response || '--'"></div>
+                <div class="stat-value" x-text="fmtMs(selectedMonitor.stats.avg_response)"></div>
                 <div class="stat-label">Avg Response</div>
               </div>
               <div class="stat-card">
@@ -606,7 +606,7 @@
                   <span class="dot" :class="check.status === 'up' ? 'green' : 'red'"></span>
                   <span class="check-status" x-text="check.status"></span>
                   <span class="check-code" x-show="check.status_code" x-text="check.status_code"></span>
-                  <span class="check-time" x-text="check.response_time"></span>
+                  <span class="check-time" x-text="fmtMs(check.response_time)"></span>
                   <span class="check-date" x-text="formatDate(check.checked_at)"></span>
                   <span class="check-msg" x-show="check.message" x-text="check.message"></span>
                 </div>

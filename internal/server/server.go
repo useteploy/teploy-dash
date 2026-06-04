@@ -6,7 +6,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"io/fs"
+	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,30 +99,127 @@ func New(config Config) *Server {
 func (s *Server) ListenAndServe(addr string) error {
 	handler := http.Handler(s.mux)
 	if s.config.AuthUser != "" || s.config.AuthPass != "" {
-		handler = basicAuthMiddleware(s.config.AuthUser, s.config.AuthPass, s.mux)
+		handler = newAuthGate(s.config.AuthUser, s.config.AuthPass).wrap(s.mux)
 	}
 	return http.ListenAndServe(addr, handler)
 }
 
-// basicAuthMiddleware protects all routes except /api/health with HTTP Basic
-// Auth. Health is exempt so liveness probes work without credentials.
-// Uses subtle.ConstantTimeCompare to prevent timing attacks.
-func basicAuthMiddleware(user, pass string, next http.Handler) http.Handler {
+// authGate protects all routes except /api/health with HTTP Basic Auth, plus
+// two hardening layers: a per-source-IP failed-attempt backoff (brute-force
+// resistance) and a same-origin requirement on state-changing requests (CSRF
+// defense — browsers auto-send Basic-Auth creds cross-origin, so a malicious
+// page could otherwise drive deploys).
+type authGate struct {
+	user, pass string
+	mu         sync.Mutex
+	fails      map[string]*failInfo
+}
+
+type failInfo struct {
+	count int
+	until  time.Time
+}
+
+const (
+	authMaxFails    = 5
+	authLockWindow  = time.Minute
+)
+
+func newAuthGate(user, pass string) *authGate {
+	return &authGate{user: user, pass: pass, fails: make(map[string]*failInfo)}
+}
+
+func (g *authGate) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
+
+		ip := clientIP(r)
+		if g.lockedOut(ip) {
+			http.Error(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
+			return
+		}
+
 		u, p, ok := r.BasicAuth()
 		if !ok ||
-			subtle.ConstantTimeCompare([]byte(u), []byte(user)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(p), []byte(pass)) != 1 {
+			subtle.ConstantTimeCompare([]byte(u), []byte(g.user)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(p), []byte(g.pass)) != 1 {
+			g.recordFail(ip)
 			w.Header().Set("WWW-Authenticate", `Basic realm="teploy-dash"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		g.recordSuccess(ip)
+
+		// CSRF: reject an authenticated but cross-origin state-changing request
+		// (the request /ws/ stream is GET and exempt; it does its own Origin
+		// check). Non-browser clients (no Origin / Sec-Fetch-Site) are allowed —
+		// CSRF requires a browser auto-attaching the cached Basic-Auth creds.
+		if isMutating(r.Method) && !strings.HasPrefix(r.URL.Path, "/ws/") && !sameOrigin(r) {
+			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (g *authGate) lockedOut(ip string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	fi := g.fails[ip]
+	return fi != nil && fi.count >= authMaxFails && time.Now().Before(fi.until)
+}
+
+func (g *authGate) recordFail(ip string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	fi := g.fails[ip]
+	if fi == nil {
+		fi = &failInfo{}
+		g.fails[ip] = fi
+	}
+	fi.count++
+	fi.until = time.Now().Add(authLockWindow)
+}
+
+func (g *authGate) recordSuccess(ip string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.fails, ip)
+}
+
+func isMutating(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+// sameOrigin reports whether a state-changing request is same-origin (or from a
+// non-browser client that can't be a CSRF vector). Prefers the Fetch-Metadata
+// header, falls back to comparing the Origin host to the request host.
+func sameOrigin(r *http.Request) bool {
+	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+		return sfs == "same-origin" || sfs == "none"
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		return err == nil && u.Host == r.Host
+	}
+	return true // no Origin / Fetch-Metadata → not a browser CSRF request
+}
+
+// clientIP returns the direct peer address (host without port). X-Forwarded-For
+// is intentionally NOT trusted here — honoring it unconditionally would let a
+// client spoof its IP to evade the failed-attempt backoff.
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (s *Server) routes() {
@@ -212,11 +312,21 @@ func (s *Server) collectFleetApps(ctx context.Context) []remote.AppState {
 	}
 
 	var all []remote.AppState
+	errCount := 0
 	for range servers {
 		r := <-ch
-		if r.err == nil {
-			all = append(all, r.apps...)
+		if r.err != nil {
+			// Previously every per-server error was silently dropped, so a
+			// fully-unreachable fleet rendered as an empty success with no clue
+			// why. Log each failure so the operator can see it.
+			errCount++
+			log.Printf("[fleet] server query failed: %v", r.err)
+			continue
 		}
+		all = append(all, r.apps...)
+	}
+	if errCount == len(servers) && len(all) == 0 {
+		log.Printf("[fleet] all %d server(s) unreachable — app list is empty because every server failed, not because there are no apps", len(servers))
 	}
 	return all
 }
@@ -228,6 +338,9 @@ func (s *Server) resolveServers() []remote.ServerConn {
 	}
 	result, err := cli.ServerList()
 	if err != nil {
+		// Don't silently treat a CLI failure as "no servers" (which would fall
+		// through to the empty local-state path) — log it so the cause is visible.
+		log.Printf("[fleet] could not list servers from the teploy CLI: %v", err)
 		return nil
 	}
 
@@ -236,6 +349,7 @@ func (s *Server) resolveServers() []remote.ServerConn {
 		User string `json:"user"`
 	}
 	if err := json.Unmarshal([]byte(result.Stdout), &raw); err != nil {
+		log.Printf("[fleet] could not parse server list: %v", err)
 		return nil
 	}
 
@@ -547,6 +661,14 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 // ── WebSocket Log Streaming ──────────────────────────────────────────────
 
 func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
+	// Reject cross-origin WS/SSE connections so a malicious page the operator
+	// visits can't open the log stream using cached Basic-Auth creds. A
+	// non-browser client (no Origin) is allowed.
+	if !sameOrigin(r) {
+		http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+		return
+	}
+
 	// Path: /ws/logs/{server}/{app}
 	path := strings.TrimPrefix(r.URL.Path, "/ws/logs/")
 	parts := strings.SplitN(path, "/", 2)
@@ -1307,7 +1429,9 @@ func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 			Password string `json:"password"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
-		result, err := cli.RunChecked("registry", "login", body.Server, "--username", body.Username, "--password", body.Password)
+		// Pass the password over stdin (--token reads it there) instead of on
+		// the argv, where it would be visible in the host's process list.
+		result, err := cli.RunWithStdin(body.Password, "registry", "login", body.Server, "--username", body.Username, "--token")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1386,6 +1510,14 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "monitor type must be http, tcp, or ping", 400)
 			return
 		}
+		// A monitor should only ever issue a safe HTTP method — never a
+		// destructive verb against the monitored endpoint.
+		switch strings.ToUpper(m.Method) {
+		case "", "GET", "HEAD", "POST":
+		default:
+			http.Error(w, "monitor method must be GET, HEAD, or POST", 400)
+			return
+		}
 		if err := s.store.SaveMonitor(m); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -1451,6 +1583,12 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case "DELETE":
+		// Stop the checker first so it can't record a check mid-delete, then
+		// remove the persisted config. Without this the ticker + goroutine
+		// leaked and kept monitoring a deleted monitor.
+		if s.monitor != nil {
+			s.monitor.Remove(id)
+		}
 		if err := s.store.DeleteMonitor(id); err != nil {
 			http.Error(w, err.Error(), 500)
 			return

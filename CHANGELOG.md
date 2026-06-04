@@ -4,7 +4,25 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Security
+- Closed a path-traversal / arbitrary-file-write RCE: a client-controlled monitor ID flowed into `filepath.Join` in the file store, so `POST /api/monitors` with an id like `../../etc/cron.d/x` wrote a file as root. Monitor IDs are now validated (`^[A-Za-z0-9_-]+$`) at the HTTP boundary and in every file-store method.
+- Adding/editing a server in the dashboard no longer silently downgrades a non-root fleet server to root — the SSH user/role are forwarded to the CLI and preserved on edit.
+- Hardened the auth layer: per-source-IP failed-attempt backoff (brute-force resistance), a same-origin requirement on state-changing requests (CSRF defense — browsers auto-send Basic-Auth creds cross-origin), an Origin check on the WS/SSE log stream, and the registry password is now passed to the CLI over stdin instead of on the argv.
+- Monitor HTTP method is constrained to GET/HEAD/POST so a monitor can't be configured to issue a destructive verb. (A private-range SSRF block was deliberately not added — monitoring internal/Tailscale fleet hosts is the primary use case and monitors are admin-only, so a default block would break legitimate monitoring.)
+
 ### Fixed
+- Nucleus check inserts no longer collide: the primary key was `time.Now().UnixNano()`, which dropped a check (PK violation) when two landed in the same nanosecond. Now a random int64 (no schema migration).
+- Monitor lifecycle no longer leaks: deleting a monitor now stops its checker (ticker + goroutine were leaking and kept recording checks for a deleted monitor); `startMonitor` is idempotent (tears down any existing checker first); and the last-known status is seeded from the most recent persisted check so the first check after a restart can fire a transition alert.
+- CLI delegate and Nucleus calls are now time-bounded (a 20m ceiling on the CLI subprocess, 10s per Nucleus query) so a hung SSH session or wedged DB can't block a request forever.
+- Fleet failures are surfaced in the logs instead of being silently swallowed — a server-list failure or a fully-unreachable fleet previously rendered as an empty success with no clue why.
+- File-store check history is returned newest-first, matching the Nucleus store's ordering, so the UI shows a consistent order regardless of backend.
+- Response times are rendered in milliseconds — they were shown as raw `time.Duration` nanoseconds (~1e6× too large) in the monitor list, detail, history, and test-now views.
+- Monitor `POST` now validates id / type / target (subsumed by the ID validation above).
+
+### Docs
+- CLAUDE.md: dropped the "incident tracking" overclaim (not implemented); main.go cleanup comment references `store.RetentionDays` rather than a stale "30 days".
+
+### Fixed (earlier this session)
 - Failed delegated CLI actions are now reported as failures in the dashboard. `internal/cli.Run` returns a nil Go error when the `teploy` binary runs but exits non-zero, and the frontend only treats a top-level `error` field as a failure — so a failed deploy, rollback, env set/unset, lock/unlock, maintenance toggle, template install, accessory action, or server/registry add/remove was being shown to the user as success. Mutating commands now go through `cli.RunChecked`, which turns a non-zero exit (with the CLI's stderr) into a Go error so failures flow through the handlers' normal error path.
 - Webhook alert delivery now uses a 10s HTTP client timeout. Each alert is sent in its own goroutine via the default (timeout-less) client, so a hanging webhook endpoint leaked a goroutine on every monitor state transition.
 - Email alerts strip CR/LF from the monitor name and status before placing them in the `Subject` header, preventing SMTP header injection from a crafted monitor name.

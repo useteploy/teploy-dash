@@ -151,9 +151,17 @@ func (s *FileStore) GetChecks(monitorID string, since time.Time, limit int) ([]C
 		}
 	}
 
-	// Return last N results
-	if limit > 0 && len(results) > limit {
-		results = results[len(results)-limit:]
+	// Return the most recent N, newest-first — matching the Nucleus store's
+	// `ORDER BY checked_at DESC` so callers (and the UI) see a consistent order
+	// regardless of backend. The unlimited path (limit==0, used by GetStats) is
+	// left ascending since it only aggregates.
+	if limit > 0 {
+		if len(results) > limit {
+			results = results[len(results)-limit:]
+		}
+		for i, j := 0, len(results)-1; i < j; i, j = i+1, j-1 {
+			results[i], results[j] = results[j], results[i]
+		}
 	}
 	return results, nil
 }

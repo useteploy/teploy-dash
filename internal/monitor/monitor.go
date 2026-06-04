@@ -116,8 +116,25 @@ func (r *Runner) Reload(m store.Monitor) {
 }
 
 func (r *Runner) startMonitor(m store.Monitor) {
+	// Read the last persisted status outside the lock (the store call can be
+	// slow). Seeding it lets the first check after a restart fire a transition
+	// alert instead of silently adopting the new status with no baseline.
+	var seed string
+	if r.store != nil {
+		if checks, err := r.store.GetChecks(m.ID, time.Now().Add(-24*time.Hour), 1); err == nil && len(checks) > 0 {
+			seed = checks[0].Status
+		}
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Idempotent: tear down any existing checker for this ID before registering
+	// a new one, so a re-add/reload can't leak the previous ticker + goroutine.
+	r.teardownLocked(m.ID)
+	if seed != "" {
+		r.lastStat[m.ID] = seed
+	}
 
 	interval := m.Interval
 	if interval < 10*time.Second {
@@ -148,7 +165,12 @@ func (r *Runner) startMonitor(m store.Monitor) {
 func (r *Runner) stopMonitor(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.teardownLocked(id)
+}
 
+// teardownLocked stops and removes a monitor's ticker + goroutine. The caller
+// must hold r.mu (so startMonitor can reuse it without a non-reentrant relock).
+func (r *Runner) teardownLocked(id string) {
 	if ch, ok := r.stopChs[id]; ok {
 		close(ch)
 		delete(r.stopChs, id)
@@ -157,6 +179,16 @@ func (r *Runner) stopMonitor(id string) {
 		t.Stop()
 		delete(r.timers, id)
 	}
+}
+
+// Remove stops a monitor's checker and clears its last-known status. Call this
+// when a monitor is deleted — otherwise its ticker + goroutine leak and keep
+// recording checks for a monitor that no longer exists.
+func (r *Runner) Remove(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.teardownLocked(id)
+	delete(r.lastStat, id)
 }
 
 func (r *Runner) runCheck(m store.Monitor) {

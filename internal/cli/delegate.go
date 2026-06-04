@@ -2,12 +2,20 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// cliTimeout is a generous ceiling on any delegated CLI command so a hung
+// `teploy` subprocess (e.g. a stalled SSH session) can't block a dashboard
+// request forever. It's well above a slow first-time deploy with a large image
+// pull, so it never aborts legitimate work — it only backstops a genuine hang.
+const cliTimeout = 20 * time.Minute
 
 // Result holds the output of a CLI command.
 type Result struct {
@@ -18,7 +26,10 @@ type Result struct {
 
 // Run executes a teploy CLI command and returns the result.
 func Run(args ...string) (*Result, error) {
-	cmd := exec.Command("teploy", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "teploy", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -31,6 +42,9 @@ func Run(args ...string) (*Result, error) {
 	}
 
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return result, fmt.Errorf("teploy %s timed out after %s", strings.Join(args, " "), cliTimeout)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
 		} else {
@@ -39,6 +53,35 @@ func Run(args ...string) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+// RunWithStdin runs a teploy CLI command, feeding stdin to it, and treats a
+// non-zero exit as an error. Used to pass secrets (e.g. a registry password) to
+// the CLI without putting them on the argv, where they'd show in the host's
+// process list.
+func RunWithStdin(stdin string, args ...string) (*Result, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "teploy", args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	result := &Result{Stdout: stdout.String(), Stderr: stderr.String()}
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return result, fmt.Errorf("teploy %s timed out after %s", strings.Join(args, " "), cliTimeout)
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			return result, fmt.Errorf("failed to run teploy %s: %w", strings.Join(args, " "), err)
+		}
+	}
+	return result, checkExit(result, args)
 }
 
 // RunChecked runs a teploy CLI command and treats a non-zero exit code as an

@@ -2,11 +2,31 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// nucleusTimeout bounds each Nucleus query so a wedged/slow DB can't block a
+// request (or a monitor check) indefinitely. Generous enough for a 24h history
+// scan.
+const nucleusTimeout = 10 * time.Second
+
+// randomID returns a random positive int64 for the checks primary key. The
+// previous time.Now().UnixNano() collided when two checks landed in the same
+// nanosecond (concurrent monitors), and the PK violation silently dropped a
+// check. A 63-bit random value makes that astronomically unlikely for a
+// retention-bounded table, and needs no schema migration (still a BIGINT).
+func randomID() int64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return time.Now().UnixNano()
+	}
+	return int64(binary.BigEndian.Uint64(b[:]) >> 1)
+}
 
 // NucleusStore implements Store using Nucleus (via pgwire/pgx).
 // Uses time-series model for check history, SQL for monitor configs.
@@ -72,7 +92,8 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 }
 
 func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
 	rows, err := s.pool.Query(ctx,
 		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method FROM monitors")
 	if err != nil {
@@ -103,7 +124,8 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 }
 
 func (s *NucleusStore) GetMonitor(id string) (*Monitor, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
 	var m Monitor
 	var intervalMs, timeoutMs int64
 
@@ -121,7 +143,8 @@ func (s *NucleusStore) GetMonitor(id string) (*Monitor, error) {
 }
 
 func (s *NucleusStore) SaveMonitor(m Monitor) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO monitors (id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -138,7 +161,8 @@ func (s *NucleusStore) SaveMonitor(m Monitor) error {
 }
 
 func (s *NucleusStore) DeleteMonitor(id string) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
 	_, err := s.pool.Exec(ctx, "DELETE FROM monitors WHERE id = $1", id)
 	if err != nil {
 		return err
@@ -148,11 +172,12 @@ func (s *NucleusStore) DeleteMonitor(id string) error {
 }
 
 func (s *NucleusStore) SaveCheck(result CheckResult) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO checks (id, monitor_id, status, status_code, response_time_ms, message, checked_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		time.Now().UnixNano(), result.MonitorID, result.Status,
+		randomID(), result.MonitorID, result.Status,
 		result.StatusCode, result.ResponseTime.Milliseconds(),
 		result.Message, result.CheckedAt,
 	)
@@ -160,7 +185,8 @@ func (s *NucleusStore) SaveCheck(result CheckResult) error {
 }
 
 func (s *NucleusStore) GetChecks(monitorID string, since time.Time, limit int) ([]CheckResult, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
 	query := "SELECT monitor_id, status, status_code, response_time_ms, message, checked_at FROM checks WHERE monitor_id = $1 AND checked_at > $2 ORDER BY checked_at DESC"
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
@@ -187,7 +213,8 @@ func (s *NucleusStore) GetChecks(monitorID string, since time.Time, limit int) (
 }
 
 func (s *NucleusStore) GetStats(monitorID string, since time.Time) (*UptimeStats, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
 
 	var total, up, down int
 	var avgMs float64

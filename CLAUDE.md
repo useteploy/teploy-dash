@@ -27,7 +27,7 @@ teploy-dash (single Go binary)
 |
 +-- Uptime monitoring (Nucleus or JSONL)
 |     HTTP / TCP / ping checks on configurable intervals
-|     Status history, incident tracking
+|     Status history (no incident tracking)
 |     Webhook + SMTP alerts on state transitions
 |
 +-- Delegates actions to CLI (deploy, rollback, env, etc.)
