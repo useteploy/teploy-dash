@@ -165,8 +165,15 @@ func ServerList() (*Result, error) {
 }
 
 // ServerAdd adds a server.
-func ServerAdd(name, host string) (*Result, error) {
-	return RunChecked("server", "add", name, host)
+func ServerAdd(name, host, user, role string) (*Result, error) {
+	args := []string{"server", "add", name, host}
+	if user != "" {
+		args = append(args, "--user", user)
+	}
+	if role != "" {
+		args = append(args, "--role", role)
+	}
+	return RunChecked(args...)
 }
 
 // ServerRemove removes a server.

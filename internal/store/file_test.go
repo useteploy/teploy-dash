@@ -1,6 +1,8 @@
 package store
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -98,5 +100,44 @@ func TestFileStore_StatsComputation(t *testing.T) {
 	// 4 down (indices 0, 3, 6, 9), 6 up = 60% uptime
 	if stats.UpChecks != 6 || stats.DownChecks != 4 {
 		t.Errorf("expected 6 up / 4 down, got %d up / %d down", stats.UpChecks, stats.DownChecks)
+	}
+}
+
+func TestValidID(t *testing.T) {
+	valid := []string{"abc123", "mon_1", "a-b-c", "X9"}
+	for _, id := range valid {
+		if !ValidID(id) {
+			t.Errorf("ValidID(%q) = false, want true", id)
+		}
+	}
+	bad := []string{"", "../../etc/passwd", "a/b", "a..b", "a b", "x.json", "a;b", "héllo"}
+	for _, id := range bad {
+		if ValidID(id) {
+			t.Errorf("ValidID(%q) = true, want false", id)
+		}
+	}
+}
+
+// A path-traversal monitor ID must be rejected by the file store, not written
+// outside its directory.
+func TestFileStore_RejectsTraversalID(t *testing.T) {
+	dir := t.TempDir()
+	s := NewFileStore(dir)
+
+	if err := s.SaveMonitor(Monitor{ID: "../../pwned", Name: "x", Type: "http", Target: "http://x"}); err == nil {
+		t.Fatal("SaveMonitor accepted a traversal ID")
+	}
+	if err := s.SaveCheck(CheckResult{MonitorID: "../../pwned"}); err == nil {
+		t.Fatal("SaveCheck accepted a traversal ID")
+	}
+	if _, err := s.GetMonitor("../../etc/passwd"); err == nil {
+		t.Fatal("GetMonitor accepted a traversal ID")
+	}
+	if err := s.DeleteMonitor("../x"); err == nil {
+		t.Fatal("DeleteMonitor accepted a traversal ID")
+	}
+	// Nothing should have been created outside the monitors dir.
+	if _, err := os.Stat(filepath.Join(dir, "pwned.json")); err == nil {
+		t.Fatal("a file was written outside the monitors directory")
 	}
 }

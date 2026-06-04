@@ -1149,9 +1149,11 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name string `json:"name"`
 			Host string `json:"host"`
+			User string `json:"user"`
+			Role string `json:"role"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
-		result, err := cli.ServerAdd(body.Name, body.Host)
+		result, err := cli.ServerAdd(body.Name, body.Host, body.User, body.Role)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1160,6 +1162,27 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", 405)
 	}
+}
+
+// lookupServerUserRole reads a server's configured SSH user + role from the
+// CLI's servers.yml (the source of truth, not the 60s fleet cache). Used to
+// preserve those fields on an edit that doesn't re-specify them.
+func (s *Server) lookupServerUserRole(name string) (user, role string) {
+	result, err := cli.ServerList()
+	if err != nil {
+		return "", ""
+	}
+	var raw map[string]struct {
+		User string `json:"user"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal([]byte(result.Stdout), &raw) != nil {
+		return "", ""
+	}
+	if srv, ok := raw[name]; ok {
+		return srv.User, srv.Role
+	}
+	return "", ""
 }
 
 func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request) {
@@ -1189,11 +1212,24 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		if newName == "" {
 			newName = name
 		}
+		// Edit is remove+add, which would drop the SSH user/role if the form
+		// didn't resend them — silently downgrading a non-root server back to
+		// root. Preserve the existing values (read from servers.yml, not the
+		// cache) when the form leaves a field blank; a form value wins.
+		exUser, exRole := s.lookupServerUserRole(name)
+		user := body.User
+		if user == "" {
+			user = exUser
+		}
+		role := body.Role
+		if role == "" {
+			role = exRole
+		}
 		if _, err := cli.ServerRemove(name); err != nil {
 			writeError(w, err.Error())
 			return
 		}
-		if _, err := cli.ServerAdd(newName, body.Host); err != nil {
+		if _, err := cli.ServerAdd(newName, body.Host, user, role); err != nil {
 			writeError(w, err.Error())
 			return
 		}
@@ -1332,6 +1368,24 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request body", 400)
 			return
 		}
+		// Validate at the boundary. The ID becomes a filename in the file
+		// store, so a bad ID is a path-traversal / arbitrary-write vector —
+		// reject anything outside [A-Za-z0-9_-]. POST is also the edit path, so
+		// the ID must always be present. (Also validates type/target.)
+		if !store.ValidID(m.ID) {
+			http.Error(w, "invalid monitor id (use letters, digits, '_' or '-')", 400)
+			return
+		}
+		if strings.TrimSpace(m.Target) == "" {
+			http.Error(w, "monitor target is required", 400)
+			return
+		}
+		switch m.Type {
+		case "http", "tcp", "ping":
+		default:
+			http.Error(w, "monitor type must be http, tcp, or ping", 400)
+			return
+		}
 		if err := s.store.SaveMonitor(m); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -1357,6 +1411,10 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 	// POST /api/monitors/{id}/test — run one check immediately, don't save.
 	if strings.HasSuffix(path, "/test") && r.Method == "POST" {
 		id := strings.TrimSuffix(path, "/test")
+		if !store.ValidID(id) {
+			http.Error(w, "invalid monitor id", 400)
+			return
+		}
 		m, err := s.store.GetMonitor(id)
 		if err != nil {
 			http.Error(w, "monitor not found", 404)
@@ -1372,6 +1430,10 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := path
+	if !store.ValidID(id) {
+		http.Error(w, "invalid monitor id", 400)
+		return
+	}
 
 	switch r.Method {
 	case "GET":

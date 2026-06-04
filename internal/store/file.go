@@ -57,6 +57,9 @@ func (s *FileStore) ListMonitors() ([]Monitor, error) {
 }
 
 func (s *FileStore) GetMonitor(id string) (*Monitor, error) {
+	if !ValidID(id) {
+		return nil, fmt.Errorf("invalid monitor id %q", id)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -72,6 +75,9 @@ func (s *FileStore) GetMonitor(id string) (*Monitor, error) {
 }
 
 func (s *FileStore) SaveMonitor(m Monitor) error {
+	if !ValidID(m.ID) {
+		return fmt.Errorf("invalid monitor id %q", m.ID)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -83,6 +89,9 @@ func (s *FileStore) SaveMonitor(m Monitor) error {
 }
 
 func (s *FileStore) DeleteMonitor(id string) error {
+	if !ValidID(id) {
+		return fmt.Errorf("invalid monitor id %q", id)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -92,6 +101,9 @@ func (s *FileStore) DeleteMonitor(id string) error {
 }
 
 func (s *FileStore) SaveCheck(result CheckResult) error {
+	if !ValidID(result.MonitorID) {
+		return fmt.Errorf("invalid monitor id %q", result.MonitorID)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -113,6 +125,9 @@ func (s *FileStore) SaveCheck(result CheckResult) error {
 }
 
 func (s *FileStore) GetChecks(monitorID string, since time.Time, limit int) ([]CheckResult, error) {
+	if !ValidID(monitorID) {
+		return nil, fmt.Errorf("invalid monitor id %q", monitorID)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

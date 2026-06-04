@@ -1,6 +1,20 @@
 package store
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
+
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// ValidID reports whether id is a safe monitor identifier: non-empty and only
+// [A-Za-z0-9_-]. Monitor IDs are used directly as filenames in the file store,
+// so anything else (path separators, "..", spaces) must be rejected to prevent
+// path traversal / arbitrary file write. The frontend generates hex IDs, so
+// this never rejects a legitimately-created monitor.
+func ValidID(id string) bool {
+	return idPattern.MatchString(id)
+}
 
 // CheckResult represents the result of a single uptime check.
 type CheckResult struct {
