@@ -657,8 +657,8 @@
               </div>
             </div>
             <div class="field" x-show="newMonitor.type === 'http'">
-              <label>Expected Status</label>
-              <input type="number" x-model="newMonitor.expected_status" placeholder="200">
+              <label>Expected Status <span style="opacity:0.6">(optional)</span></label>
+              <input type="number" x-model="newMonitor.expected_status" placeholder="any 2xx/3xx">
             </div>
             <div class="dialog-actions">
               <button type="button" class="btn" @click="showCreateDialog = false">Cancel</button>

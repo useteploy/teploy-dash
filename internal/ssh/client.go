@@ -9,8 +9,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
+)
+
+const (
+	// dialTimeout bounds the TCP connect.
+	dialTimeout = 10 * time.Second
+	// handshakeTimeout bounds the SSH handshake — ssh.NewClientConn does not
+	// honor ctx and has no built-in timeout, so without this a host that
+	// accepts TCP but stalls the handshake would hang the caller (and, for
+	// the dashboard, the whole fleet refresh) indefinitely.
+	handshakeTimeout = 15 * time.Second
 )
 
 // Client is a minimal SSH client for teploy-dash remote operations.
@@ -39,21 +50,37 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	}
 
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signers...)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec — internal Tailscale network
+		User: user,
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)},
+		// Host keys are intentionally not verified. teploy-dash is designed to
+		// run on a trusted/private network (e.g. a Tailscale mesh) where the
+		// transport is already authenticated and encrypted, and the fleet's dev
+		// servers are frequently re-provisioned — strict known_hosts checking
+		// would refuse the changed key on every rebuild. If dash is ever pointed
+		// at servers over an untrusted network, this is the seam to add opt-in
+		// known_hosts verification.
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec — trusted-network assumption, see comment
 	}
 
-	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", host)
+	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", host)
 	if err != nil {
 		return nil, fmt.Errorf("dialing %s: %w", host, err)
 	}
+
+	// Bound the handshake with a deadline (or the ctx deadline, whichever is
+	// sooner). Cleared once connected so long-lived sessions aren't affected.
+	hsDeadline := time.Now().Add(handshakeTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(hsDeadline) {
+		hsDeadline = d
+	}
+	conn.SetDeadline(hsDeadline)
 
 	c, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("SSH handshake with %s: %w", host, err)
 	}
+	conn.SetDeadline(time.Time{}) // clear handshake deadline
 
 	return &Client{client: ssh.NewClient(c, chans, reqs), host: host}, nil
 }

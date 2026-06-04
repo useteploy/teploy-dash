@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -30,7 +31,10 @@ func New(st store.Store) *Runner {
 		store:    st,
 		lastStat: make(map[string]string),
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			// No client-level Timeout: each check applies the monitor's own
+			// configured timeout via a per-request context (checkHTTP). A
+			// fixed client timeout here would silently cap longer per-monitor
+			// timeouts.
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
 			},
@@ -205,7 +209,14 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 		method = "GET"
 	}
 
-	req, err := http.NewRequest(method, m.Target, nil)
+	timeout := m.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, m.Target, nil)
 	if err != nil {
 		result.Status = "down"
 		result.Message = err.Error()
@@ -226,16 +237,23 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 
 	result.StatusCode = resp.StatusCode
 
-	expectedStatus := m.ExpectedStatus
-	if expectedStatus == 0 {
-		expectedStatus = 200
-	}
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+	// If the user configured an exact expected status, require it. Otherwise
+	// treat any 2xx/3xx as up. Previously the configured ExpectedStatus was
+	// computed but never compared — it only appeared in the error message, so
+	// a monitor set to expect e.g. 401 or 201 was judged purely on 2xx/3xx.
+	switch {
+	case m.ExpectedStatus > 0:
+		if resp.StatusCode == m.ExpectedStatus {
+			result.Status = "up"
+		} else {
+			result.Status = "down"
+			result.Message = fmt.Sprintf("expected %d, got %d", m.ExpectedStatus, resp.StatusCode)
+		}
+	case resp.StatusCode >= 200 && resp.StatusCode < 400:
 		result.Status = "up"
-	} else {
+	default:
 		result.Status = "down"
-		result.Message = fmt.Sprintf("expected %d, got %d", expectedStatus, resp.StatusCode)
+		result.Message = fmt.Sprintf("unexpected status %d", resp.StatusCode)
 	}
 
 	return result

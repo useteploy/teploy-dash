@@ -97,6 +97,23 @@ func TestSend_EmailRequiresHostAndTo(t *testing.T) {
 	}
 }
 
+// sanitizeHeader must strip CR/LF so a monitor name can't inject extra SMTP
+// headers into the Subject line.
+func TestSanitizeHeader_StripsCRLF(t *testing.T) {
+	cases := map[string]string{
+		"normal name":         "normal name",
+		"x\r\nBcc: evil@host": "xBcc: evil@host",
+		"line1\nline2":        "line1line2",
+		"carriage\rreturn":    "carriagereturn",
+		"":                    "",
+	}
+	for in, want := range cases {
+		if got := sanitizeHeader(in); got != want {
+			t.Errorf("sanitizeHeader(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // Verify the webhook Content-Type so downstream consumers (Slack-style hooks)
 // parse correctly.
 func TestSend_WebhookContentType(t *testing.T) {

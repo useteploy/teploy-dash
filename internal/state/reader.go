@@ -16,6 +16,7 @@ package state
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -86,18 +87,26 @@ func (r *Reader) GetApp(name string) (*AppState, error) {
 	return state, nil
 }
 
-// parseStateFile reads the CLI's key=value state format. Unknown keys are
-// ignored (the CLI may add fields like current_ports / previous_ports for
-// replicas which we don't surface in the dashboard list view).
+// parseStateFile reads the CLI's key=value state file from disk.
 func parseStateFile(path string) (*AppState, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return Parse(f)
+}
 
+// Parse reads the CLI's key=value state format from r. Unknown keys are
+// ignored (the CLI may add fields like previous_port / current_ports for
+// replicas which we don't surface in the dashboard list view).
+//
+// This is the single canonical parser for the CLI state format — the SSH
+// fleet path (internal/remote) reads the file over the wire and feeds the
+// raw bytes here, so the two paths can't drift on key names.
+func Parse(r io.Reader) (*AppState, error) {
 	s := &AppState{}
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		key, val, ok := strings.Cut(scanner.Text(), "=")
 		if !ok {

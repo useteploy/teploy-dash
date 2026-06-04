@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -38,6 +39,36 @@ func Run(args ...string) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+// RunChecked runs a teploy CLI command and treats a non-zero exit code as an
+// error (wrapping the CLI's stderr), in addition to exec failures. Use this for
+// mutating commands: plain Run returns a nil error on non-zero exit, so a
+// failed action would otherwise flow through a handler's success path and be
+// reported to the UI as success. With RunChecked the failure rides the normal
+// `if err != nil` path every handler already has.
+func RunChecked(args ...string) (*Result, error) {
+	result, err := Run(args...)
+	if err != nil {
+		return result, err
+	}
+	return result, checkExit(result, args)
+}
+
+// checkExit converts a non-zero CLI exit into an error, preferring stderr, then
+// stdout, then a generic message. Split out for testability.
+func checkExit(result *Result, args []string) error {
+	if result.ExitCode == 0 {
+		return nil
+	}
+	msg := strings.TrimSpace(result.Stderr)
+	if msg == "" {
+		msg = strings.TrimSpace(result.Stdout)
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("teploy %s exited with code %d", strings.Join(args, " "), result.ExitCode)
+	}
+	return errors.New(msg)
 }
 
 // RunJSON executes a teploy CLI command with --json flag and parses output.
@@ -83,19 +114,19 @@ func Deploy(server, user, app, image, domain string, port int) (*Result, error) 
 	if port > 0 {
 		args = append(args, "--port", fmt.Sprintf("%d", port))
 	}
-	return Run(args...)
+	return RunChecked(args...)
 }
 
 // Rollback triggers a rollback via the CLI.
 func Rollback(server, user, app string) (*Result, error) {
 	args := append([]string{"rollback", "--host", server, "--app", app}, userArgs(user)...)
-	return Run(args...)
+	return RunChecked(args...)
 }
 
 // AppAction runs an app lifecycle action (start, stop, restart, lock, unlock).
 func AppAction(server, user, app, action string) (*Result, error) {
 	args := append([]string{action, "--host", server, "--app", app}, userArgs(user)...)
-	return Run(args...)
+	return RunChecked(args...)
 }
 
 // Logs returns recent logs.
@@ -119,13 +150,13 @@ func EnvList(server, user, app string) (interface{}, error) {
 // EnvSet sets an environment variable.
 func EnvSet(server, user, app, key, value string) (*Result, error) {
 	args := append([]string{"env", "set", fmt.Sprintf("%s=%s", key, value), "--host", server, "--app", app}, userArgs(user)...)
-	return Run(args...)
+	return RunChecked(args...)
 }
 
 // EnvUnset removes an environment variable.
 func EnvUnset(server, user, app, key string) (*Result, error) {
 	args := append([]string{"env", "unset", key, "--host", server, "--app", app}, userArgs(user)...)
-	return Run(args...)
+	return RunChecked(args...)
 }
 
 // ServerList returns configured servers.
@@ -135,12 +166,12 @@ func ServerList() (*Result, error) {
 
 // ServerAdd adds a server.
 func ServerAdd(name, host string) (*Result, error) {
-	return Run("server", "add", name, host)
+	return RunChecked("server", "add", name, host)
 }
 
 // ServerRemove removes a server.
 func ServerRemove(name string) (*Result, error) {
-	return Run("server", "remove", name)
+	return RunChecked("server", "remove", name)
 }
 
 // IsInstalled checks if the teploy CLI binary is available.

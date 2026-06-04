@@ -84,11 +84,13 @@ teploy-dash --no-auth                                   # local dev only
   don't speak WS).
 
 ### Uptime monitoring
-- HTTP, TCP, and ping checks with per-monitor interval, timeout,
-  expected status code, expected body substring (HTTP).
-- 24-hour stats panel (uptime %, p50 / p95 latency, last incident).
+- HTTP, TCP, and ping checks with per-monitor interval and timeout.
+  HTTP checks honor an optional exact expected status code (when unset,
+  any 2xx/3xx is healthy). Ping is a TCP-connect probe (the target needs
+  a `host:port`); raw ICMP is not used.
+- 24-hour stats (uptime %, total / up / down checks, average response time).
 - Storage: Nucleus over pgwire (preferred) or rolling JSONL files
-  (fallback). Daily cleanup for the file store keeps 30 days of checks.
+  (fallback). Daily cleanup for the file store keeps 7 days of checks.
 - Manual "test now" runs a check immediately without saving.
 - Webhook + SMTP alerts on state transitions (up → down, recovered).
 - Notification config persisted to `~/.teploy/notifications.json`

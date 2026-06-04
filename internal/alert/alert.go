@@ -7,8 +7,14 @@ import (
 	"log"
 	"net/http"
 	"net/smtp"
+	"strings"
 	"time"
 )
+
+// webhookClient bounds webhook delivery. sendWebhook runs in its own goroutine
+// per alert; without a timeout a hanging endpoint would leak a goroutine on
+// every state transition.
+var webhookClient = &http.Client{Timeout: 10 * time.Second}
 
 // Config holds alerting configuration.
 type Config struct {
@@ -57,7 +63,7 @@ func (d *Dispatcher) sendWebhook(event Event) {
 		return
 	}
 
-	resp, err := http.Post(d.config.WebhookURL, "application/json", bytes.NewReader(payload))
+	resp, err := webhookClient.Post(d.config.WebhookURL, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("[alert] Webhook failed: %v", err)
 		return
@@ -70,7 +76,10 @@ func (d *Dispatcher) sendWebhook(event Event) {
 }
 
 func (d *Dispatcher) sendEmail(event Event) {
-	subject := fmt.Sprintf("[teploy] %s is %s", event.MonitorName, event.Status)
+	// Strip CR/LF from values that land in the Subject header so a monitor name
+	// can't inject additional SMTP headers (e.g. an unwanted Bcc).
+	subject := fmt.Sprintf("[teploy] %s is %s",
+		sanitizeHeader(event.MonitorName), sanitizeHeader(event.Status))
 	body := fmt.Sprintf("Monitor: %s\nStatus: %s\nMessage: %s\nTime: %s",
 		event.MonitorName, event.Status, event.Message, event.OccurredAt.Format(time.RFC3339))
 
@@ -86,4 +95,10 @@ func (d *Dispatcher) sendEmail(event Event) {
 	if err := smtp.SendMail(addr, auth, d.config.EmailFrom, []string{d.config.EmailTo}, []byte(msg)); err != nil {
 		log.Printf("[alert] Email failed: %v", err)
 	}
+}
+
+// sanitizeHeader removes CR/LF so a value can be safely placed in an email
+// header line without injecting additional headers.
+func sanitizeHeader(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
 }

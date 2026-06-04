@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/state"
 	uissh "github.com/useteploy/teploy-dash/internal/ssh"
 )
 
@@ -72,43 +73,33 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 		return nil, nil
 	}
 
-	state := &AppState{
-		App:    appName,
-		Server: serverName,
-		Status: "unknown",
+	// Parse with the single canonical CLI-state parser (internal/state) so the
+	// SSH fleet path and the local-disk path can't drift on key names.
+	parsed, err := state.Parse(strings.NewReader(raw))
+	if err != nil {
+		return nil, nil
 	}
 
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		switch parts[0] {
-		case "current_hash":
-			state.CurrentHash = parts[1]
-		case "previous_hash":
-			state.PreviousHash = parts[1]
-		case "current_port":
-			state.CurrentPort, _ = strconv.Atoi(parts[1])
-		case "domain":
-			state.Domain = parts[1]
-		}
+	st := &AppState{
+		App:          appName,
+		Server:       serverName,
+		Status:       "unknown",
+		CurrentHash:  parsed.CurrentHash,
+		PreviousHash: parsed.PreviousHash,
+		CurrentPort:  parsed.Port,
+		Domain:       parsed.Domain,
 	}
 
 	// Get state file mtime as deployed_at.
 	ts, err := c.Run(ctx, fmt.Sprintf("stat -c %%Y %s 2>/dev/null", statePath))
 	if err == nil && ts != "" {
 		if unix, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64); err == nil {
-			state.DeployedAt = time.Unix(unix, 0).UTC()
+			st.DeployedAt = time.Unix(unix, 0).UTC()
 		}
 	}
 
 	// Check live container status.
-	if state.CurrentHash != "" {
+	if st.CurrentHash != "" {
 		containerFilter := fmt.Sprintf("name=%s-", appName)
 		running, err := c.Run(ctx, fmt.Sprintf(
 			"docker ps -q --filter %q 2>/dev/null | wc -l",
@@ -117,14 +108,14 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 		if err == nil {
 			count, _ := strconv.Atoi(strings.TrimSpace(running))
 			if count > 0 {
-				state.Status = "running"
+				st.Status = "running"
 			} else {
-				state.Status = "stopped"
+				st.Status = "stopped"
 			}
 		}
 	}
 
-	return state, nil
+	return st, nil
 }
 
 // StopApp stops all containers for an app on a server.

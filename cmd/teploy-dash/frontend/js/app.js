@@ -808,7 +808,7 @@ document.addEventListener('alpine:init', () => {
       target: '',
       interval: '60000',
       timeout: '10000',
-      expected_status: 200,
+      expected_status: '', // blank = any 2xx/3xx is healthy; a value = exact match
     },
 
     async init() {
@@ -857,7 +857,7 @@ document.addEventListener('alpine:init', () => {
           interval: parseInt(this.newMonitor.interval) * 1000000,
           timeout: parseInt(this.newMonitor.timeout) * 1000000,
           enabled: true,
-          expected_status: parseInt(this.newMonitor.expected_status) || 200,
+          expected_status: parseInt(this.newMonitor.expected_status) || 0,
           method: 'GET',
         };
         await rawFetch.post('/api/monitors', body);
@@ -923,7 +923,7 @@ document.addEventListener('alpine:init', () => {
         target: m.target,
         interval: String(m.interval / 1000000),
         timeout: String(m.timeout / 1000000),
-        expected_status: m.expected_status || 200,
+        expected_status: m.expected_status || '',
       };
       this.showCreateDialog = true;
     },
@@ -931,7 +931,7 @@ document.addEventListener('alpine:init', () => {
     resetForm() {
       this.newMonitor = {
         name: '', type: 'http', target: '',
-        interval: '60000', timeout: '10000', expected_status: 200,
+        interval: '60000', timeout: '10000', expected_status: '',
       };
     },
 

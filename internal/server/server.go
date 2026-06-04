@@ -192,6 +192,11 @@ func (s *Server) collectFleetApps(ctx context.Context) []remote.AppState {
 		return apps
 	}
 
+	// Bound the whole fleet refresh so a single slow/unreachable server can't
+	// stall the page (per-server SSH is also bounded in internal/ssh).
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	type result struct {
 		apps []remote.AppState
 		err  error
@@ -279,7 +284,7 @@ func (s *Server) cliAppRun(serverName, appName string, parts ...string) (*cli.Re
 	if u := s.serverUser(serverName); u != "" {
 		args = append(args, "--user", u)
 	}
-	return cli.Run(args...)
+	return cli.RunChecked(args...)
 }
 
 // ── App Actions ──────────────────────────────────────────────────────────
@@ -672,7 +677,7 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--var", k+"="+v)
 	}
 
-	result, err := cli.Run(args...)
+	result, err := cli.RunChecked(args...)
 	if err != nil {
 		writeError(w, err.Error())
 		return
@@ -1266,7 +1271,7 @@ func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 			Password string `json:"password"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
-		result, err := cli.Run("registry", "login", body.Server, "--username", body.Username, "--password", body.Password)
+		result, err := cli.RunChecked("registry", "login", body.Server, "--username", body.Username, "--password", body.Password)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1280,7 +1285,7 @@ func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRegistryAction(w http.ResponseWriter, r *http.Request) {
 	server := strings.TrimPrefix(r.URL.Path, "/api/registries/")
 	if r.Method == "DELETE" {
-		result, err := cli.Run("registry", "remove", server)
+		result, err := cli.RunChecked("registry", "remove", server)
 		if err != nil {
 			writeError(w, err.Error())
 			return
