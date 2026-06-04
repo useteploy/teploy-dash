@@ -6,7 +6,8 @@ All notable changes to teploy-dash are recorded here.
 
 ### Security
 - Closed a path-traversal / arbitrary-file-write RCE: a client-controlled monitor ID flowed into `filepath.Join` in the file store, so `POST /api/monitors` with an id like `../../etc/cron.d/x` wrote a file as root. Monitor IDs are now validated (`^[A-Za-z0-9_-]+$`) at the HTTP boundary and in every file-store method.
-- Adding/editing a server in the dashboard no longer silently downgrades a non-root fleet server to root — the SSH user/role are forwarded to the CLI and preserved on edit.
+- Adding/editing a server in the dashboard no longer silently downgrades a non-root fleet server to root — the SSH user/role are forwarded to the CLI and preserved on edit. A same-name edit upserts in place (no remove+add) so the server's `tags`/`vpn_ip` survive. (Requires teploy-cli with lowercase JSON keys on `server list --json` so the frontend reads the real user — shipped alongside.)
+- The per-IP auth backoff honors `X-Forwarded-For` only from a configured `TEPLOY_DASH_TRUSTED_PROXY`, so running behind Caddy keys the lockout on the real client instead of self-DoSing every client onto the proxy IP; the failed-attempt map also prunes expired entries.
 - Hardened the auth layer: per-source-IP failed-attempt backoff (brute-force resistance), a same-origin requirement on state-changing requests (CSRF defense — browsers auto-send Basic-Auth creds cross-origin), an Origin check on the WS/SSE log stream, and the registry password is now passed to the CLI over stdin instead of on the argv.
 - Monitor HTTP method is constrained to GET/HEAD/POST so a monitor can't be configured to issue a destructive verb. (A private-range SSRF block was deliberately not added — monitoring internal/Tailscale fleet hosts is the primary use case and monitors are admin-only, so a default block would break legitimate monitoring.)
 

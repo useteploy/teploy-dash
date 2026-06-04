@@ -110,23 +110,54 @@ func (s *Server) ListenAndServe(addr string) error {
 // defense — browsers auto-send Basic-Auth creds cross-origin, so a malicious
 // page could otherwise drive deploys).
 type authGate struct {
-	user, pass string
-	mu         sync.Mutex
-	fails      map[string]*failInfo
+	user, pass     string
+	trustedProxies []*net.IPNet
+	mu             sync.Mutex
+	fails          map[string]*failInfo
 }
 
 type failInfo struct {
 	count int
-	until  time.Time
+	until time.Time
 }
 
 const (
-	authMaxFails    = 5
-	authLockWindow  = time.Minute
+	authMaxFails   = 5
+	authLockWindow = time.Minute
 )
 
 func newAuthGate(user, pass string) *authGate {
-	return &authGate{user: user, pass: pass, fails: make(map[string]*failInfo)}
+	return &authGate{
+		user:           user,
+		pass:           pass,
+		trustedProxies: parseTrustedProxies(os.Getenv("TEPLOY_DASH_TRUSTED_PROXY")),
+		fails:          make(map[string]*failInfo),
+	}
+}
+
+// parseTrustedProxies parses a comma-separated list of proxy IPs/CIDRs. When the
+// dashboard runs behind a reverse proxy (e.g. Caddy), set TEPLOY_DASH_TRUSTED_PROXY
+// to the proxy's address so per-IP rate-limiting keys on the real client (from
+// X-Forwarded-For) instead of collapsing every client onto the proxy's IP.
+func parseTrustedProxies(s string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !strings.Contains(part, "/") {
+			if strings.Contains(part, ":") {
+				part += "/128"
+			} else {
+				part += "/32"
+			}
+		}
+		if _, n, err := net.ParseCIDR(part); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
 }
 
 func (g *authGate) wrap(next http.Handler) http.Handler {
@@ -136,7 +167,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		ip := clientIP(r)
+		ip := g.clientIP(r)
 		if g.lockedOut(ip) {
 			http.Error(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
 			return
@@ -175,13 +206,21 @@ func (g *authGate) lockedOut(ip string) bool {
 func (g *authGate) recordFail(ip string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	now := time.Now()
+	// Drop expired entries so the map can't grow unbounded under IP-rotating
+	// brute force (entries from IPs that never succeed were never pruned).
+	for k, v := range g.fails {
+		if k != ip && now.After(v.until) {
+			delete(g.fails, k)
+		}
+	}
 	fi := g.fails[ip]
 	if fi == nil {
 		fi = &failInfo{}
 		g.fails[ip] = fi
 	}
 	fi.count++
-	fi.until = time.Now().Add(authLockWindow)
+	fi.until = now.Add(authLockWindow)
 }
 
 func (g *authGate) recordSuccess(ip string) {
@@ -212,14 +251,37 @@ func sameOrigin(r *http.Request) bool {
 	return true // no Origin / Fetch-Metadata → not a browser CSRF request
 }
 
-// clientIP returns the direct peer address (host without port). X-Forwarded-For
-// is intentionally NOT trusted here — honoring it unconditionally would let a
-// client spoof its IP to evade the failed-attempt backoff.
-func clientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+// clientIP returns the address used for per-IP rate-limiting. By default it's
+// the direct peer (RemoteAddr) — X-Forwarded-For is NOT trusted, since a client
+// could spoof it to evade the backoff. Only when the direct peer is a configured
+// trusted proxy (TEPLOY_DASH_TRUSTED_PROXY) is the forwarded client IP used, so
+// running behind Caddy doesn't collapse every client onto the proxy's IP.
+func (g *authGate) clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	return r.RemoteAddr
+	if g.isTrustedProxy(host) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
+				return first
+			}
+		}
+	}
+	return host
+}
+
+func (g *authGate) isTrustedProxy(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range g.trustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) routes() {
@@ -1347,9 +1409,15 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		if role == "" {
 			role = exRole
 		}
-		if _, err := cli.ServerRemove(name); err != nil {
-			writeError(w, err.Error())
-			return
+		// Only remove when renaming. ServerAdd is an upsert, so a same-name edit
+		// updates in place and keeps the server's tags/vpn_ip. Doing remove+add
+		// as two processes for a same-name edit would drop tags/vpn_ip, because
+		// the re-add reads servers.yml after the remove already deleted them.
+		if newName != name {
+			if _, err := cli.ServerRemove(name); err != nil {
+				writeError(w, err.Error())
+				return
+			}
 		}
 		if _, err := cli.ServerAdd(newName, body.Host, user, role); err != nil {
 			writeError(w, err.Error())

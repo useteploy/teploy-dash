@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -141,5 +142,26 @@ func TestAuthGate_RateLimitsFailedAuth(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("expected 429 after %d failures, got %d", authMaxFails, w.Code)
+	}
+}
+
+// clientIP must use X-Forwarded-For only when the direct peer is a configured
+// trusted proxy — otherwise XFF could be spoofed to evade the per-IP backoff.
+func TestAuthGate_TrustedProxyXFF(t *testing.T) {
+	_, n, _ := net.ParseCIDR("10.0.0.0/8")
+	g := &authGate{trustedProxies: []*net.IPNet{n}}
+
+	fromProxy := httptest.NewRequest("GET", "/", nil)
+	fromProxy.RemoteAddr = "10.1.2.3:5000"
+	fromProxy.Header.Set("X-Forwarded-For", "203.0.113.9, 10.1.2.3")
+	if got := g.clientIP(fromProxy); got != "203.0.113.9" {
+		t.Errorf("trusted proxy: expected forwarded client 203.0.113.9, got %q", got)
+	}
+
+	untrusted := httptest.NewRequest("GET", "/", nil)
+	untrusted.RemoteAddr = "8.8.8.8:5000"
+	untrusted.Header.Set("X-Forwarded-For", "1.1.1.1")
+	if got := g.clientIP(untrusted); got != "8.8.8.8" {
+		t.Errorf("untrusted peer: must ignore XFF, got %q", got)
 	}
 }
