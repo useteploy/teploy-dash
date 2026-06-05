@@ -483,6 +483,15 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		action = parts[2]
 	}
 
+	// Reject anything that isn't a plain identifier BEFORE it reaches an SSH
+	// shell command or a CLI delegate. server/app names are interpolated into
+	// remote `docker` invocations; without this a name like `x'; rm -rf / #`
+	// would be remote code execution as the SSH user (root) on the fleet.
+	if !store.ValidID(serverName) || !store.ValidID(appName) {
+		writeError(w, "invalid server or app name")
+		return
+	}
+
 	switch {
 	case action == "status" && r.Method == "GET":
 		// Return from fleet cache if available, else fetch directly.
@@ -739,6 +748,11 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serverName, appName := parts[0], parts[1]
+	// Same injection guard as handleAppAction — appName reaches a remote shell.
+	if !store.ValidID(serverName) || !store.ValidID(appName) {
+		http.Error(w, "invalid server or app name", 400)
+		return
+	}
 
 	srv, ok := s.lookupServer(serverName)
 	if !ok {

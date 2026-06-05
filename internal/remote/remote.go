@@ -14,6 +14,14 @@ import (
 
 const deploymentsDir = "/deployments"
 
+// shellQuote single-quotes s for safe interpolation into a remote /bin/sh
+// command, escaping any embedded single quotes. Defense-in-depth: HTTP handlers
+// already reject non-identifier app/server names, but a value must never reach a
+// remote shell unquoted.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // AppState is the state of a deployed app on a remote server.
 type AppState struct {
 	App          string    `json:"app"`
@@ -142,8 +150,8 @@ func runDockerOp(ctx context.Context, srv ServerConn, appName, op string) error 
 
 	// Find containers whose names start with the app name.
 	ids, err := c.Run(ctx, fmt.Sprintf(
-		"docker ps -aq --filter 'name=%s-' 2>/dev/null",
-		appName,
+		"docker ps -aq --filter %s 2>/dev/null",
+		shellQuote("name="+appName+"-"),
 	))
 	if err != nil || strings.TrimSpace(ids) == "" {
 		return fmt.Errorf("no containers found for app %q on %s", appName, srv.Name)
@@ -164,8 +172,8 @@ func StreamLogs(ctx context.Context, srv ServerConn, appName string, w io.Writer
 
 	// Get the name of the current (most recently started) web container.
 	container, err := c.Run(ctx, fmt.Sprintf(
-		"docker ps --filter 'name=%s-web-' --format '{{.Names}}' | head -1 2>/dev/null",
-		appName,
+		"docker ps --filter %s --format '{{.Names}}' | head -1 2>/dev/null",
+		shellQuote("name="+appName+"-web-"),
 	))
 	if err != nil || strings.TrimSpace(container) == "" {
 		return fmt.Errorf("no running container found for app %q", appName)
