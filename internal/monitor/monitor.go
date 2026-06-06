@@ -121,7 +121,10 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	// alert instead of silently adopting the new status with no baseline.
 	var seed string
 	if r.store != nil {
-		if checks, err := r.store.GetChecks(m.ID, time.Now().Add(-24*time.Hour), 1); err == nil && len(checks) > 0 {
+		// No time floor: the seed only establishes a baseline status, so an old
+		// timestamp is fine. A 24h window meant a monitor down longer than a day
+		// had no baseline after a restart and its recovery alert was suppressed.
+		if checks, err := r.store.GetChecks(m.ID, time.Time{}, 1); err == nil && len(checks) > 0 {
 			seed = checks[0].Status
 		}
 	}
