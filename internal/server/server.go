@@ -543,6 +543,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			Value string `json:"value"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
+		if !validEnvKey(body.Key) {
+			writeError(w, "invalid env var name")
+			return
+		}
 		result, err := cli.EnvSet(serverName, s.serverUser(serverName), appName, body.Key, body.Value)
 		if err != nil {
 			writeError(w, err.Error())
@@ -556,6 +560,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		key := strings.TrimPrefix(action, "env/")
+		if !validEnvKey(key) {
+			writeError(w, "invalid env var name")
+			return
+		}
 		result, err := cli.EnvUnset(serverName, s.serverUser(serverName), appName, key)
 		if err != nil {
 			writeError(w, err.Error())
@@ -1776,6 +1784,28 @@ func writeData(w http.ResponseWriter, data interface{}) {
 func writeError(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// validEnvKey enforces POSIX env var naming (^[A-Za-z_][A-Za-z0-9_]*$). This
+// refuses invalid names outright and, as a side effect, prevents a leading-dash
+// name from being mis-parsed as a flag when passed to the teploy CLI.
+func validEnvKey(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c == '_':
+		case c >= '0' && c <= '9':
+			if i == 0 {
+				return false // can't start with a digit
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func writeRawJSON(w http.ResponseWriter, raw string) {
