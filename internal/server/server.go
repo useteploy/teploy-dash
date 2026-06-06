@@ -1467,19 +1467,35 @@ func saveNotificationsConfig(cfg alert.Config) error {
 	path := notificationsFilePath()
 	os.MkdirAll(filepath.Dir(path), 0755)
 	raw, _ := json.MarshalIndent(cfg, "", "  ")
-	return os.WriteFile(path, raw, 0644)
+	// 0600: the file holds the SMTP password.
+	return os.WriteFile(path, raw, 0600)
 }
 
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		cfg := loadNotificationsConfig()
-		writeData(w, cfg)
+		// Never return the SMTP password to the client; expose only whether one
+		// is configured.
+		writeData(w, map[string]any{
+			"webhook_url":  cfg.WebhookURL,
+			"smtp_host":    cfg.SMTPHost,
+			"smtp_port":    cfg.SMTPPort,
+			"smtp_user":    cfg.SMTPUser,
+			"smtp_pass_set": cfg.SMTPPass != "",
+			"email_to":     cfg.EmailTo,
+			"email_from":   cfg.EmailFrom,
+		})
 	case "POST":
 		var cfg alert.Config
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 			writeError(w, "invalid request body")
 			return
+		}
+		// Preserve the stored password when the client submits an empty value
+		// (the GET never reveals it, so the form can't round-trip it).
+		if cfg.SMTPPass == "" {
+			cfg.SMTPPass = loadNotificationsConfig().SMTPPass
 		}
 		if err := saveNotificationsConfig(cfg); err != nil {
 			writeError(w, err.Error())
