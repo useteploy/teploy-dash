@@ -25,6 +25,7 @@ func (m *mockStore) GetChecks(string, time.Time, int) ([]store.CheckResult, erro
 }
 func (m *mockStore) GetStats(string, time.Time) (*store.UptimeStats, error) { return nil, nil }
 func (m *mockStore) Close() error                                           { return nil }
+func (m *mockStore) Cleanup() error                                         { return nil }
 
 // newNoopAlerter returns a Dispatcher with no channels configured so
 // Send() short-circuits to a no-op. Sufficient for verifying the
