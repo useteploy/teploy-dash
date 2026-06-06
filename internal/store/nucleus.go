@@ -184,6 +184,17 @@ func (s *NucleusStore) SaveCheck(result CheckResult) error {
 	return err
 }
 
+// Cleanup deletes check history older than RetentionDays. Without this the
+// NucleusStore checks table grew unbounded — the daily cleanup ticker only ran
+// for the file backend.
+func (s *NucleusStore) Cleanup() error {
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
+	cutoff := time.Now().AddDate(0, 0, -RetentionDays)
+	_, err := s.pool.Exec(ctx, `DELETE FROM checks WHERE checked_at < $1`, cutoff)
+	return err
+}
+
 func (s *NucleusStore) GetChecks(monitorID string, since time.Time, limit int) ([]CheckResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()

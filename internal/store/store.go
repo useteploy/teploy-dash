@@ -63,6 +63,10 @@ type Store interface {
 	GetChecks(monitorID string, since time.Time, limit int) ([]CheckResult, error)
 	GetStats(monitorID string, since time.Time) (*UptimeStats, error)
 
+	// Cleanup prunes check history older than RetentionDays. Implemented by
+	// every backend so the retention ticker runs regardless of which is active.
+	Cleanup() error
+
 	// Lifecycle
 	Close() error
 }

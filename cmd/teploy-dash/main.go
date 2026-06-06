@@ -101,21 +101,19 @@ func main() {
 	mon.Start()
 
 	// Start daily cleanup for file store (removes checks older than store.RetentionDays)
-	var cleanupTicker *time.Ticker
-	if fileStore != nil {
-		cleanupTicker = time.NewTicker(24 * time.Hour)
-		go func() {
-			// Run cleanup once at startup
-			if err := fileStore.Cleanup(); err != nil {
+	// Runs for ANY backend now (previously fileStore-only, so the Nucleus
+	// checks table grew unbounded).
+	cleanupTicker := time.NewTicker(24 * time.Hour)
+	go func() {
+		if err := st.Cleanup(); err != nil {
+			log.Printf("Cleanup error: %v", err)
+		}
+		for range cleanupTicker.C {
+			if err := st.Cleanup(); err != nil {
 				log.Printf("Cleanup error: %v", err)
 			}
-			for range cleanupTicker.C {
-				if err := fileStore.Cleanup(); err != nil {
-					log.Printf("Cleanup error: %v", err)
-				}
-			}
-		}()
-	}
+		}
+	}()
 
 	// Start server
 	go func() {
