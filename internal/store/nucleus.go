@@ -81,6 +81,9 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 			message TEXT DEFAULT '',
 			checked_at TIMESTAMP NOT NULL DEFAULT NOW()
 		)`,
+		// Serves the (monitor_id =) + (checked_at range / ORDER BY) access pattern
+		// in GetChecks/GetStats; without it every query is a full scan.
+		`CREATE INDEX IF NOT EXISTS idx_checks_monitor_time ON checks (monitor_id, checked_at DESC)`,
 	}
 
 	for _, q := range queries {
@@ -119,6 +122,11 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 		m.ExpectedStatus = expectedStatus
 		m.Method = method
 		monitors = append(monitors, m)
+	}
+	if err := rows.Err(); err != nil {
+		// Surface a mid-stream failure instead of silently returning a
+		// truncated monitor list (which would stop monitoring some targets).
+		return nil, err
 	}
 	return monitors, nil
 }
@@ -220,6 +228,9 @@ func (s *NucleusStore) GetChecks(monitorID string, since time.Time, limit int) (
 		r.ResponseTime = time.Duration(responseMs) * time.Millisecond
 		results = append(results, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -234,7 +245,7 @@ func (s *NucleusStore) GetStats(monitorID string, since time.Time) (*UptimeStats
 		`SELECT COUNT(*),
 		        SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END),
 		        SUM(CASE WHEN status != 'up' THEN 1 ELSE 0 END),
-		        COALESCE(AVG(response_time_ms), 0)
+		        COALESCE(AVG(response_time_ms) FILTER (WHERE status = 'up'), 0)
 		 FROM checks WHERE monitor_id = $1 AND checked_at > $2`,
 		monitorID, since,
 	).Scan(&total, &up, &down, &avgMs)

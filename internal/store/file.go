@@ -179,15 +179,19 @@ func (s *FileStore) GetStats(monitorID string, since time.Time) (*UptimeStats, e
 		stats.TotalChecks++
 		if c.Status == "up" {
 			stats.UpChecks++
+			// Average only successful-check latency; a down check's response
+			// time is noise (often 0 or a timeout) and skews the average.
+			totalResponse += c.ResponseTime
 		} else {
 			stats.DownChecks++
 		}
-		totalResponse += c.ResponseTime
 	}
 
 	if stats.TotalChecks > 0 {
 		stats.UptimePercent = float64(stats.UpChecks) / float64(stats.TotalChecks) * 100
-		stats.AvgResponse = totalResponse / time.Duration(stats.TotalChecks)
+	}
+	if stats.UpChecks > 0 {
+		stats.AvgResponse = totalResponse / time.Duration(stats.UpChecks)
 	}
 
 	return stats, nil
