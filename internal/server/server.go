@@ -1443,10 +1443,25 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		// as two processes for a same-name edit would drop tags/vpn_ip, because
 		// the re-add reads servers.yml after the remove already deleted them.
 		if newName != name {
+			// Capture the original host before removing so we can restore the
+			// server if the re-add under the new name fails (otherwise a failed
+			// rename silently loses the server config entirely).
+			origHost := body.Host
+			if orig, ok := s.lookupServer(name); ok && orig.Host != "" {
+				origHost = orig.Host
+			}
 			if _, err := cli.ServerRemove(name); err != nil {
 				writeError(w, err.Error())
 				return
 			}
+			if _, err := cli.ServerAdd(newName, body.Host, user, role); err != nil {
+				// Restore the original entry rather than leave the server lost.
+				_, _ = cli.ServerAdd(name, origHost, user, role)
+				writeError(w, "rename failed (original server restored): "+err.Error())
+				return
+			}
+			writeData(w, map[string]string{"status": "updated"})
+			return
 		}
 		if _, err := cli.ServerAdd(newName, body.Host, user, role); err != nil {
 			writeError(w, err.Error())
