@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
@@ -44,17 +45,30 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 		host = host + ":22"
 	}
 
-	signers, err := loadSigners(keyPath)
+	signers, encryptedFound, err := loadSigners(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("loading SSH keys: %w", err)
 	}
-	if len(signers) == 0 {
+
+	var auth []ssh.AuthMethod
+	// ssh-agent is the correct way to use encrypted keys non-interactively in a
+	// daemon: when SSH_AUTH_SOCK is set, offer the agent's keys.
+	if m, ok := agentAuthMethod(); ok {
+		auth = append(auth, m)
+	}
+	if len(signers) > 0 {
+		auth = append(auth, ssh.PublicKeys(signers...))
+	}
+	if len(auth) == 0 {
+		if encryptedFound {
+			return nil, fmt.Errorf("found a passphrase-protected SSH key but no agent; start ssh-agent (SSH_AUTH_SOCK) or use an unencrypted key / TEPLOY_SSH_KEY")
+		}
 		return nil, fmt.Errorf("no SSH keys found; set TEPLOY_SSH_KEY or place a key at ~/.ssh/id_ed25519")
 	}
 
 	cfg := &ssh.ClientConfig{
 		User: user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)},
+		Auth: auth,
 		// Verify host keys (trust-on-first-use) by default so a changed key on
 		// an untrusted network is detected, instead of the old accept-anything.
 		// Set TEPLOY_DASH_SSH_INSECURE=1 to fall back to accept-all (logged).
@@ -189,16 +203,19 @@ func (c *Client) Close() {
 	c.client.Close()
 }
 
-func loadSigners(keyPath string) ([]ssh.Signer, error) {
+// loadSigners returns usable (unencrypted) key signers and whether any key on
+// disk was passphrase-protected (so Connect can emit a clearer error pointing
+// to ssh-agent rather than a misleading "no keys found").
+func loadSigners(keyPath string) (signers []ssh.Signer, encryptedFound bool, err error) {
 	var paths []string
 	if keyPath != "" {
 		paths = []string{keyPath}
 	} else if env := os.Getenv("TEPLOY_SSH_KEY"); env != "" {
 		paths = []string{env}
 	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, err
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			return nil, false, herr
 		}
 		paths = []string{
 			filepath.Join(home, ".ssh", "id_ed25519"),
@@ -206,17 +223,35 @@ func loadSigners(keyPath string) ([]ssh.Signer, error) {
 		}
 	}
 
-	var signers []ssh.Signer
 	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
 			continue
 		}
-		signer, err := ssh.ParsePrivateKey(data)
-		if err != nil {
-			continue // skip passphrase-protected keys in daemon mode
+		signer, perr := ssh.ParsePrivateKey(data)
+		if perr != nil {
+			var pp *ssh.PassphraseMissingError
+			if errors.As(perr, &pp) {
+				encryptedFound = true // handled via ssh-agent, not inline
+			}
+			continue
 		}
 		signers = append(signers, signer)
 	}
-	return signers, nil
+	return signers, encryptedFound, nil
+}
+
+// agentAuthMethod returns an AuthMethod backed by ssh-agent when SSH_AUTH_SOCK
+// is set, which is how a daemon uses passphrase-protected keys non-interactively.
+func agentAuthMethod() (ssh.AuthMethod, bool) {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return nil, false
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, false
+	}
+	ag := agent.NewClient(conn)
+	return ssh.PublicKeysCallback(ag.Signers), true
 }

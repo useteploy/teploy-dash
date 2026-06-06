@@ -492,6 +492,13 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Up-front existence check for every action so an unconfigured server name
+	// returns a clear "server not found" instead of an opaque SSH/CLI error.
+	if _, ok := s.lookupServer(serverName); !ok {
+		writeError(w, "server not found: "+serverName)
+		return
+	}
+
 	switch {
 	case action == "status" && r.Method == "GET":
 		// Return from fleet cache if available, else fetch directly.

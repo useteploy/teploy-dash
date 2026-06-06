@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,11 @@ const deploymentsDir = "/deployments"
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// validAppName matches the deployment app-name charset (^[A-Za-z0-9._-]+$).
+var validAppNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func validAppName(s string) bool { return validAppNameRe.MatchString(s) }
 
 // AppState is the state of a deployed app on a remote server.
 type AppState struct {
@@ -62,6 +68,11 @@ func ListApps(ctx context.Context, srv ServerConn) ([]AppState, error) {
 		if name == "" || name == "teploy.log" {
 			continue
 		}
+		// Ignore directory names that aren't valid app names — defense in depth
+		// so a non-conforming name from `ls` can never reach a shell command.
+		if !validAppName(name) {
+			continue
+		}
 
 		state, err := readAppState(ctx, c, srv.Name, name)
 		if err != nil || state == nil {
@@ -76,7 +87,7 @@ func ListApps(ctx context.Context, srv ServerConn) ([]AppState, error) {
 // readAppState reads the KEY=VALUE state file and docker status for one app.
 func readAppState(ctx context.Context, c *uissh.Client, serverName, appName string) (*AppState, error) {
 	statePath := fmt.Sprintf("%s/%s/state", deploymentsDir, appName)
-	raw, err := c.Run(ctx, fmt.Sprintf("cat %s 2>/dev/null", statePath))
+	raw, err := c.Run(ctx, fmt.Sprintf("cat %s 2>/dev/null", shellQuote(statePath)))
 	if err != nil || strings.TrimSpace(raw) == "" {
 		return nil, nil
 	}
@@ -99,7 +110,7 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 	}
 
 	// Get state file mtime as deployed_at.
-	ts, err := c.Run(ctx, fmt.Sprintf("stat -c %%Y %s 2>/dev/null", statePath))
+	ts, err := c.Run(ctx, fmt.Sprintf("stat -c %%Y %s 2>/dev/null", shellQuote(statePath)))
 	if err == nil && ts != "" {
 		if unix, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64); err == nil {
 			st.DeployedAt = time.Unix(unix, 0).UTC()
