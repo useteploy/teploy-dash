@@ -3,8 +3,10 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 const (
@@ -52,14 +55,10 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	cfg := &ssh.ClientConfig{
 		User: user,
 		Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)},
-		// Host keys are intentionally not verified. teploy-dash is designed to
-		// run on a trusted/private network (e.g. a Tailscale mesh) where the
-		// transport is already authenticated and encrypted, and the fleet's dev
-		// servers are frequently re-provisioned — strict known_hosts checking
-		// would refuse the changed key on every rebuild. If dash is ever pointed
-		// at servers over an untrusted network, this is the seam to add opt-in
-		// known_hosts verification.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec — trusted-network assumption, see comment
+		// Verify host keys (trust-on-first-use) by default so a changed key on
+		// an untrusted network is detected, instead of the old accept-anything.
+		// Set TEPLOY_DASH_SSH_INSECURE=1 to fall back to accept-all (logged).
+		HostKeyCallback: hostKeyCallback(),
 	}
 
 	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", host)
@@ -83,6 +82,68 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	conn.SetDeadline(time.Time{}) // clear handshake deadline
 
 	return &Client{client: ssh.NewClient(c, chans, reqs), host: host}, nil
+}
+
+// hostKeyCallback returns a known_hosts-verifying callback (trust-on-first-use),
+// or accept-all when TEPLOY_DASH_SSH_INSECURE=1 is set. Mirrors the CLI's
+// behaviour so the two products are consistent.
+func hostKeyCallback() ssh.HostKeyCallback {
+	if os.Getenv("TEPLOY_DASH_SSH_INSECURE") == "1" {
+		log.Printf("[ssh] WARNING: host-key verification disabled (TEPLOY_DASH_SSH_INSECURE=1)")
+		return ssh.InsecureIgnoreHostKey() //nolint:gosec — explicit opt-in
+	}
+	path := os.Getenv("TEPLOY_SSH_KNOWN_HOSTS")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return acceptNewHostKeyCallback("") // can't resolve home; TOFU with no file
+		}
+		path = filepath.Join(home, ".ssh", "known_hosts")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return acceptNewHostKeyCallback(path) // record on first connect
+	}
+	cb, err := knownhosts.New(path)
+	if err != nil {
+		return acceptNewHostKeyCallback(path)
+	}
+	return cb
+}
+
+// acceptNewHostKeyCallback records an unknown host key on first connect and
+// errors on a genuine mismatch (same key type, different key = possible MITM).
+func acceptNewHostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
+	var existing ssh.HostKeyCallback
+	if knownHostsPath != "" {
+		existing, _ = knownhosts.New(knownHostsPath)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if existing != nil {
+			err := existing(hostname, remote, key)
+			if err == nil {
+				return nil
+			}
+			var keyErr *knownhosts.KeyError
+			if errors.As(err, &keyErr) && len(keyErr.Want) > 0 {
+				for _, want := range keyErr.Want {
+					if want.Key.Type() == key.Type() {
+						return err // same type, different key = real mismatch
+					}
+				}
+			}
+		}
+		if knownHostsPath == "" {
+			return nil // nowhere to persist; accept this session
+		}
+		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+		f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		fmt.Fprintln(f, line)
+		return nil
+	}
 }
 
 // Run executes a command and returns its combined stdout (trimmed).
