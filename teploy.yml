@@ -30,6 +30,11 @@ platform: linux/amd64
 
 stop_timeout: 10
 
+# Dash's health endpoint is exempt from auth; teploy polls it to gate
+# traffic switch. Default path /health would get 401 and loop until timeout.
+health:
+  path: /api/health
+
 env:
   TEPLOY_DASH_PASSWORD: "${TEPLOY_DASH_PASSWORD}"
   # Skip SSH host-key verification inside the container (no known_hosts file).
