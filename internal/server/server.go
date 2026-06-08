@@ -29,6 +29,7 @@ type Config struct {
 	Host           string
 	Port           int
 	DeploymentsDir string
+	DataDir        string
 	Monitor        *monitor.Runner
 	Store          store.Store
 	// AuthUser and AuthPass enable HTTP Basic Auth on all routes except
@@ -285,6 +286,9 @@ func (g *authGate) isTrustedProxy(host string) bool {
 }
 
 func (s *Server) routes() {
+	// Homepage
+	s.mux.HandleFunc("/api/homepage", s.handleHomepage)
+
 	// Deployment management
 	s.mux.HandleFunc("/api/servers", s.handleServers)
 	s.mux.HandleFunc("/api/servers/", s.handleServerDetail)
@@ -1789,6 +1793,86 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Write(data)
+}
+
+// ── Homepage ──────────────────────────────────────────────────────────────
+
+type HomepageItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Description string `json:"description,omitempty"`
+	Color       string `json:"color,omitempty"`
+}
+
+type homepageData struct {
+	Items []HomepageItem `json:"items"`
+}
+
+func (s *Server) homepageFilePath() string {
+	return filepath.Join(s.config.DataDir, "homepage.json")
+}
+
+func (s *Server) loadHomepage() (homepageData, error) {
+	raw, err := os.ReadFile(s.homepageFilePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return homepageData{Items: []HomepageItem{}}, nil
+		}
+		return homepageData{}, err
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return homepageData{Items: []HomepageItem{}}, nil
+	}
+	var data homepageData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return homepageData{}, err
+	}
+	if data.Items == nil {
+		data.Items = []HomepageItem{}
+	}
+	return data, nil
+}
+
+func (s *Server) saveHomepage(data homepageData) error {
+	path := s.homepageFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0644)
+}
+
+func (s *Server) handleHomepage(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		data, err := s.loadHomepage()
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeData(w, data.Items)
+	case "PUT":
+		var items []HomepageItem
+		if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+			writeError(w, "invalid JSON: "+err.Error())
+			return
+		}
+		if items == nil {
+			items = []HomepageItem{}
+		}
+		if err := s.saveHomepage(homepageData{Items: items}); err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeData(w, items)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

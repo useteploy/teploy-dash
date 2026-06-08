@@ -82,7 +82,7 @@ function toggleTheme() {
 document.addEventListener('alpine:init', () => {
   // ── Router Store ──
   Alpine.store('router', {
-    page: 'projects',
+    page: 'homepage',
     params: {},
     navigate(page, params = {}) {
       this.page = page;
@@ -956,6 +956,77 @@ document.addEventListener('alpine:init', () => {
 
     formatDate(d) {
       return new Date(d).toLocaleString();
+    },
+  }));
+
+  // ── Homepage ──
+  Alpine.data('homepagePage', () => ({
+    items: [],
+    loading: true,
+    editing: false,
+    showForm: false,
+    editingItem: null,
+    form: { name: '', url: '', description: '', color: '#3b82f6' },
+    colors: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#f97316'],
+
+    async init() {
+      try {
+        this.items = (await api.get('/api/homepage')) || [];
+      } catch(e) {
+        showToast(e.message, 'error');
+      }
+      this.loading = false;
+    },
+
+    iconLetters(name) {
+      return name.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+    },
+
+    openAdd() {
+      this.editingItem = null;
+      this.form = { name: '', url: '', description: '', color: '#3b82f6' };
+      this.showForm = true;
+    },
+
+    openEdit(item) {
+      this.editingItem = item.id;
+      this.form = { name: item.name, url: item.url, description: item.description || '', color: item.color || '#3b82f6' };
+      this.showForm = true;
+    },
+
+    cancelForm() {
+      this.showForm = false;
+      this.editingItem = null;
+    },
+
+    async saveForm() {
+      const name = this.form.name.trim();
+      const url  = this.form.url.trim();
+      if (!name || !url) { showToast('Name and URL are required', 'error'); return; }
+      if (this.editingItem) {
+        const idx = this.items.findIndex(i => i.id === this.editingItem);
+        if (idx !== -1) {
+          this.items[idx] = { id: this.editingItem, name, url, description: this.form.description.trim(), color: this.form.color };
+        }
+      } else {
+        this.items.push({ id: Math.random().toString(36).slice(2), name, url, description: this.form.description.trim(), color: this.form.color });
+      }
+      await this.persist();
+      this.showForm = false;
+      this.editingItem = null;
+    },
+
+    async remove(id) {
+      this.items = this.items.filter(i => i.id !== id);
+      await this.persist();
+    },
+
+    async persist() {
+      try {
+        await api.put('/api/homepage', this.items);
+      } catch(e) {
+        showToast(e.message, 'error');
+      }
     },
   }));
 });

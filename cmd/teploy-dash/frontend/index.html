@@ -12,8 +12,9 @@
 
 <!-- Navbar -->
 <nav class="navbar">
-  <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('projects')">teploy dash</a>
+  <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('homepage')">teploy dash</a>
   <ul class="navbar-nav">
+    <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'projects' }" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
@@ -35,6 +36,91 @@
 
 <!-- Content -->
 <div class="content">
+
+  <!-- ═══ Homepage ═══ -->
+  <template x-if="$store.router.page === 'homepage'">
+    <div x-data="homepagePage">
+      <div class="page-header">
+        <h1 class="page-title">Home</h1>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <template x-if="editing">
+            <button class="btn btn-primary btn-sm" @click="openAdd()">+ Add</button>
+          </template>
+          <button class="btn btn-sm" @click="editing = !editing; showForm = false"
+                  x-text="editing ? 'Done' : 'Edit'"></button>
+        </div>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && items.length === 0 && !editing">
+        <div class="empty-state">
+          <p>No shortcuts yet.</p>
+          <button class="btn btn-primary" style="margin-top:12px;" @click="editing = true; openAdd()">Add your first shortcut</button>
+        </div>
+      </template>
+
+      <template x-if="!loading">
+        <div>
+          <!-- Add / Edit form -->
+          <template x-if="showForm">
+            <div class="card" style="margin-bottom:24px;max-width:480px;">
+              <div class="form-group">
+                <label class="form-label">Name</label>
+                <input class="form-input" type="text" x-model="form.name" placeholder="Forgejo">
+              </div>
+              <div class="form-group">
+                <label class="form-label">URL</label>
+                <input class="form-input" type="url" x-model="form.url" placeholder="http://100.108.123.49:49152">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Description <span class="text-muted">(optional)</span></label>
+                <input class="form-input" type="text" x-model="form.description" placeholder="Self-hosted git">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Color</label>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+                  <template x-for="c in colors" :key="c">
+                    <button class="color-swatch" :style="`background:${c};outline-color:${c};`"
+                            :class="{ selected: form.color === c }"
+                            @click="form.color = c"></button>
+                  </template>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px;">
+                <button class="btn btn-primary" @click="saveForm()" x-text="editingItem ? 'Save' : 'Add'"></button>
+                <button class="btn" @click="cancelForm()">Cancel</button>
+              </div>
+            </div>
+          </template>
+
+          <!-- Card grid -->
+          <div class="homepage-grid">
+            <template x-for="item in items" :key="item.id">
+              <a class="homepage-card" :href="item.url" target="_blank" rel="noopener"
+                 :class="{ 'homepage-card-edit': editing }"
+                 @click.prevent="editing ? null : window.open(item.url, '_blank', 'noopener')">
+                <div class="homepage-card-icon" :style="`background:${item.color || '#3b82f6'}`"
+                     x-text="iconLetters(item.name)"></div>
+                <div class="homepage-card-body">
+                  <div class="homepage-card-name" x-text="item.name"></div>
+                  <div class="homepage-card-desc" x-text="item.description || item.url"></div>
+                </div>
+                <template x-if="editing">
+                  <div class="homepage-card-actions" @click.stop>
+                    <button class="btn btn-sm" @click="openEdit(item)">Edit</button>
+                    <button class="btn btn-sm btn-danger" @click="remove(item.id)">Remove</button>
+                  </div>
+                </template>
+              </a>
+            </template>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
 
   <!-- ═══ Projects Page ═══ -->
   <template x-if="$store.router.page === 'projects'">

@@ -83,6 +83,7 @@ func main() {
 		Host:           *host,
 		Port:           *port,
 		DeploymentsDir: *deploymentsDir,
+		DataDir:        *dataDir,
 		Monitor:        mon,
 		Store:          st,
 		AuthUser:       authUser,
