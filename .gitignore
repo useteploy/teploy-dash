@@ -13,6 +13,9 @@
 # Environment
 .env
 
+# Private destination overlays (per-infra, never committed)
+teploy.*.yml
+
 # OS
 .DS_Store
 Thumbs.db

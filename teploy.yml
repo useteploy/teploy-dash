@@ -1,0 +1,47 @@
+# Teploy Dash — Teploy deployment template.
+#
+# First time:
+#   teploy setup          # installs Docker + Caddy on the server
+#   teploy deploy         # builds image, ships it, switches traffic
+#
+# Subsequent deploys:
+#   teploy deploy
+#
+# Required env (export before running):
+#   TEPLOY_DASH_PASSWORD   — dashboard password (username defaults to "admin")
+#
+# SSH access to servers:
+#   Place your SSH private key at /deployments/dash/volumes/ssh-key/id_ed25519
+#   on the server after the first deploy. Mode 600.
+#
+# Teploy server list:
+#   Place a servers.yml at /deployments/dash/volumes/teploy-config/servers.yml
+#   — same format as ~/.teploy/servers.yml on your machine.
+
+app: dash
+domain: dash.example.com
+server: dash.example.com
+
+port: 3456
+platform: linux/amd64
+
+# Build mode: server-side build (no image, no build_local).
+# Compiles natively on the server — no local Docker or cross-build needed.
+
+stop_timeout: 10
+
+env:
+  TEPLOY_DASH_PASSWORD: "${TEPLOY_DASH_PASSWORD}"
+  # Skip SSH host-key verification inside the container (no known_hosts file).
+  TEPLOY_DASH_SSH_INSECURE: "1"
+  # SSH key path inside the container. Place the key in the ssh-key volume.
+  TEPLOY_SSH_KEY: "/root/.ssh/id_ed25519"
+
+volumes:
+  # Monitor state (check history, alert state).
+  dash-state: /var/teploy-dash
+  # SSH private key for fleet SSH connections.
+  # Place key at /deployments/dash/volumes/ssh-key/id_ed25519 (mode 600).
+  ssh-key: /root/.ssh
+  # Teploy CLI config — place servers.yml here for fleet view.
+  teploy-config: /root/.teploy
