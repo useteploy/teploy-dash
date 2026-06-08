@@ -79,16 +79,6 @@
                 <label class="form-label">Description <span class="text-muted">(optional)</span></label>
                 <input class="form-input" type="text" x-model="form.description" placeholder="Self-hosted git">
               </div>
-              <div class="form-group">
-                <label class="form-label">Color</label>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
-                  <template x-for="c in colors" :key="c">
-                    <button class="color-swatch" :style="`background:${c};outline-color:${c};`"
-                            :class="{ selected: form.color === c }"
-                            @click="form.color = c"></button>
-                  </template>
-                </div>
-              </div>
               <div style="display:flex;gap:8px;margin-top:8px;">
                 <button class="btn btn-primary" @click="saveForm()" x-text="editingItem ? 'Save' : 'Add'"></button>
                 <button class="btn" @click="cancelForm()">Cancel</button>
@@ -99,22 +89,27 @@
           <!-- Card grid -->
           <div class="homepage-grid">
             <template x-for="item in items" :key="item.id">
-              <a class="homepage-card" :href="item.url" target="_blank" rel="noopener"
-                 :class="{ 'homepage-card-edit': editing }"
-                 @click.prevent="editing ? null : window.open(item.url, '_blank', 'noopener')">
-                <div class="homepage-card-icon" :style="`background:${item.color || '#3b82f6'}`"
-                     x-text="iconLetters(item.name)"></div>
+              <div class="homepage-card" :class="{ 'homepage-card-edit': editing }"
+                   @click="editing ? openEdit(item) : window.open(item.url, '_blank', 'noopener')">
+                <!-- Remove × in top-right corner when editing -->
+                <template x-if="editing">
+                  <button class="homepage-card-remove" @click.stop="remove(item.id)" title="Remove">&times;</button>
+                </template>
+                <!-- Favicon with colored-initials fallback -->
+                <div class="homepage-card-icon-wrap">
+                  <img class="homepage-card-favicon"
+                       :src="faviconUrl(item.url)"
+                       :style="item._faviconFailed ? 'display:none' : ''"
+                       @error="item._faviconFailed = true">
+                  <div class="homepage-card-icon"
+                       :style="`background:${item.color || '#3b82f6'};${item._faviconFailed ? '' : 'display:none'}`"
+                       x-text="iconLetters(item.name)"></div>
+                </div>
                 <div class="homepage-card-body">
                   <div class="homepage-card-name" x-text="item.name"></div>
                   <div class="homepage-card-desc" x-text="item.description || item.url"></div>
                 </div>
-                <template x-if="editing">
-                  <div class="homepage-card-actions" @click.stop>
-                    <button class="btn btn-sm" @click="openEdit(item)">Edit</button>
-                    <button class="btn btn-sm btn-danger" @click="remove(item.id)">Remove</button>
-                  </div>
-                </template>
-              </a>
+              </div>
             </template>
           </div>
         </div>

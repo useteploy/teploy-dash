@@ -971,11 +971,16 @@ document.addEventListener('alpine:init', () => {
 
     async init() {
       try {
-        this.items = (await api.get('/api/homepage')) || [];
+        const raw = (await api.get('/api/homepage')) || [];
+        this.items = raw.map(i => ({ ...i, _faviconFailed: false }));
       } catch(e) {
         showToast(e.message, 'error');
       }
       this.loading = false;
+    },
+
+    faviconUrl(url) {
+      try { return new URL(url).origin + '/favicon.ico'; } catch { return ''; }
     },
 
     iconLetters(name) {
@@ -1006,10 +1011,10 @@ document.addEventListener('alpine:init', () => {
       if (this.editingItem) {
         const idx = this.items.findIndex(i => i.id === this.editingItem);
         if (idx !== -1) {
-          this.items[idx] = { id: this.editingItem, name, url, description: this.form.description.trim(), color: this.form.color };
+          this.items[idx] = { id: this.editingItem, name, url, description: this.form.description.trim(), color: this.form.color, _faviconFailed: false };
         }
       } else {
-        this.items.push({ id: Math.random().toString(36).slice(2), name, url, description: this.form.description.trim(), color: this.form.color });
+        this.items.push({ id: Math.random().toString(36).slice(2), name, url, description: this.form.description.trim(), color: this.form.color, _faviconFailed: false });
       }
       await this.persist();
       this.showForm = false;
@@ -1023,7 +1028,8 @@ document.addEventListener('alpine:init', () => {
 
     async persist() {
       try {
-        await api.put('/api/homepage', this.items);
+        const clean = this.items.map(({ _faviconFailed, ...i }) => i);
+        await api.put('/api/homepage', clean);
       } catch(e) {
         showToast(e.message, 'error');
       }
