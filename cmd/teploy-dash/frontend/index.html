@@ -89,7 +89,12 @@
           <!-- Card grid -->
           <div class="homepage-grid">
             <template x-for="item in items" :key="item.id">
-              <div class="homepage-card" :class="{ 'homepage-card-edit': editing }"
+              <div class="homepage-card"
+                   :class="{ 'homepage-card-edit': editing, 'homepage-card-dragging': editing && _dragId === item.id, 'homepage-card-dragover': editing && _dragOverId === item.id && _dragId !== item.id }"
+                   :draggable="editing"
+                   @dragstart="editing && dragStart(item.id, $event)"
+                   @dragover="editing && dragOver(item.id, $event)"
+                   @dragend="editing && dragEnd()"
                    @click="editing ? openEdit(item) : window.open(item.url, '_blank', 'noopener')">
                 <!-- Remove × in top-right corner when editing -->
                 <template x-if="editing">

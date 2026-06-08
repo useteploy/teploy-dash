@@ -767,7 +767,9 @@ tr:last-child td { border-bottom: none; }
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-.homepage-card-edit { cursor: default; }
+.homepage-card-edit { cursor: grab; }
+.homepage-card-dragging { opacity: 0.4; cursor: grabbing; }
+.homepage-card-dragover { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 
 .homepage-card-remove {
   position: absolute;

@@ -968,6 +968,9 @@ document.addEventListener('alpine:init', () => {
     editingItem: null,
     form: { name: '', url: '', description: '', color: '#3b82f6' },
     colors: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#f97316'],
+    _dragId: null,
+    _dragOverId: null,
+    _didDrag: false,
 
     async init() {
       try {
@@ -1033,6 +1036,34 @@ document.addEventListener('alpine:init', () => {
       } catch(e) {
         showToast(e.message, 'error');
       }
+    },
+
+    dragStart(id, event) {
+      this._dragId = id;
+      this._didDrag = false;
+      event.dataTransfer.effectAllowed = 'move';
+    },
+
+    dragOver(id, event) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      if (id === this._dragId) return;
+      if (id === this._dragOverId) return;
+      this._dragOverId = id;
+      this._didDrag = true;
+      const from = this.items.findIndex(i => i.id === this._dragId);
+      const to   = this.items.findIndex(i => i.id === id);
+      if (from === -1 || to === -1) return;
+      const moved = this.items.splice(from, 1)[0];
+      this.items.splice(to, 0, moved);
+    },
+
+    dragEnd() {
+      const moved = this._didDrag;
+      this._dragId = null;
+      this._dragOverId = null;
+      this._didDrag = false;
+      if (moved) this.persist();
     },
   }));
 });
