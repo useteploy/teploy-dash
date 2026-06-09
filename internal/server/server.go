@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/monitor"
@@ -34,10 +36,12 @@ type Config struct {
 	DataDir        string
 	Monitor        *monitor.Runner
 	Store          store.Store
-	// AuthUser and AuthPass enable HTTP Basic Auth on all routes except
-	// /api/health. If both are empty, auth is disabled (dev mode).
+	// AuthUser and AuthPass are bootstrap credentials from env vars. If AuthPass
+	// is empty and no auth.json exists, the server starts in setup mode.
+	// If NoAuth is true, authentication is disabled entirely (dev mode).
 	AuthUser string
 	AuthPass string
+	NoAuth   bool
 	// Frontend is the embedded SPA filesystem (rooted at the frontend/
 	// directory: contains index.html, css/, js/). Required — the binary is
 	// not portable without an embedded UI.
@@ -95,8 +99,8 @@ func New(config Config) *Server {
 		fleet:    &fleetCache{ttl: 60 * time.Second},
 		frontend: config.Frontend,
 	}
-	if config.AuthPass != "" {
-		s.gate = newAuthGate(config.AuthUser, config.AuthPass)
+	if !config.NoAuth {
+		s.gate = newAuthGate(config.AuthUser, config.AuthPass, filepath.Join(config.DataDir, "auth.json"))
 	}
 	s.routes()
 	return s
@@ -116,12 +120,21 @@ func (s *Server) ListenAndServe(addr string) error {
 // backoff (brute-force resistance) and a same-origin requirement on
 // state-changing requests (CSRF defense).
 type authGate struct {
-	user, pass     string
+	// Bootstrap credentials from env vars (plaintext, fallback when no auth.json).
+	user, pass string
+	// On-disk credentials (bcrypt). Protected by credMu.
+	credMu        sync.RWMutex
+	credFile      string
+	credUser      string
+	credHash      string
+	setupRequired bool
+	// Rate limiting
 	trustedProxies []*net.IPNet
 	mu             sync.Mutex
 	fails          map[string]*failInfo
-	sessMu         sync.Mutex
-	sessions       map[string]time.Time
+	// Sessions
+	sessMu   sync.Mutex
+	sessions map[string]time.Time
 }
 
 type failInfo struct {
@@ -136,14 +149,80 @@ const (
 	sessionCookie  = "teploy_dash_session"
 )
 
-func newAuthGate(user, pass string) *authGate {
-	return &authGate{
+// authCredFile is the on-disk credential format.
+type authCredFile struct {
+	Username     string `json:"username"`
+	PasswordHash string `json:"password_hash"`
+}
+
+func newAuthGate(user, pass, credFile string) *authGate {
+	g := &authGate{
 		user:           user,
 		pass:           pass,
+		credFile:       credFile,
 		trustedProxies: parseTrustedProxies(os.Getenv("TEPLOY_DASH_TRUSTED_PROXY")),
 		fails:          make(map[string]*failInfo),
 		sessions:       make(map[string]time.Time),
 	}
+	// Try loading stored credentials. If none exist and no env-var password
+	// is set, enter setup mode so the user can create their account.
+	if err := g.loadCredFile(); err != nil && pass == "" {
+		g.setupRequired = true
+	}
+	return g
+}
+
+func (g *authGate) loadCredFile() error {
+	data, err := os.ReadFile(g.credFile)
+	if err != nil {
+		return err
+	}
+	var creds authCredFile
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return err
+	}
+	g.credMu.Lock()
+	g.credUser = creds.Username
+	g.credHash = creds.PasswordHash
+	g.setupRequired = false
+	g.credMu.Unlock()
+	return nil
+}
+
+func (g *authGate) saveCredFile(username, password string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	creds := authCredFile{Username: username, PasswordHash: string(hash)}
+	data, err := json.Marshal(creds)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(g.credFile), 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(g.credFile, data, 0600); err != nil {
+		return err
+	}
+	g.credMu.Lock()
+	g.credUser = username
+	g.credHash = string(hash)
+	g.setupRequired = false
+	g.credMu.Unlock()
+	return nil
+}
+
+// validatePassword checks the submitted password against stored bcrypt hash
+// (auth.json) or the env-var plaintext fallback.
+func (g *authGate) validatePassword(password string) bool {
+	g.credMu.RLock()
+	hash := g.credHash
+	g.credMu.RUnlock()
+	if hash != "" {
+		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+	}
+	return subtle.ConstantTimeCompare([]byte(password), []byte(g.pass)) == 1
 }
 
 func (g *authGate) newSession() string {
@@ -214,6 +293,25 @@ func parseTrustedProxies(s string) []*net.IPNet {
 
 func (g *authGate) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Setup mode: no credentials configured yet. Only let through the
+		// setup page and its API endpoint.
+		g.credMu.RLock()
+		inSetup := g.setupRequired
+		g.credMu.RUnlock()
+		if inSetup {
+			switch r.URL.Path {
+			case "/api/health", "/setup", "/api/setup":
+				next.ServeHTTP(w, r)
+			default:
+				if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+					jsonError(w, "setup required", http.StatusServiceUnavailable)
+				} else {
+					http.Redirect(w, r, "/setup", http.StatusFound)
+				}
+			}
+			return
+		}
+
 		// Always allow: health, login page, and login/logout API.
 		switch r.URL.Path {
 		case "/api/health", "/login", "/api/login", "/api/logout":
@@ -236,11 +334,11 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
 				jsonError(w, "unauthorized", http.StatusUnauthorized)
 			} else {
-				next := r.URL.Path
+				nextPath := r.URL.Path
 				if r.URL.RawQuery != "" {
-					next += "?" + r.URL.RawQuery
+					nextPath += "?" + r.URL.RawQuery
 				}
-				http.Redirect(w, r, "/login?next="+url.QueryEscape(next), http.StatusFound)
+				http.Redirect(w, r, "/login?next="+url.QueryEscape(nextPath), http.StatusFound)
 			}
 			return
 		}
@@ -280,12 +378,114 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(g.pass)) != 1 {
+	if !g.validatePassword(body.Password) {
 		g.recordFail(ip)
 		jsonError(w, "incorrect password", http.StatusUnauthorized)
 		return
 	}
 	g.recordSuccess(ip)
+	g.issueSessionCookie(w)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleSetup creates the initial account. Only works in setup mode.
+func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	g.credMu.RLock()
+	inSetup := g.setupRequired
+	g.credMu.RUnlock()
+	if !inSetup {
+		jsonError(w, "account already configured", http.StatusConflict)
+		return
+	}
+	var body struct {
+		Username        string `json:"username"`
+		Password        string `json:"password"`
+		ConfirmPassword string `json:"confirm_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if body.Username == "" {
+		body.Username = "admin"
+	}
+	if len(body.Password) < 8 {
+		jsonError(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	if body.Password != body.ConfirmPassword {
+		jsonError(w, "passwords do not match", http.StatusBadRequest)
+		return
+	}
+	if err := g.saveCredFile(body.Username, body.Password); err != nil {
+		log.Printf("auth: failed to save credentials: %v", err)
+		jsonError(w, "failed to save credentials", http.StatusInternalServerError)
+		return
+	}
+	g.issueSessionCookie(w)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleChangePassword changes the password. Requires an authenticated session.
+func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+		ConfirmPassword string `json:"confirm_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if !g.validatePassword(body.CurrentPassword) {
+		jsonError(w, "current password is incorrect", http.StatusUnauthorized)
+		return
+	}
+	if len(body.NewPassword) < 8 {
+		jsonError(w, "new password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	if body.NewPassword != body.ConfirmPassword {
+		jsonError(w, "passwords do not match", http.StatusBadRequest)
+		return
+	}
+	g.credMu.RLock()
+	username := g.credUser
+	g.credMu.RUnlock()
+	if username == "" {
+		username = g.user
+		if username == "" {
+			username = "admin"
+		}
+	}
+	if err := g.saveCredFile(username, body.NewPassword); err != nil {
+		log.Printf("auth: failed to save credentials: %v", err)
+		jsonError(w, "failed to save credentials", http.StatusInternalServerError)
+		return
+	}
+	// Invalidate all sessions — the user must log in again with the new password.
+	g.sessMu.Lock()
+	g.sessions = make(map[string]time.Time)
+	g.sessMu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func (g *authGate) issueSessionCookie(w http.ResponseWriter) {
 	token := g.newSession()
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -295,8 +495,6 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // handleLogout clears the session cookie and invalidates the session.
@@ -409,11 +607,14 @@ func (g *authGate) isTrustedProxy(host string) bool {
 }
 
 func (s *Server) routes() {
-	// Auth (registered unconditionally so /login always resolves)
-	s.mux.HandleFunc("/login", s.handleLoginPage)
+	// Auth (only when auth is enabled)
 	if s.gate != nil {
+		s.mux.HandleFunc("/login", s.handleLoginPage)
+		s.mux.HandleFunc("/setup", s.handleSetupPage)
 		s.mux.HandleFunc("/api/login", s.gate.handleLogin)
 		s.mux.HandleFunc("/api/logout", s.gate.handleLogout)
+		s.mux.HandleFunc("/api/setup", s.gate.handleSetup)
+		s.mux.HandleFunc("/api/auth/password", s.gate.handleChangePassword)
 	}
 
 	// Homepage
@@ -1885,13 +2086,32 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleLoginPage serves the standalone login.html page.
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	s.serveStandalonePage(w, "login.html")
+}
+
+// handleSetupPage serves the standalone setup.html page.
+func (s *Server) handleSetupPage(w http.ResponseWriter, r *http.Request) {
+	// If already configured, redirect to login.
+	if s.gate != nil {
+		s.gate.credMu.RLock()
+		inSetup := s.gate.setupRequired
+		s.gate.credMu.RUnlock()
+		if !inSetup {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+	}
+	s.serveStandalonePage(w, "setup.html")
+}
+
+func (s *Server) serveStandalonePage(w http.ResponseWriter, name string) {
 	if s.frontend == nil {
 		http.Error(w, "frontend not embedded", http.StatusInternalServerError)
 		return
 	}
-	data, err := fs.ReadFile(s.frontend, "login.html")
+	data, err := fs.ReadFile(s.frontend, name)
 	if err != nil {
-		http.Error(w, "login page not found", http.StatusNotFound)
+		http.Error(w, "page not found", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

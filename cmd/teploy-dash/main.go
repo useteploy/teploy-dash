@@ -32,19 +32,13 @@ func main() {
 	noAuth := flag.Bool("no-auth", false, "disable HTTP Basic Auth (DANGEROUS — local dev only)")
 	flag.Parse()
 
-	// Auth: read credentials from env. Refuse to start without them unless
-	// --no-auth is set. This UI can stop/start/deploy apps, so exposing it
-	// unauthenticated on a network is a security risk.
+	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
+	// nor a saved auth.json exist, the server starts in setup mode so the user
+	// can create their account via the UI.
 	authUser := os.Getenv("TEPLOY_DASH_USER")
 	authPass := os.Getenv("TEPLOY_DASH_PASSWORD")
 	if authUser == "" {
 		authUser = "admin"
-	}
-	if authPass == "" && !*noAuth {
-		fmt.Fprintln(os.Stderr, "ERROR: TEPLOY_DASH_PASSWORD env var is required.")
-		fmt.Fprintln(os.Stderr, "  Set it to a strong password, or pass --no-auth for local dev.")
-		fmt.Fprintln(os.Stderr, "  Example: TEPLOY_DASH_PASSWORD=$(openssl rand -base64 24) ./teploy-dash")
-		os.Exit(1)
 	}
 	if *noAuth {
 		log.Println("WARNING: --no-auth enabled. UI is accessible without authentication.")
@@ -88,6 +82,7 @@ func main() {
 		Store:          st,
 		AuthUser:       authUser,
 		AuthPass:       authPass,
+		NoAuth:         *noAuth,
 		Frontend:       uiFS,
 	})
 

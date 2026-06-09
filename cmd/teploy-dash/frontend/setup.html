@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>teploy dash — setup</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e5e5e5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 40px;
+      width: 100%;
+      max-width: 380px;
+    }
+
+    .brand { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 4px; }
+    .subtitle { font-size: 14px; color: #888; margin-bottom: 28px; }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #a1a1aa;
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 14px;
+      color: #e5e5e5;
+      outline: none;
+      margin-bottom: 16px;
+      transition: border-color 0.15s;
+    }
+
+    input:focus { border-color: #3b82f6; }
+
+    button {
+      width: 100%;
+      background: #3b82f6;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-top: 4px;
+    }
+
+    button:hover:not(:disabled) { background: #2563eb; }
+    button:disabled { opacity: 0.6; cursor: default; }
+
+    .error { font-size: 13px; color: #ef4444; margin-top: 12px; }
+
+    .hint { font-size: 12px; color: #666; margin-top: -10px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">teploy dash</div>
+    <div class="subtitle">Create your account to get started.</div>
+
+    <label for="username">Username</label>
+    <input type="text" id="username" value="admin" autocomplete="username">
+
+    <label for="password">Password</label>
+    <input type="password" id="password" autocomplete="new-password" autofocus>
+    <p class="hint">At least 8 characters.</p>
+
+    <label for="confirm">Confirm password</label>
+    <input type="password" id="confirm" autocomplete="new-password">
+
+    <button id="btn">Create account</button>
+    <div class="error" id="err" hidden></div>
+  </div>
+
+  <script>
+    const btn = document.getElementById('btn');
+    const usernameEl = document.getElementById('username');
+    const passwordEl = document.getElementById('password');
+    const confirmEl  = document.getElementById('confirm');
+    const err        = document.getElementById('err');
+
+    async function setup() {
+      const username         = usernameEl.value.trim() || 'admin';
+      const password         = passwordEl.value;
+      const confirm_password = confirmEl.value;
+
+      if (!password) { showErr('Password is required.'); return; }
+      if (password.length < 8) { showErr('Password must be at least 8 characters.'); return; }
+      if (password !== confirm_password) { showErr('Passwords do not match.'); return; }
+
+      btn.disabled = true;
+      err.hidden = true;
+
+      try {
+        const resp = await fetch('/api/setup', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password, confirm_password}),
+        });
+        if (resp.ok) {
+          location.href = '/';
+        } else {
+          const data = await resp.json().catch(() => ({}));
+          showErr(data.error || 'Setup failed.');
+          btn.disabled = false;
+        }
+      } catch {
+        showErr('Network error — try again.');
+        btn.disabled = false;
+      }
+    }
+
+    function showErr(msg) {
+      err.textContent = msg;
+      err.hidden = false;
+    }
+
+    btn.addEventListener('click', setup);
+    [usernameEl, passwordEl, confirmEl].forEach(el =>
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') setup(); })
+    );
+  </script>
+</body>
+</html>

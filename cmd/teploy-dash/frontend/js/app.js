@@ -598,6 +598,8 @@ document.addEventListener('alpine:init', () => {
     newReg: { server: '', username: '', password: '' },
     // Add group form
     newGroupName: '',
+    // Change password form
+    pw: { current: '', next: '', confirm: '', saving: false, error: '' },
 
     async init() {
       await this.loadAll();
@@ -742,6 +744,36 @@ document.addEventListener('alpine:init', () => {
         await this.loadAll();
       } catch (e) {
         showToast(e.message, 'error');
+      }
+    },
+
+    async changePassword() {
+      this.pw.error = '';
+      if (!this.pw.current) { this.pw.error = 'Current password is required.'; return; }
+      if (this.pw.next.length < 8) { this.pw.error = 'New password must be at least 8 characters.'; return; }
+      if (this.pw.next !== this.pw.confirm) { this.pw.error = 'New passwords do not match.'; return; }
+      this.pw.saving = true;
+      try {
+        const resp = await fetch('/api/auth/password', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            current_password: this.pw.current,
+            new_password: this.pw.next,
+            confirm_password: this.pw.confirm,
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.pw.error = data.error || 'Password change failed.';
+          this.pw.saving = false;
+          return;
+        }
+        showToast('Password changed. Signing out...', 'success');
+        setTimeout(() => { location.href = '/login'; }, 1200);
+      } catch {
+        this.pw.error = 'Network error — try again.';
+        this.pw.saving = false;
       }
     },
   }));
