@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"io/fs"
 	"log"
@@ -74,6 +76,7 @@ func (fc *fleetCache) set(apps []remote.AppState) {
 type Server struct {
 	mux      *http.ServeMux
 	config   Config
+	gate     *authGate
 	state    *state.Reader
 	monitor  *monitor.Runner
 	store    store.Store
@@ -92,6 +95,9 @@ func New(config Config) *Server {
 		fleet:    &fleetCache{ttl: 60 * time.Second},
 		frontend: config.Frontend,
 	}
+	if config.AuthPass != "" {
+		s.gate = newAuthGate(config.AuthUser, config.AuthPass)
+	}
 	s.routes()
 	return s
 }
@@ -99,22 +105,23 @@ func New(config Config) *Server {
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe(addr string) error {
 	handler := http.Handler(s.mux)
-	if s.config.AuthUser != "" || s.config.AuthPass != "" {
-		handler = newAuthGate(s.config.AuthUser, s.config.AuthPass).wrap(s.mux)
+	if s.gate != nil {
+		handler = s.gate.wrap(s.mux)
 	}
 	return http.ListenAndServe(addr, handler)
 }
 
-// authGate protects all routes except /api/health with HTTP Basic Auth, plus
-// two hardening layers: a per-source-IP failed-attempt backoff (brute-force
-// resistance) and a same-origin requirement on state-changing requests (CSRF
-// defense — browsers auto-send Basic-Auth creds cross-origin, so a malicious
-// page could otherwise drive deploys).
+// authGate protects all routes except /api/health, /login, /api/login, and
+// /api/logout with session-cookie auth, plus per-source-IP failed-attempt
+// backoff (brute-force resistance) and a same-origin requirement on
+// state-changing requests (CSRF defense).
 type authGate struct {
 	user, pass     string
 	trustedProxies []*net.IPNet
 	mu             sync.Mutex
 	fails          map[string]*failInfo
+	sessMu         sync.Mutex
+	sessions       map[string]time.Time
 }
 
 type failInfo struct {
@@ -125,6 +132,8 @@ type failInfo struct {
 const (
 	authMaxFails   = 5
 	authLockWindow = time.Minute
+	sessionTTL     = 24 * time.Hour
+	sessionCookie  = "teploy_dash_session"
 )
 
 func newAuthGate(user, pass string) *authGate {
@@ -133,7 +142,49 @@ func newAuthGate(user, pass string) *authGate {
 		pass:           pass,
 		trustedProxies: parseTrustedProxies(os.Getenv("TEPLOY_DASH_TRUSTED_PROXY")),
 		fails:          make(map[string]*failInfo),
+		sessions:       make(map[string]time.Time),
 	}
+}
+
+func (g *authGate) newSession() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	token := hex.EncodeToString(b)
+	g.sessMu.Lock()
+	defer g.sessMu.Unlock()
+	now := time.Now()
+	for k, exp := range g.sessions {
+		if now.After(exp) {
+			delete(g.sessions, k)
+		}
+	}
+	g.sessions[token] = now.Add(sessionTTL)
+	return token
+}
+
+func (g *authGate) validSession(token string) bool {
+	if token == "" {
+		return false
+	}
+	g.sessMu.Lock()
+	defer g.sessMu.Unlock()
+	exp, ok := g.sessions[token]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(g.sessions, token)
+		return false
+	}
+	return true
+}
+
+func (g *authGate) deleteSession(token string) {
+	g.sessMu.Lock()
+	defer g.sessMu.Unlock()
+	delete(g.sessions, token)
 }
 
 // parseTrustedProxies parses a comma-separated list of proxy IPs/CIDRs. When the
@@ -163,38 +214,110 @@ func parseTrustedProxies(s string) []*net.IPNet {
 
 func (g *authGate) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" {
+		// Always allow: health, login page, and login/logout API.
+		switch r.URL.Path {
+		case "/api/health", "/login", "/api/login", "/api/logout":
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		ip := g.clientIP(r)
 		if g.lockedOut(ip) {
-			http.Error(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
+			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+				jsonError(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
+			} else {
+				http.Error(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
+			}
 			return
 		}
 
-		u, p, ok := r.BasicAuth()
-		if !ok ||
-			subtle.ConstantTimeCompare([]byte(u), []byte(g.user)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(p), []byte(g.pass)) != 1 {
-			g.recordFail(ip)
-			w.Header().Set("WWW-Authenticate", `Basic realm="teploy-dash"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		cookie, err := r.Cookie(sessionCookie)
+		if err != nil || !g.validSession(cookie.Value) {
+			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+				jsonError(w, "unauthorized", http.StatusUnauthorized)
+			} else {
+				next := r.URL.Path
+				if r.URL.RawQuery != "" {
+					next += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, "/login?next="+url.QueryEscape(next), http.StatusFound)
+			}
 			return
 		}
-		g.recordSuccess(ip)
 
-		// CSRF: reject an authenticated but cross-origin state-changing request
-		// (the request /ws/ stream is GET and exempt; it does its own Origin
-		// check). Non-browser clients (no Origin / Sec-Fetch-Site) are allowed —
-		// CSRF requires a browser auto-attaching the cached Basic-Auth creds.
+		// CSRF: reject cross-origin state-changing requests. SameSite=Lax on
+		// the cookie already blocks most CSRF; this is a belt-and-suspenders
+		// check for browsers or proxies that don't enforce SameSite.
 		if isMutating(r.Method) && !strings.HasPrefix(r.URL.Path, "/ws/") && !sameOrigin(r) {
 			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func jsonError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// handleLogin validates the submitted password and issues a session cookie.
+func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := g.clientIP(r)
+	if g.lockedOut(ip) {
+		jsonError(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(g.pass)) != 1 {
+		g.recordFail(ip)
+		jsonError(w, "incorrect password", http.StatusUnauthorized)
+		return
+	}
+	g.recordSuccess(ip)
+	token := g.newSession()
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(sessionTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleLogout clears the session cookie and invalidates the session.
+func (g *authGate) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		g.deleteSession(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 func (g *authGate) lockedOut(ip string) bool {
@@ -286,6 +409,13 @@ func (g *authGate) isTrustedProxy(host string) bool {
 }
 
 func (s *Server) routes() {
+	// Auth (registered unconditionally so /login always resolves)
+	s.mux.HandleFunc("/login", s.handleLoginPage)
+	if s.gate != nil {
+		s.mux.HandleFunc("/api/login", s.gate.handleLogin)
+		s.mux.HandleFunc("/api/logout", s.gate.handleLogout)
+	}
+
 	// Homepage
 	s.mux.HandleFunc("/api/homepage", s.handleHomepage)
 
@@ -1752,6 +1882,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Frontend ──────────────────────────────────────────────────────────────
+
+// handleLoginPage serves the standalone login.html page.
+func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if s.frontend == nil {
+		http.Error(w, "frontend not embedded", http.StatusInternalServerError)
+		return
+	}
+	data, err := fs.ReadFile(s.frontend, "login.html")
+	if err != nil {
+		http.Error(w, "login page not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
+}
 
 // handleFrontend serves the embedded SPA. Unknown paths fall back to
 // index.html so client-side routing works.

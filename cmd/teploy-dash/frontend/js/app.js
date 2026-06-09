@@ -78,6 +78,12 @@ function toggleTheme() {
   return next;
 }
 
+// ── Auth ──
+async function logout() {
+  await fetch('/api/logout', {method: 'POST'}).catch(() => {});
+  location.href = '/login';
+}
+
 // ── Alpine.js App ──
 document.addEventListener('alpine:init', () => {
   // ── Router Store ──
