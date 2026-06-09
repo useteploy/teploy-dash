@@ -1,13 +1,28 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
-func TestBasicAuth_RejectsMissingCreds(t *testing.T) {
+// authedReq creates a request carrying a live session cookie issued by g.
+func authedReq(g *authGate, method, target string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	token := g.newSession()
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	return req
+}
+
+func loginBody(password string) *bytes.Buffer {
+	b, _ := json.Marshal(map[string]string{"password": password})
+	return bytes.NewBuffer(b)
+}
+
+func TestAuth_RejectsMissingSession(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -19,48 +34,57 @@ func TestBasicAuth_RejectsMissingCreds(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without auth, got %d", w.Code)
-	}
-	if w.Header().Get("WWW-Authenticate") == "" {
-		t.Error("expected WWW-Authenticate header on 401")
+		t.Errorf("expected 401 without session, got %d", w.Code)
 	}
 }
 
-func TestBasicAuth_RejectsWrongCreds(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-	})
-	h := newAuthGate("admin", "secret", "").wrap(mux)
-
-	req := httptest.NewRequest("GET", "/api/apps", nil)
-	req.SetBasicAuth("admin", "wrong")
+func TestAuth_RejectsWrongPassword(t *testing.T) {
+	g := newAuthGate("admin", "secret", "")
+	req := httptest.NewRequest("POST", "/api/login", loginBody("wrong"))
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
+	g.handleLogin(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 with wrong password, got %d", w.Code)
 	}
 }
 
-func TestBasicAuth_AcceptsCorrectCreds(t *testing.T) {
+func TestAuth_AcceptsCorrectPassword(t *testing.T) {
+	g := newAuthGate("admin", "secret", "")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	})
-	h := newAuthGate("admin", "secret", "").wrap(mux)
+	h := g.wrap(mux)
 
+	// Login to get a session cookie.
+	loginReq := httptest.NewRequest("POST", "/api/login", loginBody("secret"))
+	lw := httptest.NewRecorder()
+	g.handleLogin(lw, loginReq)
+	if lw.Code != 200 {
+		t.Fatalf("login failed: %d", lw.Code)
+	}
+	var cookie *http.Cookie
+	for _, c := range lw.Result().Cookies() {
+		if c.Name == sessionCookie {
+			cookie = c
+			break
+		}
+	}
+	if cookie == nil {
+		t.Fatal("no session cookie after login")
+	}
+
+	// Use the session cookie.
 	req := httptest.NewRequest("GET", "/api/apps", nil)
-	req.SetBasicAuth("admin", "secret")
+	req.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-
 	if w.Code != 200 {
-		t.Errorf("expected 200 with correct creds, got %d", w.Code)
+		t.Errorf("expected 200 with valid session, got %d", w.Code)
 	}
 }
 
-func TestBasicAuth_HealthExempt(t *testing.T) {
+func TestAuth_HealthExempt(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -76,20 +100,15 @@ func TestBasicAuth_HealthExempt(t *testing.T) {
 	}
 }
 
-func authedReq(method, target string) *http.Request {
-	req := httptest.NewRequest(method, target, nil)
-	req.SetBasicAuth("admin", "secret")
-	return req
-}
-
 // A cross-origin state-changing request (browser CSRF) must be blocked even
 // when authenticated.
 func TestAuthGate_BlocksCrossOriginMutation(t *testing.T) {
+	g := newAuthGate("admin", "secret", "")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/monitors", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	h := newAuthGate("admin", "secret", "").wrap(mux)
+	h := g.wrap(mux)
 
-	req := authedReq("POST", "http://dash.local/api/monitors")
+	req := authedReq(g, "POST", "http://dash.local/api/monitors")
 	req.Host = "dash.local"
 	req.Header.Set("Origin", "http://evil.example")
 	w := httptest.NewRecorder()
@@ -101,11 +120,12 @@ func TestAuthGate_BlocksCrossOriginMutation(t *testing.T) {
 
 // Same-origin and non-browser (no Origin) mutations pass.
 func TestAuthGate_AllowsSameOriginAndNonBrowser(t *testing.T) {
+	g := newAuthGate("admin", "secret", "")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/monitors", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	h := newAuthGate("admin", "secret", "").wrap(mux)
+	h := g.wrap(mux)
 
-	same := authedReq("POST", "http://dash.local/api/monitors")
+	same := authedReq(g, "POST", "http://dash.local/api/monitors")
 	same.Host = "dash.local"
 	same.Header.Set("Origin", "http://dash.local")
 	w := httptest.NewRecorder()
@@ -114,7 +134,7 @@ func TestAuthGate_AllowsSameOriginAndNonBrowser(t *testing.T) {
 		t.Errorf("same-origin POST: expected 200, got %d", w.Code)
 	}
 
-	noOrigin := authedReq("POST", "http://dash.local/api/monitors")
+	noOrigin := authedReq(g, "POST", "http://dash.local/api/monitors")
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, noOrigin)
 	if w2.Code != 200 {
@@ -122,24 +142,21 @@ func TestAuthGate_AllowsSameOriginAndNonBrowser(t *testing.T) {
 	}
 }
 
-// After enough failed attempts from one IP, further attempts are rate-limited.
+// After enough failed login attempts from one IP, further attempts are rate-limited.
 func TestAuthGate_RateLimitsFailedAuth(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	h := newAuthGate("admin", "secret", "").wrap(mux)
+	g := newAuthGate("admin", "secret", "")
 
 	for i := 0; i < authMaxFails; i++ {
-		req := httptest.NewRequest("GET", "/api/apps", nil)
+		req := httptest.NewRequest("POST", "/api/login", loginBody("wrong"))
 		req.RemoteAddr = "10.0.0.9:1234"
-		req.SetBasicAuth("admin", "wrong")
-		h.ServeHTTP(httptest.NewRecorder(), req)
+		w := httptest.NewRecorder()
+		g.handleLogin(w, req)
 	}
-	// Next attempt (even with correct creds) is locked out.
-	req := httptest.NewRequest("GET", "/api/apps", nil)
+	// Next attempt is locked out even with correct password.
+	req := httptest.NewRequest("POST", "/api/login", loginBody("secret"))
 	req.RemoteAddr = "10.0.0.9:1234"
-	req.SetBasicAuth("admin", "secret")
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	g.handleLogin(w, req)
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("expected 429 after %d failures, got %d", authMaxFails, w.Code)
 	}

@@ -56,10 +56,21 @@ portable — copy it anywhere and run it.
 ## Run
 
 ```bash
-TEPLOY_DASH_PASSWORD=$(openssl rand -base64 24) teploy-dash
+teploy-dash
 ```
 
-Open `http://localhost:3456`. Log in as `admin` with the password you set.
+Open `http://localhost:3456`. On first launch you'll be taken to a setup page
+to create your username and password. Credentials are stored as a bcrypt hash
+in `/var/teploy-dash/auth.json`.
+
+You can also pre-set a password via environment variable (useful for Docker or
+automated deploys — the setup page is skipped when this is present):
+
+```bash
+TEPLOY_DASH_PASSWORD=yourpassword teploy-dash
+```
+
+You can change your password any time from **Settings → Account** inside the UI.
 
 ```bash
 teploy-dash --port 8080                                 # custom port
@@ -111,14 +122,14 @@ CI webhook, everything reconciles to the same files.
 | `--data` | `/var/teploy-dash` | Data dir for monitor history (file-store mode). |
 | `--deployments` | `/deployments` | Where the CLI writes per-app state files. |
 | `--nucleus-url` | _(empty)_ | Optional Nucleus / Postgres URL for monitor storage. Falls back to JSONL on connect failure. |
-| `--no-auth` | `false` | Disable HTTP Basic Auth. **Local dev only.** |
+| `--no-auth` | `false` | Disable authentication entirely. **Local dev only.** |
 
 ## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TEPLOY_DASH_USER` | `admin` | HTTP Basic Auth username. |
-| `TEPLOY_DASH_PASSWORD` | _(required)_ | HTTP Basic Auth password. Refuses to start without this unless `--no-auth` is set. |
+| `TEPLOY_DASH_USER` | `admin` | Username used when `TEPLOY_DASH_PASSWORD` is set (env-var bootstrap mode). |
+| `TEPLOY_DASH_PASSWORD` | _(optional)_ | Bootstrap password. If set, credentials are taken from this env var. If absent and no `auth.json` exists, the first run shows the setup page to create an account. |
 
 ## API
 
@@ -146,9 +157,9 @@ CI webhook, everything reconciles to the same files.
 | POST | `/api/monitors/{id}/test` | Run a check immediately. |
 | GET / POST | `/api/notifications` | Read / write alert config. |
 
-All non-health routes are HTTP Basic Auth protected when credentials are
-configured. Auth uses `subtle.ConstantTimeCompare` to prevent timing
-attacks.
+All non-health routes require a valid session cookie. Sessions are issued by
+`POST /api/login` (24-hour TTL). Failed login attempts are rate-limited
+per source IP.
 
 ## Architecture
 
@@ -156,7 +167,7 @@ attacks.
 Browser
    |
    v
-teploy-dash (Go, ~17MB)  --- HTTP Basic Auth middleware
+teploy-dash (Go, ~17MB)  --- session-cookie auth middleware
    |                         embedded SPA (Alpine.js)
    |                         60s fleet cache
    |                         WebSocket log streamer

@@ -13,7 +13,7 @@ Self-hosted dashboard for the Teploy CLI plus uptime monitoring. One static Go b
 | **Multi-server** | SSH-polls each server in CLI's servers.yml (60s fleet cache); NOT a peer-pull from other teploy-dash instances |
 | **Monitoring** | HTTP / TCP / ping checks with configurable intervals |
 | **Storage** | Nucleus (pgwire, preferred) or JSONL files (fallback) |
-| **Auth** | HTTP Basic Auth (`subtle.ConstantTimeCompare`); refuses to start without `TEPLOY_DASH_PASSWORD` unless `--no-auth` |
+| **Auth** | Session-cookie auth (24h TTL, bcrypt on-disk, setup mode on first run); `TEPLOY_DASH_PASSWORD` env var optional; `--no-auth` for dev |
 | **Port** | 3456 (default) |
 
 ## Architecture
@@ -83,11 +83,11 @@ make build                                     # builds ./teploy-dash
 ./teploy-dash --no-auth                        # local dev only
 ```
 
-`TEPLOY_DASH_PASSWORD` is required unless `--no-auth` is set.
+`TEPLOY_DASH_PASSWORD` is optional; if absent and no `auth.json` exists, setup mode runs on first visit.
 
 ## API
 
-Full route list at README.md "API" section. Routes are registered in `internal/server/server.go` via `mux.HandleFunc`. All non-`/api/health` routes go through `basicAuthMiddleware` when auth is configured.
+Full route list at README.md "API" section. Routes are registered in `internal/server/server.go` via `mux.HandleFunc`. All non-`/api/health` routes go through `authGate.wrap()` when auth is configured.
 
 ## Key Decisions
 
@@ -98,7 +98,7 @@ Full route list at README.md "API" section. Routes are registered in `internal/s
 | Storage | Nucleus with JSONL fallback | Dogfood Nucleus; graceful degradation if Nucleus down |
 | Frontend | Vanilla + Alpine.js | No build step, same pattern as CLI's embedded UI |
 | Multi-server | SSH to each server per fleet refresh | No agent on remote needed; cache for 60s |
-| Auth | HTTP Basic with constant-time compare | Simple, no session store; refuses to start unauthenticated by default |
+| Auth | Session cookies + bcrypt on-disk (`auth.json`) | Setup mode on first run; change-password in Settings; env-var bootstrap for Docker |
 
 ## Where to find more
 
