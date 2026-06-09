@@ -12,7 +12,7 @@ func TestBasicAuth_RejectsMissingCreds(t *testing.T) {
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	})
-	h := newAuthGate("admin", "secret").wrap(mux)
+	h := newAuthGate("admin", "secret", "").wrap(mux)
 
 	req := httptest.NewRequest("GET", "/api/apps", nil)
 	w := httptest.NewRecorder()
@@ -31,7 +31,7 @@ func TestBasicAuth_RejectsWrongCreds(t *testing.T) {
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	})
-	h := newAuthGate("admin", "secret").wrap(mux)
+	h := newAuthGate("admin", "secret", "").wrap(mux)
 
 	req := httptest.NewRequest("GET", "/api/apps", nil)
 	req.SetBasicAuth("admin", "wrong")
@@ -48,7 +48,7 @@ func TestBasicAuth_AcceptsCorrectCreds(t *testing.T) {
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	})
-	h := newAuthGate("admin", "secret").wrap(mux)
+	h := newAuthGate("admin", "secret", "").wrap(mux)
 
 	req := httptest.NewRequest("GET", "/api/apps", nil)
 	req.SetBasicAuth("admin", "secret")
@@ -65,7 +65,7 @@ func TestBasicAuth_HealthExempt(t *testing.T) {
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	})
-	h := newAuthGate("admin", "secret").wrap(mux)
+	h := newAuthGate("admin", "secret", "").wrap(mux)
 
 	req := httptest.NewRequest("GET", "/api/health", nil)
 	w := httptest.NewRecorder()
@@ -87,7 +87,7 @@ func authedReq(method, target string) *http.Request {
 func TestAuthGate_BlocksCrossOriginMutation(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/monitors", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	h := newAuthGate("admin", "secret").wrap(mux)
+	h := newAuthGate("admin", "secret", "").wrap(mux)
 
 	req := authedReq("POST", "http://dash.local/api/monitors")
 	req.Host = "dash.local"
@@ -103,7 +103,7 @@ func TestAuthGate_BlocksCrossOriginMutation(t *testing.T) {
 func TestAuthGate_AllowsSameOriginAndNonBrowser(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/monitors", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	h := newAuthGate("admin", "secret").wrap(mux)
+	h := newAuthGate("admin", "secret", "").wrap(mux)
 
 	same := authedReq("POST", "http://dash.local/api/monitors")
 	same.Host = "dash.local"
@@ -126,7 +126,7 @@ func TestAuthGate_AllowsSameOriginAndNonBrowser(t *testing.T) {
 func TestAuthGate_RateLimitsFailedAuth(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	h := newAuthGate("admin", "secret").wrap(mux)
+	h := newAuthGate("admin", "secret", "").wrap(mux)
 
 	for i := 0; i < authMaxFails; i++ {
 		req := httptest.NewRequest("GET", "/api/apps", nil)
