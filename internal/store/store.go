@@ -50,6 +50,29 @@ type UptimeStats struct {
 	AvgResponse   time.Duration `json:"avg_response"`
 }
 
+// RestoreTest is a scheduled backup verification: on its interval, dash runs
+// `teploy accessory verify-backup` against the accessory's latest S3 backup,
+// which restores it into a scratch container on the server and proves it's
+// usable. Only the most recent result is persisted on the entity itself —
+// these run hourly/daily, so a per-run history table would be noise.
+type RestoreTest struct {
+	ID            string `json:"id"`
+	Server        string `json:"server"` // server name from servers.yml
+	App           string `json:"app"`
+	Accessory     string `json:"accessory"`
+	Bucket        string `json:"bucket"`
+	Region        string `json:"region"`
+	IntervalHours int    `json:"interval_hours"`
+	Enabled       bool   `json:"enabled"`
+	// Last result
+	LastRunAt      time.Time `json:"last_run_at"`
+	LastOK         bool      `json:"last_ok"`
+	LastDetail     string    `json:"last_detail,omitempty"`
+	LastMetric     string    `json:"last_metric,omitempty"`
+	LastDate       string    `json:"last_date,omitempty"` // backup timestamp that was verified
+	LastDurationMs int64     `json:"last_duration_ms,omitempty"`
+}
+
 // Store is the interface for persisting monitor configs and check results.
 type Store interface {
 	// Monitors
@@ -57,6 +80,12 @@ type Store interface {
 	GetMonitor(id string) (*Monitor, error)
 	SaveMonitor(m Monitor) error
 	DeleteMonitor(id string) error
+
+	// Restore tests (scheduled backup verification)
+	ListRestoreTests() ([]RestoreTest, error)
+	GetRestoreTest(id string) (*RestoreTest, error)
+	SaveRestoreTest(t RestoreTest) error
+	DeleteRestoreTest(id string) error
 
 	// Check results
 	SaveCheck(result CheckResult) error

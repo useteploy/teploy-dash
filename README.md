@@ -155,6 +155,9 @@ CI webhook, everything reconciles to the same files.
 | GET / POST | `/api/monitors` | List with 24h stats / create. |
 | GET / DELETE | `/api/monitors/{id}` | Detail + history / delete. |
 | POST | `/api/monitors/{id}/test` | Run a check immediately. |
+| GET / POST | `/api/restore-tests` | List / create scheduled backup verifications. |
+| GET / DELETE | `/api/restore-tests/{id}` | Detail / delete. |
+| POST | `/api/restore-tests/{id}/run` | Verify the latest backup now (restores into a scratch container via `teploy accessory verify-backup`). |
 | GET / POST | `/api/notifications` | Read / write alert config. |
 
 All non-health routes require a valid session cookie. Sessions are issued by

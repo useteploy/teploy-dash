@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/remote"
+	"github.com/useteploy/teploy-dash/internal/restoretest"
 	"github.com/useteploy/teploy-dash/internal/state"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
@@ -35,6 +37,7 @@ type Config struct {
 	DeploymentsDir string
 	DataDir        string
 	Monitor        *monitor.Runner
+	Restore        *restoretest.Runner
 	Store          store.Store
 	// AuthUser and AuthPass are bootstrap credentials from env vars. If AuthPass
 	// is empty and no auth.json exists, the server starts in setup mode.
@@ -83,6 +86,7 @@ type Server struct {
 	gate     *authGate
 	state    *state.Reader
 	monitor  *monitor.Runner
+	restore  *restoretest.Runner
 	store    store.Store
 	fleet    *fleetCache
 	frontend fs.FS
@@ -95,12 +99,18 @@ func New(config Config) *Server {
 		config:   config,
 		state:    state.NewReader(config.DeploymentsDir),
 		monitor:  config.Monitor,
+		restore:  config.Restore,
 		store:    config.Store,
 		fleet:    &fleetCache{ttl: 60 * time.Second},
 		frontend: config.Frontend,
 	}
 	if !config.NoAuth {
 		s.gate = newAuthGate(config.AuthUser, config.AuthPass, filepath.Join(config.DataDir, "auth.json"))
+	}
+	if s.restore != nil {
+		// Restore-test runs go through the CLI delegate with --host <server>;
+		// non-root fleets also need --user, resolved the same way cliAppRun does.
+		s.restore.SetUserResolver(s.serverUser)
 	}
 	s.routes()
 	return s
@@ -641,6 +651,10 @@ func (s *Server) routes() {
 	// Uptime monitors
 	s.mux.HandleFunc("/api/monitors", s.handleMonitors)
 	s.mux.HandleFunc("/api/monitors/", s.handleMonitor)
+
+	// Restore tests (scheduled backup verification)
+	s.mux.HandleFunc("/api/restore-tests", s.handleRestoreTests)
+	s.mux.HandleFunc("/api/restore-tests/", s.handleRestoreTest)
 
 	// WebSocket log streaming
 	s.mux.HandleFunc("/ws/logs/", s.handleLogsWS)
@@ -1843,13 +1857,13 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		// Never return the SMTP password to the client; expose only whether one
 		// is configured.
 		writeData(w, map[string]any{
-			"webhook_url":  cfg.WebhookURL,
-			"smtp_host":    cfg.SMTPHost,
-			"smtp_port":    cfg.SMTPPort,
-			"smtp_user":    cfg.SMTPUser,
+			"webhook_url":   cfg.WebhookURL,
+			"smtp_host":     cfg.SMTPHost,
+			"smtp_port":     cfg.SMTPPort,
+			"smtp_user":     cfg.SMTPUser,
 			"smtp_pass_set": cfg.SMTPPass != "",
-			"email_to":     cfg.EmailTo,
-			"email_from":   cfg.EmailFrom,
+			"email_to":      cfg.EmailTo,
+			"email_from":    cfg.EmailFrom,
 		})
 	case "POST":
 		var cfg alert.Config
@@ -1866,9 +1880,12 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err.Error())
 			return
 		}
-		// Update the monitor runner's alert dispatcher with the new config.
+		// Update the runners' alert dispatchers with the new config.
 		if s.monitor != nil {
 			s.monitor.SetAlerter(alert.New(cfg))
+		}
+		if s.restore != nil {
+			s.restore.SetAlerter(alert.New(cfg))
 		}
 		writeData(w, map[string]bool{"saved": true})
 	default:
@@ -2291,5 +2308,148 @@ func writeRawJSON(w http.ResponseWriter, raw string) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"data": parsed})
 	} else {
 		w.Write([]byte(`{"data":` + raw + `}`))
+	}
+}
+
+// ── Restore Tests ─────────────────────────────────────────────────────────
+
+// bucketPattern matches safe S3 bucket/region values for CLI argv use —
+// mirrors the CLI's own backup.ValidateBucket charset.
+var bucketPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, []interface{}{})
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		tests, err := s.store.ListRestoreTests()
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		if tests == nil {
+			tests = []store.RestoreTest{}
+		}
+		writeJSON(w, tests)
+
+	case "POST":
+		var t store.RestoreTest
+		if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+			http.Error(w, "invalid request body", 400)
+			return
+		}
+		// Every field below reaches the teploy CLI's argv (and from there a
+		// remote shell), so validate all of them at the boundary — same rule
+		// as monitors/app actions.
+		if !store.ValidID(t.ID) {
+			http.Error(w, "invalid restore test id (use letters, digits, '_' or '-')", 400)
+			return
+		}
+		if !store.ValidID(t.Server) || !store.ValidID(t.App) || !store.ValidID(t.Accessory) {
+			http.Error(w, "server, app, and accessory are required (letters, digits, '_' or '-')", 400)
+			return
+		}
+		if !bucketPattern.MatchString(t.Bucket) || len(t.Bucket) > 63 {
+			http.Error(w, "invalid bucket name", 400)
+			return
+		}
+		if t.Region == "" {
+			t.Region = "us-east-1"
+		}
+		if !bucketPattern.MatchString(t.Region) || len(t.Region) > 25 {
+			http.Error(w, "invalid region", 400)
+			return
+		}
+		if t.IntervalHours < 1 {
+			t.IntervalHours = 24
+		}
+		// Preserve the last result across config edits: the client only
+		// round-trips config fields, and an upsert that zeroed the result
+		// columns would show "never run" after every edit.
+		if prev, err := s.store.GetRestoreTest(t.ID); err == nil && prev != nil {
+			t.LastRunAt = prev.LastRunAt
+			t.LastOK = prev.LastOK
+			t.LastDetail = prev.LastDetail
+			t.LastMetric = prev.LastMetric
+			t.LastDate = prev.LastDate
+			t.LastDurationMs = prev.LastDurationMs
+		}
+		if err := s.store.SaveRestoreTest(t); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		if s.restore != nil {
+			s.restore.Reload(t)
+		}
+		writeJSON(w, t)
+
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+func (s *Server) handleRestoreTest(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "restore tests not configured (no store)", 404)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/restore-tests/")
+
+	// POST /api/restore-tests/{id}/run — run one verification now,
+	// synchronously, persisting the result. Runs download a backup and boot a
+	// scratch container, so this can take minutes; the CLI delegate's own
+	// timeout backstops a hang.
+	if strings.HasSuffix(path, "/run") && r.Method == "POST" {
+		id := strings.TrimSuffix(path, "/run")
+		if !store.ValidID(id) {
+			http.Error(w, "invalid restore test id", 400)
+			return
+		}
+		t, err := s.store.GetRestoreTest(id)
+		if err != nil {
+			http.Error(w, "restore test not found", 404)
+			return
+		}
+		if s.restore == nil {
+			http.Error(w, "restore-test runner not available", 500)
+			return
+		}
+		updated := s.restore.RunNow(*t)
+		writeJSON(w, updated)
+		return
+	}
+
+	id := path
+	if !store.ValidID(id) {
+		http.Error(w, "invalid restore test id", 400)
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		t, err := s.store.GetRestoreTest(id)
+		if err != nil {
+			http.Error(w, "restore test not found", 404)
+			return
+		}
+		writeJSON(w, t)
+
+	case "DELETE":
+		// Stop the schedule first so a tick can't re-persist a deleted test.
+		if s.restore != nil {
+			s.restore.Remove(id)
+		}
+		if err := s.store.DeleteRestoreTest(id); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(w, map[string]bool{"deleted": true})
+
+	default:
+		http.Error(w, "method not allowed", 405)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/monitor"
+	"github.com/useteploy/teploy-dash/internal/restoretest"
 	"github.com/useteploy/teploy-dash/internal/server"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
@@ -62,8 +63,9 @@ func main() {
 		st = fileStore
 	}
 
-	// Initialize monitor runner
+	// Initialize monitor + restore-test runners
 	mon := monitor.New(st)
+	rst := restoretest.New(st)
 
 	// Strip the embed prefix so the FS is rooted at the frontend/ contents
 	// (index.html sits at "/", css/ and js/ at the expected URL paths).
@@ -79,6 +81,7 @@ func main() {
 		DeploymentsDir: *deploymentsDir,
 		DataDir:        *dataDir,
 		Monitor:        mon,
+		Restore:        rst,
 		Store:          st,
 		AuthUser:       authUser,
 		AuthPass:       authPass,
@@ -90,11 +93,13 @@ func main() {
 	notifCfg := server.LoadNotificationsConfig()
 	if notifCfg.WebhookURL != "" || notifCfg.SMTPHost != "" {
 		mon.SetAlerter(alert.New(notifCfg))
+		rst.SetAlerter(alert.New(notifCfg))
 		log.Printf("Alerts configured")
 	}
 
-	// Start monitor checks
+	// Start monitor checks + restore-test schedules
 	mon.Start()
+	rst.Start()
 
 	// Start daily cleanup for file store (removes checks older than store.RetentionDays)
 	// Runs for ANY backend now (previously fileStore-only, so the Nucleus
@@ -130,5 +135,6 @@ func main() {
 		cleanupTicker.Stop()
 	}
 	mon.Stop()
+	rst.Stop()
 	st.Close()
 }

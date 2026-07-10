@@ -141,3 +141,46 @@ func TestFileStore_RejectsTraversalID(t *testing.T) {
 		t.Fatal("a file was written outside the monitors directory")
 	}
 }
+
+func TestFileStore_RestoreTestRoundTrip(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+
+	rt := RestoreTest{
+		ID: "rt1", Server: "prod", App: "myapp", Accessory: "db",
+		Bucket: "backups", Region: "us-east-1", IntervalHours: 24, Enabled: true,
+		LastRunAt: time.Now().Truncate(time.Second), LastOK: true,
+		LastMetric: "tables=42", LastDate: "20260710-040000", LastDurationMs: 9500,
+	}
+	if err := store.SaveRestoreTest(rt); err != nil {
+		t.Fatalf("SaveRestoreTest: %v", err)
+	}
+
+	list, err := store.ListRestoreTests()
+	if err != nil {
+		t.Fatalf("ListRestoreTests: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 restore test, got %d", len(list))
+	}
+
+	got, err := store.GetRestoreTest("rt1")
+	if err != nil {
+		t.Fatalf("GetRestoreTest: %v", err)
+	}
+	if got.LastMetric != "tables=42" || !got.LastOK || got.IntervalHours != 24 {
+		t.Errorf("round-trip mismatch: %+v", got)
+	}
+
+	if err := store.DeleteRestoreTest("rt1"); err != nil {
+		t.Fatalf("DeleteRestoreTest: %v", err)
+	}
+	list, _ = store.ListRestoreTests()
+	if len(list) != 0 {
+		t.Errorf("expected 0 after delete, got %d", len(list))
+	}
+
+	// Path-traversal guard, same rule as monitors.
+	if err := store.SaveRestoreTest(RestoreTest{ID: "../evil"}); err == nil {
+		t.Error("expected invalid-id rejection")
+	}
+}

@@ -24,6 +24,10 @@ func (m *mockStore) GetChecks(string, time.Time, int) ([]store.CheckResult, erro
 	return nil, nil
 }
 func (m *mockStore) GetStats(string, time.Time) (*store.UptimeStats, error) { return nil, nil }
+func (m *mockStore) ListRestoreTests() ([]store.RestoreTest, error)          { return nil, nil }
+func (m *mockStore) GetRestoreTest(string) (*store.RestoreTest, error)       { return nil, nil }
+func (m *mockStore) SaveRestoreTest(store.RestoreTest) error                 { return nil }
+func (m *mockStore) DeleteRestoreTest(string) error                          { return nil }
 func (m *mockStore) Close() error                                           { return nil }
 func (m *mockStore) Cleanup() error                                         { return nil }
 

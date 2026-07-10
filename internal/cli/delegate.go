@@ -202,6 +202,19 @@ func EnvUnset(server, user, app, key string) (*Result, error) {
 	return RunChecked(args...)
 }
 
+// AccessoryVerifyBackup runs `teploy accessory verify-backup` against a
+// server's accessory. Uses plain Run (NOT RunChecked): the CLI exits non-zero
+// when verification fails but still prints the structured JSON result on
+// stdout — the caller parses that and treats ok=false as a result, not an
+// operational error.
+func AccessoryVerifyBackup(server, user, app, accessory, bucket, region string) (*Result, error) {
+	args := []string{"accessory", "verify-backup", accessory,
+		"--app", app, "--host", server,
+		"--bucket", bucket, "--region", region, "--json"}
+	args = append(args, userArgs(user)...)
+	return Run(args...)
+}
+
 // ServerList returns configured servers.
 func ServerList() (*Result, error) {
 	return Run("server", "list", "--json")

@@ -513,6 +513,125 @@ document.addEventListener('alpine:init', () => {
     destroy() { this.disconnect(); },
   }));
 
+  // ── Restore Tests Page ──
+  Alpine.data('restoreTestsPage', () => ({
+    tests: [],
+    servers: [],
+    loading: true,
+    showCreateDialog: false,
+    creating: false,
+    running: null,
+    refreshInterval: null,
+    newTest: {
+      server: '',
+      app: '',
+      accessory: '',
+      bucket: '',
+      region: 'us-east-1',
+      interval_hours: '24',
+    },
+
+    async init() {
+      await this.loadTests();
+      await this.loadServers();
+      this.refreshInterval = setInterval(() => this.loadTests(), 30000);
+    },
+
+    destroy() {
+      if (this.refreshInterval) clearInterval(this.refreshInterval);
+    },
+
+    async loadTests() {
+      try {
+        const data = await rawFetch.get('/api/restore-tests');
+        this.tests = data || [];
+      } catch (e) {
+        console.error('Failed to load restore tests:', e);
+      }
+      this.loading = false;
+    },
+
+    async loadServers() {
+      try {
+        this.servers = (await api.get('/api/servers').catch(() => [])) || [];
+      } catch { this.servers = []; }
+    },
+
+    async createTest() {
+      this.creating = true;
+      try {
+        const body = {
+          id: crypto.randomUUID().replace(/-/g, '').slice(0, 21),
+          server: this.newTest.server,
+          app: this.newTest.app.trim(),
+          accessory: this.newTest.accessory.trim(),
+          bucket: this.newTest.bucket.trim(),
+          region: this.newTest.region.trim() || 'us-east-1',
+          interval_hours: parseInt(this.newTest.interval_hours) || 24,
+          enabled: true,
+        };
+        await rawFetch.post('/api/restore-tests', body);
+        this.showCreateDialog = false;
+        this.resetForm();
+        await this.loadTests();
+        showToast('Restore test created', 'success');
+      } catch (e) {
+        showToast('Failed to save restore test', 'error');
+      }
+      this.creating = false;
+    },
+
+    async runNow(t) {
+      this.running = t.id;
+      try {
+        // Downloads the backup and boots a scratch container — takes a while.
+        const updated = await rawFetch.post('/api/restore-tests/' + t.id + '/run', {});
+        showToast(updated.last_ok ? 'Backup verified: ' + (updated.last_metric || 'ok') : 'Verification FAILED', updated.last_ok ? 'success' : 'error');
+        await this.loadTests();
+      } catch (e) {
+        showToast('Run failed to start', 'error');
+      }
+      this.running = null;
+    },
+
+    async toggleEnabled(t) {
+      try {
+        await rawFetch.post('/api/restore-tests', { ...t, enabled: !t.enabled });
+        await this.loadTests();
+        showToast(!t.enabled ? 'Restore test enabled' : 'Restore test disabled', 'success');
+      } catch (e) {
+        showToast('Failed to toggle restore test', 'error');
+      }
+    },
+
+    async deleteTest(id) {
+      if (!confirm('Delete this restore test?')) return;
+      try {
+        await rawFetch.del('/api/restore-tests/' + id);
+        await this.loadTests();
+        showToast('Restore test deleted', 'success');
+      } catch (e) {
+        showToast('Failed to delete restore test', 'error');
+      }
+    },
+
+    badgeClass(t) {
+      if (!t.last_run_at || t.last_run_at.startsWith('0001')) return 'gray';
+      return t.last_ok ? 'green' : 'red';
+    },
+
+    resetForm() {
+      this.newTest = {
+        server: '', app: '', accessory: '',
+        bucket: '', region: 'us-east-1', interval_hours: '24',
+      };
+    },
+
+    formatDate(d) {
+      return new Date(d).toLocaleString();
+    },
+  }));
+
   // ── Servers Page ──
   Alpine.data('serversPage', () => ({
     servers: [],

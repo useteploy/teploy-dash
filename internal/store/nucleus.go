@@ -84,6 +84,22 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 		// Serves the (monitor_id =) + (checked_at range / ORDER BY) access pattern
 		// in GetChecks/GetStats; without it every query is a full scan.
 		`CREATE INDEX IF NOT EXISTS idx_checks_monitor_time ON checks (monitor_id, checked_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS restore_tests (
+			id TEXT PRIMARY KEY,
+			server TEXT NOT NULL,
+			app TEXT NOT NULL,
+			accessory TEXT NOT NULL,
+			bucket TEXT NOT NULL,
+			region TEXT NOT NULL DEFAULT 'us-east-1',
+			interval_hours INT NOT NULL DEFAULT 24,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			last_run_ms BIGINT NOT NULL DEFAULT 0,
+			last_ok BOOLEAN NOT NULL DEFAULT FALSE,
+			last_detail TEXT NOT NULL DEFAULT '',
+			last_metric TEXT NOT NULL DEFAULT '',
+			last_date TEXT NOT NULL DEFAULT '',
+			last_duration_ms BIGINT NOT NULL DEFAULT 0
+		)`,
 	}
 
 	for _, q := range queries {
@@ -176,6 +192,94 @@ func (s *NucleusStore) DeleteMonitor(id string) error {
 		return err
 	}
 	_, err = s.pool.Exec(ctx, "DELETE FROM checks WHERE monitor_id = $1", id)
+	return err
+}
+
+func (s *NucleusStore) ListRestoreTests() ([]RestoreTest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, server, app, accessory, bucket, region, interval_hours, enabled,
+		        last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms
+		 FROM restore_tests`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tests []RestoreTest
+	for rows.Next() {
+		t, err := scanRestoreTest(rows.Scan)
+		if err != nil {
+			continue
+		}
+		tests = append(tests, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tests, nil
+}
+
+func (s *NucleusStore) GetRestoreTest(id string) (*RestoreTest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, server, app, accessory, bucket, region, interval_hours, enabled,
+		        last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms
+		 FROM restore_tests WHERE id = $1`, id)
+	t, err := scanRestoreTest(row.Scan)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// scanRestoreTest maps a restore_tests row onto the struct; shared between
+// List and Get so the column order lives in one place.
+func scanRestoreTest(scan func(dest ...any) error) (RestoreTest, error) {
+	var t RestoreTest
+	var lastRunMs int64
+	err := scan(&t.ID, &t.Server, &t.App, &t.Accessory, &t.Bucket, &t.Region,
+		&t.IntervalHours, &t.Enabled, &lastRunMs, &t.LastOK,
+		&t.LastDetail, &t.LastMetric, &t.LastDate, &t.LastDurationMs)
+	if err != nil {
+		return t, err
+	}
+	if lastRunMs > 0 {
+		t.LastRunAt = time.UnixMilli(lastRunMs)
+	}
+	return t, nil
+}
+
+func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
+	var lastRunMs int64
+	if !t.LastRunAt.IsZero() {
+		lastRunMs = t.LastRunAt.UnixMilli()
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO restore_tests (id, server, app, accessory, bucket, region, interval_hours, enabled,
+		                            last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		 ON CONFLICT (id) DO UPDATE SET
+		   server = EXCLUDED.server, app = EXCLUDED.app, accessory = EXCLUDED.accessory,
+		   bucket = EXCLUDED.bucket, region = EXCLUDED.region,
+		   interval_hours = EXCLUDED.interval_hours, enabled = EXCLUDED.enabled,
+		   last_run_ms = EXCLUDED.last_run_ms, last_ok = EXCLUDED.last_ok,
+		   last_detail = EXCLUDED.last_detail, last_metric = EXCLUDED.last_metric,
+		   last_date = EXCLUDED.last_date, last_duration_ms = EXCLUDED.last_duration_ms`,
+		t.ID, t.Server, t.App, t.Accessory, t.Bucket, t.Region, t.IntervalHours, t.Enabled,
+		lastRunMs, t.LastOK, t.LastDetail, t.LastMetric, t.LastDate, t.LastDurationMs,
+	)
+	return err
+}
+
+func (s *NucleusStore) DeleteRestoreTest(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, "DELETE FROM restore_tests WHERE id = $1", id)
 	return err
 }
 

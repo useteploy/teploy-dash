@@ -24,6 +24,7 @@ type FileStore struct {
 func NewFileStore(dir string) *FileStore {
 	os.MkdirAll(filepath.Join(dir, "monitors"), 0755)
 	os.MkdirAll(filepath.Join(dir, "history"), 0755)
+	os.MkdirAll(filepath.Join(dir, "restore-tests"), 0755)
 	return &FileStore{dir: dir}
 }
 
@@ -97,6 +98,78 @@ func (s *FileStore) DeleteMonitor(id string) error {
 
 	os.Remove(filepath.Join(s.dir, "monitors", id+".json"))
 	os.Remove(filepath.Join(s.dir, "history", id+".jsonl"))
+	return nil
+}
+
+func (s *FileStore) ListRestoreTests() ([]RestoreTest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := os.ReadDir(filepath.Join(s.dir, "restore-tests"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var tests []RestoreTest
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.dir, "restore-tests", e.Name()))
+		if err != nil {
+			continue
+		}
+		var t RestoreTest
+		if json.Unmarshal(data, &t) == nil {
+			tests = append(tests, t)
+		}
+	}
+	return tests, nil
+}
+
+func (s *FileStore) GetRestoreTest(id string) (*RestoreTest, error) {
+	if !ValidID(id) {
+		return nil, fmt.Errorf("invalid restore test id %q", id)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data, err := os.ReadFile(filepath.Join(s.dir, "restore-tests", id+".json"))
+	if err != nil {
+		return nil, err
+	}
+	var t RestoreTest
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *FileStore) SaveRestoreTest(t RestoreTest) error {
+	if !ValidID(t.ID) {
+		return fmt.Errorf("invalid restore test id %q", t.ID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := json.MarshalIndent(t, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(s.dir, "restore-tests", t.ID+".json"), data, 0644)
+}
+
+func (s *FileStore) DeleteRestoreTest(id string) error {
+	if !ValidID(id) {
+		return fmt.Errorf("invalid restore test id %q", id)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	os.Remove(filepath.Join(s.dir, "restore-tests", id+".json"))
 	return nil
 }
 
