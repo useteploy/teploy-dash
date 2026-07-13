@@ -123,6 +123,16 @@ CI webhook, everything reconciles to the same files.
 | `--deployments` | `/deployments` | Where the CLI writes per-app state files. |
 | `--nucleus-url` | _(empty)_ | Optional Nucleus / Postgres URL for monitor storage. Falls back to JSONL on connect failure. |
 | `--no-auth` | `false` | Disable authentication entirely. **Local dev only.** |
+| `--public-status` | `false` | Serve an unauthenticated public status page at `/status`. Off by default. |
+
+## Public status page
+
+`--public-status` (or `TEPLOY_DASH_PUBLIC_STATUS=1`) serves a customer-facing
+status page at `/status` — no login required. It shows, for each **enabled**
+monitor, only its **name**, current **up/down** state, and **24-hour uptime %**.
+It deliberately never exposes monitor targets/IPs, server names, response
+bodies, or any config. Off by default; when off, `/status` and `/api/status`
+return 404.
 
 ## Environment variables
 
@@ -130,12 +140,14 @@ CI webhook, everything reconciles to the same files.
 |----------|---------|-------------|
 | `TEPLOY_DASH_USER` | `admin` | Username used when `TEPLOY_DASH_PASSWORD` is set (env-var bootstrap mode). |
 | `TEPLOY_DASH_PASSWORD` | _(optional)_ | Bootstrap password. If set, credentials are taken from this env var. If absent and no `auth.json` exists, the first run shows the setup page to create an account. |
+| `TEPLOY_DASH_PUBLIC_STATUS` | _(off)_ | Set to `1`/`true` to enable the public `/status` page (same as `--public-status`). |
 
 ## API
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Liveness probe (auth-exempt). |
+| GET | `/status`, `/api/status` | Public status page + JSON (auth-exempt; 404 unless `--public-status`). Exposes only name/up-down/24h-uptime. |
 | GET | `/api/cli/status` | Whether the `teploy` CLI is on `$PATH` and its version. |
 | GET | `/api/apps` | Fleet app list across all configured servers. |
 | GET | `/api/apps/{server}/{app}/status` | Single app status. |

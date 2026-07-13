@@ -31,7 +31,13 @@ func main() {
 	deploymentsDir := flag.String("deployments", "/deployments", "CLI state files directory")
 	nucleusURL := flag.String("nucleus-url", "", "Nucleus database URL (optional, uses JSONL files if not set)")
 	noAuth := flag.Bool("no-auth", false, "disable HTTP Basic Auth (DANGEROUS — local dev only)")
+	publicStatus := flag.Bool("public-status", false, "serve an unauthenticated /status page (monitor name + up/down + 24h uptime only)")
 	flag.Parse()
+
+	// Env fallback for the public status toggle (Docker-friendly).
+	if v := os.Getenv("TEPLOY_DASH_PUBLIC_STATUS"); v == "1" || v == "true" {
+		*publicStatus = true
+	}
 
 	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
 	// nor a saved auth.json exist, the server starts in setup mode so the user
@@ -86,6 +92,7 @@ func main() {
 		AuthUser:       authUser,
 		AuthPass:       authPass,
 		NoAuth:         *noAuth,
+		PublicStatus:   *publicStatus,
 		Frontend:       uiFS,
 	})
 

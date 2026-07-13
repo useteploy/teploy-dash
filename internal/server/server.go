@@ -45,6 +45,9 @@ type Config struct {
 	AuthUser string
 	AuthPass string
 	NoAuth   bool
+	// PublicStatus enables the unauthenticated /status page + /api/status.
+	// Off by default — it exposes monitor uptime without a login.
+	PublicStatus bool
 	// Frontend is the embedded SPA filesystem (rooted at the frontend/
 	// directory: contains index.html, css/, js/). Required — the binary is
 	// not portable without an embedded UI.
@@ -322,9 +325,10 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		// Always allow: health, login page, and login/logout API.
+		// Always allow: health, login page, login/logout API, and the public
+		// status page (its handlers 404 when the feature is disabled).
 		switch r.URL.Path {
-		case "/api/health", "/login", "/api/login", "/api/logout":
+		case "/api/health", "/login", "/api/login", "/api/logout", "/status", "/api/status":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -662,6 +666,11 @@ func (s *Server) routes() {
 	// System
 	s.mux.HandleFunc("/api/cli/status", s.handleCLIStatus)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
+
+	// Public status page (opt-in; handlers 404 when disabled). Bypasses auth
+	// via the gate allowlist below.
+	s.mux.HandleFunc("/status", s.handleStatusPage)
+	s.mux.HandleFunc("/api/status", s.handleStatusAPI)
 
 	// Frontend
 	s.mux.HandleFunc("/", s.handleFrontend)
