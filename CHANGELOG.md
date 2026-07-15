@@ -4,6 +4,17 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-15
+
+### Added
+- Public, unauthenticated status page (opt-in via `--public-status` / `TEPLOY_DASH_PUBLIC_STATUS`; off by default, `/status` and `/api/status` 404 when disabled). Deliberately leaks only monitor name, up/down, and 24h uptime % — no target/IP, server name, response body, or config. `/api/status` is JSON; `/status` is a self-contained, theme-aware HTML page (inline CSS/JS, no external deps) that polls it every 30s and shows an overall operational/degraded/down banner.
+- Restore Tests: scheduled proof that backups actually restore. A test picks a server/app/accessory plus an S3 bucket and an interval; the runner shells out to the CLI's `verify-backup` verb (server-state driven, no `teploy.yml` needed) on that schedule and persists only the last structured result. Runs hourly/daily, not on the 10s poll cadence — a test that already ran doesn't re-run on a dash restart. Fail/recovery alerts ride the existing webhook/SMTP dispatcher. New API (`/api/restore-tests` list/upsert, `/{id}` get/delete, `/{id}/run`) and a Restore Tests UI page matching the monitors pattern.
+
+### Fixed
+- Bundled `teploy` CLI in the Docker image bumped to v0.1.20 (from v0.1.17, itself a fix for a build that wasn't statically linked and couldn't run in the Alpine-based image at all). Brings every delegate-to-CLI action several releases of fixes forward, plus the new CLI features (OpenBao secrets, plan/drift/heal, kv, staged rollout, and more) within reach of the dashboard's delegate model.
+
+## [0.1.8] - 2026-06-08
+
 ### Security
 - Closed a path-traversal / arbitrary-file-write RCE: a client-controlled monitor ID flowed into `filepath.Join` in the file store, so `POST /api/monitors` with an id like `../../etc/cron.d/x` wrote a file as root. Monitor IDs are now validated (`^[A-Za-z0-9_-]+$`) at the HTTP boundary and in every file-store method.
 - Adding/editing a server in the dashboard no longer silently downgrades a non-root fleet server to root — the SSH user/role are forwarded to the CLI and preserved on edit. A same-name edit upserts in place (no remove+add) so the server's `tags`/`vpn_ip` survive. (Requires teploy-cli with lowercase JSON keys on `server list --json` so the frontend reads the real user — shipped alongside.)
