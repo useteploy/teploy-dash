@@ -24,6 +24,14 @@ import (
 //go:embed frontend
 var frontendFS embed.FS
 
+// Set by goreleaser via -ldflags "-X main.version=..." (see .goreleaser.yaml,
+// which has always passed these — the variables just didn't exist until now).
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	port := flag.Int("port", 3456, "HTTP server port")
 	host := flag.String("host", "0.0.0.0", "HTTP server host")
@@ -94,6 +102,7 @@ func main() {
 		NoAuth:         *noAuth,
 		PublicStatus:   *publicStatus,
 		Frontend:       uiFS,
+		Version:        version,
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.

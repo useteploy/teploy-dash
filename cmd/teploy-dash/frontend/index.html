@@ -1160,6 +1160,7 @@
         <button class="tab" :class="{ active: tab === 'groups' }" @click="tab = 'groups'">Groups</button>
         <button class="tab" :class="{ active: tab === 'notifications' }" @click="tab = 'notifications'">Notifications</button>
         <button class="tab" :class="{ active: tab === 'registry' }" @click="tab = 'registry'">Registry</button>
+        <button class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'">MCP</button>
         <button class="tab" :class="{ active: tab === 'account' }" @click="tab = 'account'">Account</button>
       </div>
 
@@ -1401,6 +1402,76 @@
       </template>
 
       <!-- Account Tab -->
+      <!-- MCP Tab -->
+      <template x-if="!loading && tab === 'mcp'">
+        <div style="max-width: 640px;">
+          <div class="card" style="padding: 24px; margin-bottom: 16px;">
+            <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">MCP access tokens</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
+              Let AI clients (Claude Code, Cursor, any MCP client) read fleet state and run deploy
+              actions through this dashboard. Every action goes through the teploy CLI — the same
+              path as the buttons here — so there is no second source of truth. Endpoint:
+              <code style="font-family: var(--mono);">POST /api/mcp</code> with the token as a Bearer header.
+            </p>
+            <div class="form-row" style="margin-bottom: 16px; align-items: flex-end;">
+              <div class="form-group">
+                <label class="form-label">Token name</label>
+                <input class="form-input" x-model="newMcpToken.name" placeholder="claude-code">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Access</label>
+                <select class="form-input" x-model="newMcpToken.readOnly">
+                  <option value="false">Read + actions</option>
+                  <option value="true">Read-only</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" @click="createMcpToken()">Create</button>
+            </div>
+
+            <template x-if="createdMcpToken">
+              <div class="card" style="padding: 14px 16px; margin-bottom: 16px; border: 1px solid var(--green); ">
+                <p style="font-size: 13px; margin-bottom: 8px;">Copy this token now — it will not be shown again.</p>
+                <code style="font-family: var(--mono); font-size: 12px; word-break: break-all;" x-text="createdMcpToken"></code>
+              </div>
+            </template>
+
+            <template x-if="mcpTokens.length > 0">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Name</th><th>Access</th><th>Created</th><th>Last used</th><th style="width: 80px;"></th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="t in mcpTokens" :key="t.id">
+                      <tr>
+                        <td x-text="t.name"></td>
+                        <td x-text="t.read_only ? 'Read-only' : 'Read + actions'"></td>
+                        <td style="font-size: 12px;" x-text="new Date(t.created_at).toLocaleDateString()"></td>
+                        <td style="font-size: 12px;" x-text="t.last_used && !t.last_used.startsWith('0001') ? new Date(t.last_used).toLocaleString() : 'never'"></td>
+                        <td style="text-align: right;">
+                          <button class="btn btn-sm btn-danger" @click="deleteMcpToken(t.id)">Revoke</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+            <template x-if="mcpTokens.length === 0 && !createdMcpToken">
+              <p style="font-size: 13px; color: var(--text-muted);">No tokens yet.</p>
+            </template>
+          </div>
+
+          <div class="card" style="padding: 24px;">
+            <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Connect a client</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">Claude Code example:</p>
+            <pre style="font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto;">claude mcp add teploy --transport http \
+  --header "Authorization: Bearer &lt;token&gt;" \
+  <span x-text="location.origin + '/api/mcp'"></span></pre>
+          </div>
+        </div>
+      </template>
+
       <template x-if="!loading && tab === 'account'">
         <div style="max-width: 420px;">
           <div class="card" style="padding: 24px;">

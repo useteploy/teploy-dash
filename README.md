@@ -125,6 +125,32 @@ CI webhook, everything reconciles to the same files.
 | `--no-auth` | `false` | Disable authentication entirely. **Local dev only.** |
 | `--public-status` | `false` | Serve an unauthenticated public status page at `/status`. Off by default. |
 
+## MCP (AI clients)
+
+Dash ships an [MCP](https://modelcontextprotocol.io) server at `POST /api/mcp`,
+so Claude Code, Cursor, or any MCP client can inspect your fleet and run
+deploy actions. Every action goes through the same teploy CLI delegation the
+dashboard buttons use, and every read comes from the server state files the
+CLI writes — MCP adds a fourth client to the single source of truth, not a
+second source of truth. There is nothing new to drift.
+
+Create a token under **Settings → MCP** (read-only tokens see only read
+tools), then:
+
+```bash
+claude mcp add teploy --transport http \
+  --header "Authorization: Bearer <token>" \
+  https://dash.example.com/api/mcp
+```
+
+Tools: `teploy_list_apps`, `teploy_get_app`, `teploy_app_logs`,
+`teploy_list_servers`, `teploy_list_monitors`, `teploy_list_env_keys`
+(names only — values never cross the MCP boundary), plus actions
+`teploy_deploy`, `teploy_rollback`, `teploy_restart`, `teploy_stop`,
+`teploy_start`, `teploy_lock`/`unlock`, `teploy_maintenance_on`/`off`,
+`teploy_set_env`, `teploy_unset_env`. Tokens are 256-bit secrets stored
+hashed in the dash data dir; revocation is immediate.
+
 ## Public status page
 
 `--public-status` (or `TEPLOY_DASH_PUBLIC_STATUS=1`) serves a customer-facing

@@ -719,6 +719,10 @@ document.addEventListener('alpine:init', () => {
     newGroupName: '',
     // Change password form
     pw: { current: '', next: '', confirm: '', saving: false, error: '' },
+    // MCP tokens
+    mcpTokens: [],
+    newMcpToken: { name: '', readOnly: 'false' },
+    createdMcpToken: '',
 
     async init() {
       await this.loadAll();
@@ -727,19 +731,48 @@ document.addEventListener('alpine:init', () => {
     async loadAll() {
       this.loading = true;
       try {
-        [this.servers, this.groups, this.notifications, this.registries] = await Promise.all([
+        [this.servers, this.groups, this.notifications, this.registries, this.mcpTokens] = await Promise.all([
           api.get('/api/config/servers').catch(() => ({})),
           api.get('/api/groups').catch(() => []),
           api.get('/api/notifications').catch(() => ({})),
           api.get('/api/registries').catch(() => []),
+          api.get('/api/mcp-tokens').catch(() => []),
         ]);
         this.servers = this.servers || {};
         this.groups = this.groups || [];
         this.registries = this.registries || [];
+        this.mcpTokens = this.mcpTokens || [];
       } catch (e) {
         showToast(e.message, 'error');
       }
       this.loading = false;
+    },
+
+    async createMcpToken() {
+      if (!this.newMcpToken.name) return;
+      try {
+        const res = await api.post('/api/mcp-tokens', {
+          name: this.newMcpToken.name,
+          read_only: this.newMcpToken.readOnly === 'true',
+        });
+        this.createdMcpToken = res.token;
+        this.newMcpToken = { name: '', readOnly: 'false' };
+        this.mcpTokens = await api.get('/api/mcp-tokens').catch(() => this.mcpTokens);
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    async deleteMcpToken(id) {
+      if (!confirm('Revoke this token? Clients using it will lose access immediately.')) return;
+      try {
+        await api.del(`/api/mcp-tokens/${encodeURIComponent(id)}`);
+        this.createdMcpToken = '';
+        this.mcpTokens = await api.get('/api/mcp-tokens').catch(() => []);
+        showToast('Token revoked', 'success');
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
     },
 
     serverList() {

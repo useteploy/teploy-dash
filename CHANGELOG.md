@@ -4,6 +4,19 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+- MCP server at `POST /api/mcp` — Claude Code, Cursor, or any MCP client can
+  inspect the fleet and run deploy actions. 17 curated tools; reads come from
+  the CLI's server state files, actions delegate to the CLI binary exactly
+  like the dashboard buttons, so MCP joins the existing single source of
+  truth (no second state store, nothing to desync). Bearer-token auth with
+  per-token read-only mode; tokens managed in Settings → MCP (hashed at rest,
+  immediate revocation). Env values never cross the MCP boundary — the env
+  tool returns variable names only.
+- `main.version` ldflags variables now exist, so goreleaser's long-standing
+  `-X main.version=...` flags actually take effect (previously a silent
+  no-op).
+
 ## [0.1.9] - 2026-07-15
 
 ### Added

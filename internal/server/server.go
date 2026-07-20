@@ -23,6 +23,7 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/mcp"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/remote"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
@@ -52,6 +53,8 @@ type Config struct {
 	// directory: contains index.html, css/, js/). Required — the binary is
 	// not portable without an embedded UI.
 	Frontend fs.FS
+	// Version is the dash build version (for MCP serverInfo).
+	Version string
 }
 
 // fleetCache caches aggregated multi-server app state to avoid SSH on every request.
@@ -90,9 +93,10 @@ type Server struct {
 	state    *state.Reader
 	monitor  *monitor.Runner
 	restore  *restoretest.Runner
-	store    store.Store
-	fleet    *fleetCache
-	frontend fs.FS
+	store     store.Store
+	fleet     *fleetCache
+	frontend  fs.FS
+	mcpTokens *mcp.TokenStore
 }
 
 // New creates a new server.
@@ -325,10 +329,12 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		// Always allow: health, login page, login/logout API, and the public
-		// status page (its handlers 404 when the feature is disabled).
+		// Always allow: health, login page, login/logout API, the public
+		// status page (its handlers 404 when the feature is disabled), and
+		// the MCP endpoint — it enforces its own bearer-token auth and is
+		// used by non-browser clients that have no session cookie.
 		switch r.URL.Path {
-		case "/api/health", "/login", "/api/login", "/api/logout", "/status", "/api/status":
+		case "/api/health", "/login", "/api/login", "/api/logout", "/status", "/api/status", "/api/mcp":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -666,6 +672,9 @@ func (s *Server) routes() {
 	// System
 	s.mux.HandleFunc("/api/cli/status", s.handleCLIStatus)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
+
+	// MCP: bearer-authed AI-client endpoint + session-authed token management.
+	s.initMCP(s.config.Version)
 
 	// Public status page (opt-in; handlers 404 when disabled). Bypasses auth
 	// via the gate allowlist below.
