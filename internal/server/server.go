@@ -1279,7 +1279,39 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		writeData(w, []interface{}{})
 		return
 	}
-	writeRawJSON(w, result.Stdout)
+	// The CLI returns a { name: {host, user} } map. Enrich each entry with an
+	// "online" flag from a short TCP dial to the SSH port, so the Servers page
+	// shows real reachability instead of defaulting every server to offline.
+	var servers map[string]map[string]interface{}
+	if err := json.Unmarshal([]byte(result.Stdout), &servers); err != nil {
+		writeRawJSON(w, result.Stdout) // unknown shape — pass through unchanged
+		return
+	}
+	var wg sync.WaitGroup
+	for _, cfg := range servers {
+		host, _ := cfg["host"].(string)
+		if host == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(cfg map[string]interface{}, host string) {
+			defer wg.Done()
+			cfg["online"] = tcpReachable(host, 2*time.Second)
+		}(cfg, host)
+	}
+	wg.Wait()
+	writeData(w, servers)
+}
+
+// tcpReachable reports whether host's SSH port accepts a TCP connection within
+// timeout. Used as a lightweight liveness probe for the Servers page.
+func tcpReachable(host string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
