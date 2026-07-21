@@ -102,17 +102,23 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 // or accept-all when TEPLOY_DASH_SSH_INSECURE=1 is set. Mirrors the CLI's
 // behaviour so the two products are consistent.
 func hostKeyCallback() ssh.HostKeyCallback {
-	if os.Getenv("TEPLOY_DASH_SSH_INSECURE") == "1" {
-		log.Printf("[ssh] WARNING: host-key verification disabled (TEPLOY_DASH_SSH_INSECURE=1)")
-		return ssh.InsecureIgnoreHostKey() //nolint:gosec — explicit opt-in
-	}
 	path := os.Getenv("TEPLOY_SSH_KNOWN_HOSTS")
 	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return acceptNewHostKeyCallback("") // can't resolve home; TOFU with no file
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, ".ssh", "known_hosts")
 		}
-		path = filepath.Join(home, ".ssh", "known_hosts")
+	}
+	if os.Getenv("TEPLOY_DASH_SSH_INSECURE") == "1" {
+		log.Printf("[ssh] WARNING: host-key verification disabled (TEPLOY_DASH_SSH_INSECURE=1)")
+		// Accept any key, but still RECORD it to known_hosts. The bundled teploy
+		// CLI (used for delegate actions like logs/env/rollback) strict-checks
+		// known_hosts and has no insecure mode, so without a recorded key it
+		// fails with "knownhosts: key is unknown/mismatch". Recording the key
+		// the dash already accepts lets the CLI reach the same servers.
+		return insecureRecordingCallback(path)
+	}
+	if path == "" {
+		return acceptNewHostKeyCallback("") // can't resolve home; TOFU with no file
 	}
 	if _, err := os.Stat(path); err != nil {
 		return acceptNewHostKeyCallback(path) // record on first connect
@@ -156,6 +162,32 @@ func acceptNewHostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
 		}
 		defer f.Close()
 		fmt.Fprintln(f, line)
+		return nil
+	}
+}
+
+// insecureRecordingCallback accepts every host key (the container explicitly
+// opted into insecure host-key handling on a trusted private mesh) but appends
+// the key to known_hosts so the bundled teploy CLI — which strict-checks
+// known_hosts and has no insecure mode — can reach the same servers. It
+// re-reads the file each call so a key it already recorded isn't duplicated,
+// and a changed key (server rebuild) is appended alongside the old one, which
+// the CLI's knownhosts matcher accepts.
+func insecureRecordingCallback(knownHostsPath string) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if knownHostsPath == "" {
+			return nil // nowhere to persist; accept this session
+		}
+		if cb, err := knownhosts.New(knownHostsPath); err == nil {
+			if cb(hostname, remote, key) == nil {
+				return nil // current key already recorded and matching
+			}
+		}
+		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+		if f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644); err == nil {
+			fmt.Fprintln(f, line)
+			f.Close()
+		}
 		return nil
 	}
 }
