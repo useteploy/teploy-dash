@@ -130,24 +130,150 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 		}
 	}
 
-	// Check live container status.
+	// Check live status. A container deploy records a port; a static-file
+	// deploy has port 0 and is served by Caddy directly, with no container to
+	// inspect. Stopped container apps keep their recorded port, so port==0 with
+	// a hash reliably means "static", not "container that lost its port".
 	if st.CurrentHash != "" {
-		containerFilter := fmt.Sprintf("name=%s-", appName)
-		running, err := c.Run(ctx, fmt.Sprintf(
-			"docker ps -q --filter %q 2>/dev/null | wc -l",
-			containerFilter,
-		))
-		if err == nil {
-			count, _ := strconv.Atoi(strings.TrimSpace(running))
-			if count > 0 {
-				st.Status = "running"
-			} else {
-				st.Status = "stopped"
+		if st.CurrentPort == 0 {
+			// Static site: no container exists by design, so a container check
+			// would always read "stopped". A deployed static site is live via
+			// Caddy — report it running rather than falsely down.
+			st.Status = "running"
+		} else {
+			containerFilter := fmt.Sprintf("name=%s-", appName)
+			running, err := c.Run(ctx, fmt.Sprintf(
+				"docker ps -q --filter %q 2>/dev/null | wc -l",
+				containerFilter,
+			))
+			if err == nil {
+				count, _ := strconv.Atoi(strings.TrimSpace(running))
+				if count > 0 {
+					st.Status = "running"
+				} else {
+					st.Status = "stopped"
+				}
 			}
 		}
 	}
 
 	return st, nil
+}
+
+// ServerStatus is host-level status for the Servers detail page.
+type ServerStatus struct {
+	Name        string          `json:"name"`
+	Host        string          `json:"host"`
+	Uptime      string          `json:"uptime"`
+	CPULoad     string          `json:"cpu_load"`
+	MemUsed     string          `json:"mem_used"`
+	MemTotal    string          `json:"mem_total"`
+	MemPercent  string          `json:"mem_percent"`
+	DiskUsed    string          `json:"disk_used"`
+	DiskTotal   string          `json:"disk_total"`
+	DiskPercent string          `json:"disk_percent"`
+	Containers  []ContainerInfo `json:"containers"`
+}
+
+// ContainerInfo is one container row on the server-detail page.
+type ContainerInfo struct {
+	ID     string `json:"ID"`
+	Name   string `json:"Name"`
+	Image  string `json:"Image"`
+	State  string `json:"State"`
+	Status string `json:"Status"`
+}
+
+// GetServerStatus SSHes to a server and gathers host-level status (uptime,
+// load, memory, disk, running containers). The dash CLI's `status` command
+// reports app state, not host metrics, so the Servers detail page gathers them
+// directly here.
+func GetServerStatus(ctx context.Context, srv ServerConn) (*ServerStatus, error) {
+	c, err := uissh.Connect(ctx, srv.Host, srv.User, srv.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to %s: %w", srv.Name, err)
+	}
+	defer c.Close()
+
+	st := &ServerStatus{Name: srv.Name, Host: srv.Host, Containers: []ContainerInfo{}}
+
+	// One round-trip, delimited sections.
+	out, err := c.Run(ctx, "uptime; echo '@@MEM@@'; free -m; echo '@@DISK@@'; df -h /; "+
+		"echo '@@DOCKER@@'; docker ps -a --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Status}}' 2>/dev/null")
+	if err != nil {
+		return nil, fmt.Errorf("gathering status for %s: %w", srv.Name, err)
+	}
+
+	section := "uptime"
+	for _, line := range strings.Split(out, "\n") {
+		switch strings.TrimSpace(line) {
+		case "@@MEM@@":
+			section = "mem"
+			continue
+		case "@@DISK@@":
+			section = "disk"
+			continue
+		case "@@DOCKER@@":
+			section = "docker"
+			continue
+		}
+		switch section {
+		case "uptime":
+			if line == "" {
+				continue
+			}
+			// " ... up 12 days,  3:22,  2 users,  load average: 0.1, 0.2, 0.3"
+			if i := strings.Index(line, "load average:"); i >= 0 {
+				st.CPULoad = strings.TrimSpace(line[i+len("load average:"):])
+			}
+			if i := strings.Index(line, " up "); i >= 0 {
+				rest := line[i+4:]
+				if j := strings.Index(rest, " user"); j >= 0 {
+					// Trim back to the last comma before "N users".
+					if k := strings.LastIndex(rest[:j], ","); k >= 0 {
+						rest = rest[:k]
+					}
+				}
+				st.Uptime = strings.TrimSpace(rest)
+			}
+		case "mem":
+			// "Mem:  7976  3200  ..." (total used, in MB)
+			f := strings.Fields(line)
+			if len(f) >= 3 && strings.HasPrefix(f[0], "Mem") {
+				total, _ := strconv.Atoi(f[1])
+				used, _ := strconv.Atoi(f[2])
+				st.MemTotal = fmtGiB(total)
+				st.MemUsed = fmtGiB(used)
+				if total > 0 {
+					st.MemPercent = fmt.Sprintf("%d%%", used*100/total)
+				}
+			}
+		case "disk":
+			// "/dev/sda1  40G  12G  26G  32%  /"
+			f := strings.Fields(line)
+			if len(f) >= 5 && strings.HasSuffix(f[4], "%") {
+				st.DiskTotal = f[1]
+				st.DiskUsed = f[2]
+				st.DiskPercent = f[4]
+			}
+		case "docker":
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			p := strings.SplitN(line, "|", 5)
+			if len(p) == 5 {
+				st.Containers = append(st.Containers, ContainerInfo{
+					ID: p[0], Name: p[1], Image: p[2], State: p[3], Status: p[4],
+				})
+			}
+		}
+	}
+	return st, nil
+}
+
+// fmtGiB renders a megabyte count as a one-decimal GiB string.
+func fmtGiB(mb int) string {
+	return fmt.Sprintf("%.1fG", float64(mb)/1024)
 }
 
 // StopApp stops all containers for an app on a server.

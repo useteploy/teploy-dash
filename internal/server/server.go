@@ -1329,7 +1329,22 @@ func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
 	action := parts[1]
 
 	switch action {
-	case "status", "proxy":
+	case "status":
+		// Host-level status (uptime/load/mem/disk/containers). The CLI's
+		// `status` reports app state and needs an app context, so it returned
+		// null here and the detail page rendered blank — gather over SSH.
+		srv, ok := s.lookupServer(serverName)
+		if !ok {
+			writeError(w, "unknown server: "+serverName)
+			return
+		}
+		st, err := remote.GetServerStatus(r.Context(), srv)
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeData(w, st)
+	case "proxy":
 		// Server-level status (no specific app in scope here).
 		result, err := cli.Run("status", "--host", serverName, "--json")
 		if err != nil {
