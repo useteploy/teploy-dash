@@ -14,7 +14,7 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata wget
 
 # Teploy CLI — used by dash to delegate deploy/rollback actions.
-ARG TEPLOY_VERSION=v0.1.20
+ARG TEPLOY_VERSION=v0.1.19
 RUN wget -qO- "https://github.com/useteploy/teploy-cli/releases/download/${TEPLOY_VERSION}/teploy_linux_amd64.tar.gz" \
     | tar xz -C /usr/local/bin teploy \
     && chmod +x /usr/local/bin/teploy
