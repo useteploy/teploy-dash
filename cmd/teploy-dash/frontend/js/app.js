@@ -1,13 +1,54 @@
+// ── Top loading bar ──
+// A blue→white light sweeps left→right across the bottom of the header while
+// any request is in flight, and completes at the right edge when it finishes.
+// Replaces the old inline spinners; driven by every api/rawFetch call below.
+const progressBar = {
+  inflight: 0,
+  _el() { return document.getElementById('load-bar'); },
+  start() {
+    this.inflight++;
+    if (this.inflight !== 1) return; // only kick off on the first in-flight req
+    const el = this._el();
+    if (!el) return;
+    el.style.transition = 'none';
+    el.style.width = '0%';
+    el.style.opacity = '1';
+    void el.offsetWidth; // reflow so the reset lands before the sweep animates
+    el.style.transition = '';
+    el.style.width = '90%'; // race toward the right, easing as it goes
+  },
+  done() {
+    if (this.inflight > 0) this.inflight--;
+    if (this.inflight !== 0) return; // wait until every request has settled
+    const el = this._el();
+    if (!el) return;
+    el.style.width = '100%'; // snap to the right edge — loading complete
+    setTimeout(() => {
+      el.style.opacity = '0';
+      setTimeout(() => { el.style.width = '0%'; }, 300);
+    }, 220);
+  },
+};
+
+async function trackedFetch(...args) {
+  progressBar.start();
+  try {
+    return await fetch(...args);
+  } finally {
+    progressBar.done();
+  }
+}
+
 // ── API Client ──
 const api = {
   async get(url) {
-    const res = await fetch(url);
+    const res = await trackedFetch(url);
     const json = await res.json();
     if (json.error) throw new Error(json.error);
     return json.data;
   },
   async post(url, body) {
-    const res = await fetch(url, {
+    const res = await trackedFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -17,7 +58,7 @@ const api = {
     return json.data;
   },
   async put(url, body) {
-    const res = await fetch(url, {
+    const res = await trackedFetch(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -27,7 +68,7 @@ const api = {
     return json.data;
   },
   async del(url) {
-    const res = await fetch(url, { method: 'DELETE' });
+    const res = await trackedFetch(url, { method: 'DELETE' });
     const json = await res.json();
     if (json.error) throw new Error(json.error);
     return json.data;
@@ -37,11 +78,11 @@ const api = {
 // ── Raw fetch helper for monitors (they return data directly, not wrapped) ──
 const rawFetch = {
   async get(url) {
-    const res = await fetch(url);
+    const res = await trackedFetch(url);
     return await res.json();
   },
   async post(url, body) {
-    const res = await fetch(url, {
+    const res = await trackedFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -49,7 +90,7 @@ const rawFetch = {
     return await res.json();
   },
   async del(url) {
-    await fetch(url, { method: 'DELETE' });
+    await trackedFetch(url, { method: 'DELETE' });
   },
 };
 

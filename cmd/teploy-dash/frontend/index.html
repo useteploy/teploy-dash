@@ -25,6 +25,7 @@
   <div class="navbar-spacer"></div>
   <button class="theme-toggle" @click="$store.theme.toggle()" x-text="$store.theme.mode === 'dark' ? '&#9790;' : '&#9788;'"></button>
   <button class="btn-logout" @click="logout()">Sign out</button>
+  <div id="load-bar" class="load-bar"></div>
 </nav>
 
 <!-- Global CLI-missing banner: shown when the teploy binary isn't on this host.

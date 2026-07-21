@@ -43,6 +43,7 @@ body {
 
 /* ── Navbar ── */
 .navbar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 24px;
@@ -459,20 +460,40 @@ tr:last-child td { border-bottom: none; }
 }
 
 /* ── Loading ── */
-.loading {
-  display: flex;
-  justify-content: center;
-  padding: 48px;
+/* Loading is now shown by the top progress bar in the header (#load-bar), so
+   the old inline spinner blocks are hidden. */
+.loading { display: none; }
+.spinner { display: none; }
+
+/* Top loading bar: a blue→white light that sweeps left→right across the bottom
+   edge of the header while any request is in flight, completing at the right
+   edge when loading finishes. Width/opacity are driven by progressBar in app.js. */
+.load-bar {
+  position: absolute;
+  left: 0;
+  bottom: -1px;               /* sit on the header's bottom border */
+  height: 2px;
+  width: 0;
+  opacity: 0;
+  background: linear-gradient(90deg, rgba(59,130,246,0.15), var(--accent, #3b82f6) 55%, #bfdbfe);
+  border-radius: 0 2px 2px 0;
+  transition: width 0.4s cubic-bezier(0.1, 0.75, 0.25, 1), opacity 0.25s ease;
+  z-index: 60;
+  pointer-events: none;
 }
-.spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+/* Glowing white head so the leading edge reads as a light speeding rightward. */
+.load-bar::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -1px;
+  width: 64px;
+  height: 4px;
+  transform: translateX(30%);
+  background: linear-gradient(90deg, rgba(255,255,255,0), #ffffff);
+  box-shadow: 0 0 10px 2px rgba(147,197,253,0.9), 0 0 22px 5px rgba(59,130,246,0.55);
+  border-radius: 4px;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Back Link ── */
 .back-link {
