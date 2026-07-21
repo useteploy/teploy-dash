@@ -644,7 +644,13 @@ document.addEventListener('alpine:init', () => {
     async load() {
       this.loading = true;
       try {
-        this.servers = (await api.get('/api/servers').catch(() => [])) || [];
+        // /api/servers returns a { name: {host, user} } map; the card x-for
+        // keys on s.name, so flatten the map into an array with name. Without
+        // this the keys are all undefined and Alpine's x-for crashes the page.
+        const raw = (await api.get('/api/servers').catch(() => ({}))) || {};
+        this.servers = Array.isArray(raw)
+          ? raw
+          : Object.entries(raw).map(([name, s]) => ({ name, ...s }));
       } catch (e) {
         this.servers = [];
       }
