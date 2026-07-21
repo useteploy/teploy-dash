@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -38,6 +39,18 @@ type AppState struct {
 	CurrentPort  int       `json:"port"`
 	Status       string    `json:"status"` // "running", "stopped", "unknown"
 	DeployedAt   time.Time `json:"deployed_at"`
+}
+
+// MarshalJSON also emits a "name" field mirroring App. The frontend keys and
+// filters the app list on `.name`; without this the deployments list renders
+// empty (undefined keys crash Alpine's x-for). Emitting both keeps the API
+// backward-compatible while the UI expects `name`.
+func (a AppState) MarshalJSON() ([]byte, error) {
+	type alias AppState
+	return json.Marshal(struct {
+		alias
+		Name string `json:"name"`
+	}{alias(a), a.App})
 }
 
 // ServerConn holds connection details for a server.
