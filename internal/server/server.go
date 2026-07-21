@@ -817,13 +817,24 @@ func (s *Server) serverUser(name string) string {
 	return ""
 }
 
+// serverHost resolves a server name to its configured host/IP, falling back to
+// the name itself when unknown. The bundled CLI's --host, in app-scoped mode
+// (--app), is treated as a raw host and is NOT resolved against servers.yml, so
+// passing the alias fails with "no such host". Resolve it here.
+func (s *Server) serverHost(name string) string {
+	if srv, ok := s.lookupServer(name); ok && srv.Host != "" {
+		return srv.Host
+	}
+	return name
+}
+
 // cliAppRun runs an app-scoped teploy subcommand, appending --host/--app and
 // --user (when the server has a non-root user). `parts` is the subcommand plus
 // any leading flags/positionals; flag order doesn't matter to cobra so trailing
 // flags like --json can be passed in parts.
 func (s *Server) cliAppRun(serverName, appName string, parts ...string) (*cli.Result, error) {
 	args := append([]string{}, parts...)
-	args = append(args, "--host", serverName, "--app", appName)
+	args = append(args, "--host", s.serverHost(serverName), "--app", appName)
 	if u := s.serverUser(serverName); u != "" {
 		args = append(args, "--user", u)
 	}
@@ -900,7 +911,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.EnvList(serverName, s.serverUser(serverName), appName)
+		result, err := cli.EnvList(s.serverHost(serverName), s.serverUser(serverName), appName)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -921,7 +932,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid env var name")
 			return
 		}
-		result, err := cli.EnvSet(serverName, s.serverUser(serverName), appName, body.Key, body.Value)
+		result, err := cli.EnvSet(s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -938,7 +949,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid env var name")
 			return
 		}
-		result, err := cli.EnvUnset(serverName, s.serverUser(serverName), appName, key)
+		result, err := cli.EnvUnset(s.serverHost(serverName), s.serverUser(serverName), appName, key)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1346,7 +1357,7 @@ func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
 		writeData(w, st)
 	case "proxy":
 		// Server-level status (no specific app in scope here).
-		result, err := cli.Run("status", "--host", serverName, "--json")
+		result, err := cli.Run("status", "--host", s.serverHost(serverName), "--json")
 		if err != nil {
 			writeData(w, nil)
 			return

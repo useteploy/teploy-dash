@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -45,6 +46,19 @@ func main() {
 	// Env fallback for the public status toggle (Docker-friendly).
 	if v := os.Getenv("TEPLOY_DASH_PUBLIC_STATUS"); v == "1" || v == "true" {
 		*publicStatus = true
+	}
+
+	// The dash's own SSH honors TEPLOY_DASH_SSH_INSECURE to skip host-key
+	// verification (trusted admin container on a private mesh). The bundled
+	// teploy CLI, which delegate actions shell out to, does its OWN strict
+	// known_hosts check whenever that file exists — so a stale entry (e.g.
+	// after a server was rebuilt with a new host key) breaks every CLI action
+	// with "knownhosts: key mismatch". Remove it so the CLI also falls back to
+	// accept-all, staying consistent with the dash.
+	if os.Getenv("TEPLOY_DASH_SSH_INSECURE") == "1" {
+		if home, err := os.UserHomeDir(); err == nil {
+			_ = os.Remove(filepath.Join(home, ".ssh", "known_hosts"))
+		}
 	}
 
 	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
