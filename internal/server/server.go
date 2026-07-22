@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,8 @@ import (
 	"github.com/useteploy/teploy-dash/internal/state"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
+
+var appNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Config holds server configuration.
 type Config struct {
@@ -87,12 +90,12 @@ func (fc *fleetCache) set(apps []remote.AppState) {
 
 // Server is the teploy-dash HTTP server.
 type Server struct {
-	mux      *http.ServeMux
-	config   Config
-	gate     *authGate
-	state    *state.Reader
-	monitor  *monitor.Runner
-	restore  *restoretest.Runner
+	mux       *http.ServeMux
+	config    Config
+	gate      *authGate
+	state     *state.Reader
+	monitor   *monitor.Runner
+	restore   *restoretest.Runner
 	store     store.Store
 	fleet     *fleetCache
 	frontend  fs.FS
@@ -865,7 +868,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	// shell command or a CLI delegate. server/app names are interpolated into
 	// remote `docker` invocations; without this a name like `x'; rm -rf / #`
 	// would be remote code execution as the SSH user (root) on the fleet.
-	if !store.ValidID(serverName) || !store.ValidID(appName) {
+	if !store.ValidID(serverName) || !appNamePattern.MatchString(appName) {
 		writeError(w, "invalid server or app name")
 		return
 	}
@@ -1041,6 +1044,31 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 		s.fleet.set(nil)
 		writeData(w, result)
 
+	case "remove":
+		if !cli.IsInstalled() {
+			writeError(w, "teploy CLI not installed")
+			return
+		}
+		var body struct {
+			Purge    bool   `json:"purge"`
+			Redirect string `json:"redirect"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		parts := []string{"remove", "--yes", "--json"}
+		if body.Purge {
+			parts = append(parts, "--purge")
+		}
+		if body.Redirect != "" {
+			parts = append(parts, "--redirect", body.Redirect)
+		}
+		result, err := s.cliAppRun(serverName, appName, parts...)
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		s.fleet.set(nil)
+		writeRawJSON(w, result.Stdout)
+
 	case "lock":
 		if !cli.IsInstalled() {
 			writeError(w, "teploy CLI not installed")
@@ -1051,6 +1079,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, err.Error())
 			return
 		}
+		s.fleet.set(nil)
 		writeData(w, result)
 
 	case "unlock":
@@ -1063,6 +1092,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, err.Error())
 			return
 		}
+		s.fleet.set(nil)
 		writeData(w, result)
 
 	case "maintenance/on":
@@ -1075,6 +1105,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, err.Error())
 			return
 		}
+		s.fleet.set(nil)
 		writeData(w, result)
 
 	case "maintenance/off":
@@ -1087,6 +1118,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, err.Error())
 			return
 		}
+		s.fleet.set(nil)
 		writeData(w, result)
 
 	default:
@@ -1142,7 +1174,7 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 	}
 	serverName, appName := parts[0], parts[1]
 	// Same injection guard as handleAppAction — appName reaches a remote shell.
-	if !store.ValidID(serverName) || !store.ValidID(appName) {
+	if !store.ValidID(serverName) || !appNamePattern.MatchString(appName) {
 		http.Error(w, "invalid server or app name", 400)
 		return
 	}
@@ -1151,6 +1183,21 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		http.Error(w, "server not found: "+serverName, 404)
 		return
+	}
+	process := r.URL.Query().Get("process")
+	if process == "" {
+		process = "web"
+	}
+	if !store.ValidID(process) {
+		http.Error(w, "invalid process name", http.StatusBadRequest)
+		return
+	}
+	lines, err := strconv.Atoi(r.URL.Query().Get("lines"))
+	if err != nil || lines < 1 {
+		lines = 200
+	}
+	if lines > 1000 {
+		lines = 1000
 	}
 
 	// Upgrade to WebSocket manually (no external dep — use chunked streaming).
@@ -1172,14 +1219,14 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 
 		pw := &sseWriter{w: w, flusher: flusher}
-		remote.StreamLogs(ctx, srv, appName, pw) //nolint:errcheck
+		remote.StreamLogs(ctx, srv, appName, process, lines, pw) //nolint:errcheck
 		return
 	}
 
 	// Proper WebSocket upgrade using net/http hijack.
 	wsHandler(w, r, func(ctx context.Context, send func(string)) {
 		pw := &wsLineWriter{send: send}
-		remote.StreamLogs(ctx, srv, appName, pw) //nolint:errcheck
+		remote.StreamLogs(ctx, srv, appName, process, lines, pw) //nolint:errcheck
 	})
 }
 

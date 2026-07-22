@@ -79,7 +79,7 @@ const api = {
 const rawFetch = {
   async get(url) {
     const res = await trackedFetch(url);
-    return await res.json();
+    return await this.parse(res);
   },
   async post(url, body) {
     const res = await trackedFetch(url, {
@@ -87,10 +87,22 @@ const rawFetch = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    return await res.json();
+    return await this.parse(res);
   },
   async del(url) {
-    await trackedFetch(url, { method: 'DELETE' });
+    const res = await trackedFetch(url, { method: 'DELETE' });
+    return await this.parse(res);
+  },
+  async parse(res) {
+    const text = await res.text();
+    let data = null;
+    if (text) {
+      try { data = JSON.parse(text); } catch { data = text; }
+    }
+    if (!res.ok) {
+      throw new Error(data?.error || (typeof data === 'string' ? data : '') || `Request failed (${res.status})`);
+    }
+    return data;
   },
 };
 
@@ -370,6 +382,20 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    async renameThisProject() {
+      const name = prompt('Project name:', this.projectName);
+      if (!name || name === this.projectName) return;
+      try {
+        await api.put(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}`, { name });
+        this.projectName = name;
+        Alpine.store('router').params.project = name;
+        showToast('Project renamed', 'success');
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
     openDeployForm() {
       this.deployingToProject = true;
       this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
@@ -411,7 +437,7 @@ document.addEventListener('alpine:init', () => {
     newEnvValue: '',
 
     async init() {
-      await this.loadStatus();
+      await Promise.all([this.loadStatus(), this.loadAccessories()]);
     },
 
     appPath() {
@@ -473,6 +499,22 @@ document.addEventListener('alpine:init', () => {
       this.actionLoading = false;
     },
 
+    async removeApp() {
+      const name = this.app.name;
+      if (!confirm(`Remove ${name} from ${this.app.server}?\n\nThis stops and removes its containers, removes its route, and deletes its deploy state. Volumes and accessory data are preserved.`)) return;
+      const redirect = prompt('Optional: leave a permanent redirect to this URL (blank for none):', '');
+      if (redirect === null) return; // cancelled
+      this.actionLoading = true;
+      try {
+        await api.post(`${this.appPath()}/remove`, { redirect: redirect.trim() });
+        showToast(`Removed ${name}`, 'success');
+        Alpine.store('router').navigate('projects');
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.actionLoading = false;
+    },
+
     async addEnvVar() {
       if (!this.newEnvKey) return;
       try {
@@ -499,6 +541,11 @@ document.addEventListener('alpine:init', () => {
 
     containerCount() {
       return (this.app?.containers || []).filter(c => c.State === 'running').length;
+    },
+
+    accessoryName(containerName) {
+      const prefix = `${this.app?.name || ''}-`;
+      return containerName.startsWith(prefix) ? containerName.slice(prefix.length) : containerName;
     },
   }));
 
@@ -594,7 +641,10 @@ document.addEventListener('alpine:init', () => {
 
     async loadServers() {
       try {
-        this.servers = (await api.get('/api/servers').catch(() => [])) || [];
+        const raw = (await api.get('/api/servers').catch(() => ({}))) || {};
+        this.servers = Array.isArray(raw)
+          ? raw
+          : Object.entries(raw).map(([name, server]) => ({ name, ...server }));
       } catch { this.servers = []; }
     },
 
@@ -1042,6 +1092,7 @@ document.addEventListener('alpine:init', () => {
     newMonitor: {
       name: '',
       type: 'http',
+      method: 'GET',
       target: '',
       interval: '60000',
       timeout: '10000',
@@ -1090,12 +1141,12 @@ document.addEventListener('alpine:init', () => {
           id,
           name: this.newMonitor.name,
           type: this.newMonitor.type,
+          method: this.newMonitor.type === 'http' ? this.newMonitor.method : '',
           target: this.newMonitor.target,
           interval: parseInt(this.newMonitor.interval) * 1000000,
           timeout: parseInt(this.newMonitor.timeout) * 1000000,
           enabled: true,
           expected_status: parseInt(this.newMonitor.expected_status) || 0,
-          method: 'GET',
         };
         await rawFetch.post('/api/monitors', body);
         const wasEdit = !!this.editingId;
@@ -1157,6 +1208,7 @@ document.addEventListener('alpine:init', () => {
       this.newMonitor = {
         name: m.name,
         type: m.type,
+        method: m.method || 'GET',
         target: m.target,
         interval: String(m.interval / 1000000),
         timeout: String(m.timeout / 1000000),
@@ -1167,7 +1219,7 @@ document.addEventListener('alpine:init', () => {
 
     resetForm() {
       this.newMonitor = {
-        name: '', type: 'http', target: '',
+        name: '', type: 'http', method: 'GET', target: '',
         interval: '60000', timeout: '10000', expected_status: '',
       };
     },
