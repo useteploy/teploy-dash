@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/css/style.css">
   <script defer src="/js/alpine.js"></script>
   <script src="/js/app.js"></script>
+  <script src="/js/operations.js"></script>
 </head>
 <body x-data>
 
@@ -21,10 +22,11 @@
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" @click.prevent="$store.router.navigate('operations')">Operations</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'settings' }" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
   <div class="navbar-spacer"></div>
-  <span class="navbar-env"><span class="dot green"></span> local</span>
+  <span class="navbar-env">self-hosted</span>
   <button class="theme-toggle" @click="$store.theme.toggle()" x-text="$store.theme.mode === 'dark' ? 'Light' : 'Dark'"></button>
   <button class="btn-logout" @click="logout()">Sign out</button>
   <div id="load-bar" class="load-bar"></div>
@@ -1165,6 +1167,122 @@
               <div class="card-meta" x-text="t.description"></div>
             </div>
           </template>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ Operations Page ═══ -->
+  <template x-if="$store.router.page === 'operations'">
+    <div x-data="operationsPage">
+      <div class="page-header">
+        <h1 class="page-title">Operations</h1>
+        <div class="header-actions">
+          <select class="form-input" style="width:auto;" x-model="statusFilter" @change="load()">
+            <option value="">All statuses</option>
+            <option value="queued">Queued</option>
+            <option value="running">Running</option>
+            <option value="succeeded">Succeeded</option>
+            <option value="failed">Failed</option>
+            <option value="canceled">Canceled</option>
+            <option value="interrupted">Interrupted</option>
+          </select>
+          <button class="btn btn-sm" @click="load()">Refresh</button>
+        </div>
+      </div>
+
+      <template x-if="!loading && ops.length === 0">
+        <div class="empty-state">
+          <p>No operations yet.</p>
+          <p style="color: var(--text-muted); font-size: 12px; margin-top: 6px;">
+            Deploys, rollbacks, and removals started from the dashboard appear here with live logs.
+          </p>
+        </div>
+      </template>
+
+      <template x-if="ops.length > 0">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Kind</th>
+                <th>Target</th>
+                <th>Attempt</th>
+                <th>Started</th>
+                <th>Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="op in ops" :key="op.id">
+                <tr style="cursor:pointer;" @click="open(op)">
+                  <td>
+                    <span class="status-dot" :class="{ running: op.status === 'running' || op.status === 'succeeded', stopped: op.status === 'failed' || op.status === 'interrupted', unknown: op.status === 'queued' || op.status === 'canceled' }"></span>
+                    <span x-text="op.status"></span>
+                  </td>
+                  <td style="font-family: var(--mono); font-size: 12px;" x-text="op.request.kind"></td>
+                  <td x-text="op.target"></td>
+                  <td x-text="op.attempt"></td>
+                  <td x-text="when(op.started_at || op.created_at)"></td>
+                  <td x-text="duration(op)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ Operation Detail ═══ -->
+  <template x-if="$store.router.page === 'operation-detail'">
+    <div x-data="operationDetailPage">
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('operations')">&larr; Operations</a>
+
+      <template x-if="!loading && op">
+        <div>
+          <div class="page-header">
+            <h1 class="page-title" x-text="op.request.kind + ' — ' + op.target"></h1>
+            <div class="header-actions">
+              <button class="btn" x-show="cancelable()" @click="cancel()" :disabled="actionLoading">Cancel</button>
+              <button class="btn" x-show="retryable()" @click="retry()" :disabled="actionLoading">Retry</button>
+            </div>
+          </div>
+
+          <div class="card-grid" style="margin-bottom: 16px;">
+            <div class="card">
+              <div class="card-meta">Status</div>
+              <div class="card-title">
+                <span class="status-dot" :class="{ running: op.status === 'running' || op.status === 'succeeded', stopped: op.status === 'failed' || op.status === 'interrupted', unknown: op.status === 'queued' || op.status === 'canceled' }"></span>
+                <span x-text="op.status"></span>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-meta">Started</div>
+              <div class="card-title" style="font-size: 13px;" x-text="when(op.started_at)"></div>
+            </div>
+            <div class="card">
+              <div class="card-meta">Duration</div>
+              <div class="card-title" style="font-size: 13px;" x-text="duration(op)"></div>
+            </div>
+            <div class="card">
+              <div class="card-meta">Exit code</div>
+              <div class="card-title mono" x-text="op.exit_code === null || op.exit_code === undefined ? '—' : op.exit_code"></div>
+            </div>
+          </div>
+
+          <template x-if="op.error">
+            <div class="cli-banner" style="margin: 0 0 16px; border-radius: var(--radius); text-align: left;" x-text="op.error"></div>
+          </template>
+
+          <div class="log-viewer" x-ref="opLog" style="max-height: 60vh;">
+            <template x-for="(line, i) in lines" :key="i">
+              <span :class="line.cls" x-text="line.text"></span>
+            </template>
+            <template x-if="lines.length === 0">
+              <span style="color: var(--text-muted);">Waiting for output…</span>
+            </template>
+          </div>
         </div>
       </template>
     </div>

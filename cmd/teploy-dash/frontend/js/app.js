@@ -140,14 +140,81 @@ async function logout() {
 // ── Alpine.js App ──
 document.addEventListener('alpine:init', () => {
   // ── Router Store ──
+  // URL-routed navigation: every page has a real path (history API), so
+  // views are linkable, reloadable, and back/forward work. The server serves
+  // index.html for unknown routes (SPA fallback), so deep links resolve.
+  // The store API (page/params/navigate) is unchanged — pages don't know.
+  const ROUTES = [
+    { page: 'homepage', path: '/' },
+    { page: 'projects', path: '/deployments' },
+    { page: 'project-detail', path: '/deployments/groups/:group/:project' },
+    { page: 'app-detail', path: '/deployments/:server/:name' },
+    { page: 'monitors', path: '/monitors' },
+    { page: 'monitor-detail', path: '/monitors/:id' },
+    { page: 'restore-tests', path: '/restore-tests' },
+    { page: 'templates', path: '/templates' },
+    { page: 'servers', path: '/servers' },
+    { page: 'server-detail', path: '/servers/:name' },
+    { page: 'operations', path: '/operations' },
+    { page: 'operation-detail', path: '/operations/:id' },
+    { page: 'settings', path: '/settings' },
+  ];
+
+  function routeToURL(page, params) {
+    const route = ROUTES.find(r => r.page === page);
+    if (!route) return '/';
+    const used = new Set();
+    const path = route.path.split('/').map(seg => {
+      if (!seg.startsWith(':')) return seg;
+      const key = seg.slice(1);
+      used.add(key);
+      return encodeURIComponent(params[key] ?? '');
+    }).join('/') || '/';
+    // Leftover params ride the query string so breadcrumb context (e.g.
+    // fromGroup) survives reloads without polluting the path.
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (!used.has(k) && v !== null && v !== undefined && v !== '') qs.set(k, v);
+    }
+    const q = qs.toString();
+    return q ? `${path}?${q}` : path;
+  }
+
+  function matchURL(pathname, search) {
+    for (const route of ROUTES) {
+      const want = route.path.split('/');
+      const have = pathname.replace(/\/+$/, '').split('/');
+      if (want.length !== have.length && !(route.path === '/' && pathname === '/')) continue;
+      if (route.path === '/' && pathname !== '/') continue;
+      const params = {};
+      let ok = true;
+      for (let i = 0; i < want.length; i++) {
+        if (want[i].startsWith(':')) params[want[i].slice(1)] = decodeURIComponent(have[i] || '');
+        else if (want[i] !== have[i]) { ok = false; break; }
+      }
+      if (!ok) continue;
+      for (const [k, v] of new URLSearchParams(search)) params[k] = v;
+      return { page: route.page, params };
+    }
+    return { page: 'homepage', params: {} };
+  }
+
   Alpine.store('router', {
     page: 'homepage',
     params: {},
     navigate(page, params = {}) {
       this.page = page;
       this.params = params;
+      history.pushState({ page, params }, '', routeToURL(page, params));
+    },
+    restore() {
+      const { page, params } = matchURL(location.pathname, location.search);
+      this.page = page;
+      this.params = params;
     },
   });
+  Alpine.store('router').restore();
+  window.addEventListener('popstate', () => Alpine.store('router').restore());
 
   // ── Theme Store ──
   Alpine.store('theme', {
