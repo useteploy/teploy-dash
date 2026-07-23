@@ -41,13 +41,19 @@ func (b mcpBackend) ListApps(ctx context.Context) (string, error) {
 	if apps, ok := b.s.fleet.get(); ok {
 		return jsonText(apps)
 	}
-	apps := b.s.collectFleetApps(ctx)
+	apps, err := b.s.collectFleetApps(ctx)
+	if err != nil {
+		return "", err
+	}
 	b.s.fleet.set(apps)
 	return jsonText(apps)
 }
 
 func (b mcpBackend) GetApp(ctx context.Context, server, app string) (string, error) {
-	apps := b.s.collectFleetApps(ctx)
+	apps, err := b.s.collectFleetApps(ctx)
+	if err != nil {
+		return "", err
+	}
 	for _, a := range apps {
 		if a.Server == server && a.App == app {
 			return jsonText(a)
@@ -268,6 +274,7 @@ func (s *Server) initMCP(version string) {
 
 // handleMCPTokens lists (GET) or creates (POST) MCP tokens. Session-authed.
 func (s *Server) handleMCPTokens(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if s.mcpTokens == nil {
 		writeError(w, "MCP is disabled")
 		return

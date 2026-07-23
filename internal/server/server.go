@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -24,8 +25,10 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/manifest"
 	"github.com/useteploy/teploy-dash/internal/mcp"
 	"github.com/useteploy/teploy-dash/internal/monitor"
+	"github.com/useteploy/teploy-dash/internal/operation"
 	"github.com/useteploy/teploy-dash/internal/remote"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
 	"github.com/useteploy/teploy-dash/internal/state"
@@ -33,6 +36,10 @@ import (
 )
 
 var appNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func validAppName(name string) bool {
+	return name != "." && name != ".." && appNamePattern.MatchString(name)
+}
 
 // Config holds server configuration.
 type Config struct {
@@ -58,6 +65,17 @@ type Config struct {
 	Frontend fs.FS
 	// Version is the dash build version (for MCP serverInfo).
 	Version string
+	// Operation hooks are primarily for tests and alternate CLI packaging. The
+	// production defaults resolve servers.yml and execute the bundled CLI.
+	OperationResolver  operation.Resolver
+	OperationExecutor  operation.Executor
+	OperationMaxEvents int
+	// CLI/read hooks keep machine-contract handling testable without changing
+	// production behavior.
+	CLIRunner          func(context.Context, ...string) (*cli.Result, error)
+	CLIInstalled       func() bool
+	RemoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
+	RemoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
 }
 
 // fleetCache caches aggregated multi-server app state to avoid SSH on every request.
@@ -90,16 +108,25 @@ func (fc *fleetCache) set(apps []remote.AppState) {
 
 // Server is the teploy-dash HTTP server.
 type Server struct {
-	mux       *http.ServeMux
-	config    Config
-	gate      *authGate
-	state     *state.Reader
-	monitor   *monitor.Runner
-	restore   *restoretest.Runner
-	store     store.Store
-	fleet     *fleetCache
-	frontend  fs.FS
-	mcpTokens *mcp.TokenStore
+	mux                *http.ServeMux
+	config             Config
+	gate               *authGate
+	state              *state.Reader
+	monitor            *monitor.Runner
+	restore            *restoretest.Runner
+	store              store.Store
+	fleet              *fleetCache
+	frontend           fs.FS
+	mcpTokens          *mcp.TokenStore
+	operations         *operation.Manager
+	operationInitErr   error
+	manifests          *manifest.Store
+	manifestInitErr    error
+	runCLI             cliRunner
+	cliInstalled       func() bool
+	remoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
+	remoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
+	capabilitiesCache  capabilityCache
 }
 
 // New creates a new server.
@@ -114,6 +141,22 @@ func New(config Config) *Server {
 		fleet:    &fleetCache{ttl: 60 * time.Second},
 		frontend: config.Frontend,
 	}
+	s.runCLI = config.CLIRunner
+	if s.runCLI == nil {
+		s.runCLI = cli.RunContext
+	}
+	s.cliInstalled = config.CLIInstalled
+	if s.cliInstalled == nil {
+		s.cliInstalled = cli.IsInstalled
+	}
+	s.remoteListApps = config.RemoteListApps
+	if s.remoteListApps == nil {
+		s.remoteListApps = remote.ListApps
+	}
+	s.remoteServerStatus = config.RemoteServerStatus
+	if s.remoteServerStatus == nil {
+		s.remoteServerStatus = remote.GetServerStatus
+	}
 	if !config.NoAuth {
 		s.gate = newAuthGate(config.AuthUser, config.AuthPass, filepath.Join(config.DataDir, "auth.json"))
 	}
@@ -122,17 +165,75 @@ func New(config Config) *Server {
 		// non-root fleets also need --user, resolved the same way cliAppRun does.
 		s.restore.SetUserResolver(s.serverUser)
 	}
+	s.manifests, s.manifestInitErr = manifest.New(config.DataDir)
+	if s.manifestInitErr != nil {
+		log.Printf("manifests: disabled: %v", s.manifestInitErr)
+	}
+	resolver := config.OperationResolver
+	if resolver == nil {
+		resolver = s.resolveOperationServer
+	}
+	executor := config.OperationExecutor
+	if executor == nil {
+		executor = func(ctx context.Context, command operation.Command, emit func(operation.Stream, string)) (int, error) {
+			defer s.fleet.set(nil)
+			return executeOperation(ctx, command, emit)
+		}
+	}
+	s.operations, s.operationInitErr = operation.New(config.DataDir, operation.Options{
+		MaxEvents: config.OperationMaxEvents,
+		Resolver:  resolver,
+		ProjectResolver: func(server, app, revision string) (string, error) {
+			if s.manifests == nil {
+				return "", fmt.Errorf("manifest service unavailable")
+			}
+			return s.manifests.ProjectDir(server, app, revision)
+		},
+		Executor: executor,
+	})
+	if s.operationInitErr != nil {
+		log.Printf("operations: disabled: %v", s.operationInitErr)
+	}
 	s.routes()
 	return s
 }
 
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe(addr string) error {
-	handler := http.Handler(s.mux)
-	if s.gate != nil {
-		handler = s.gate.wrap(s.mux)
+	return s.httpServer(addr).ListenAndServe()
+}
+
+func (s *Server) httpServer(addr string) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           s.handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
-	return http.ListenAndServe(addr, handler)
+}
+
+func (s *Server) handler() http.Handler {
+	handler := http.Handler(s.mux)
+	handler = limitMutationBodies(handler)
+	if s.gate != nil {
+		handler = s.gate.wrap(handler)
+	}
+	return handler
+}
+
+func limitMutationBodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isMutating(r.Method) {
+			if r.ContentLength > maxRequestBodySize {
+				jsonError(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // authGate protects all routes except /api/health, /login, /api/login, and
@@ -163,10 +264,11 @@ type failInfo struct {
 }
 
 const (
-	authMaxFails   = 5
-	authLockWindow = time.Minute
-	sessionTTL     = 24 * time.Hour
-	sessionCookie  = "teploy_dash_session"
+	authMaxFails       = 5
+	authLockWindow     = time.Minute
+	sessionTTL         = 24 * time.Hour
+	sessionCookie      = "teploy_dash_session"
+	maxRequestBodySize = 1 << 20
 )
 
 // authCredFile is the on-disk credential format.
@@ -385,6 +487,7 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 
 // handleLogin validates the submitted password and issues a session cookie.
 func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -407,13 +510,14 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.recordSuccess(ip)
-	g.issueSessionCookie(w)
+	g.issueSessionCookie(w, r)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // handleSetup creates the initial account. Only works in setup mode.
 func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -450,13 +554,14 @@ func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to save credentials", http.StatusInternalServerError)
 		return
 	}
-	g.issueSessionCookie(w)
+	g.issueSessionCookie(w, r)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // handleChangePassword changes the password. Requires an authenticated session.
 func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -502,13 +607,13 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 	g.sessMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: g.secureCookie(r), SameSite: http.SameSiteLaxMode,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-func (g *authGate) issueSessionCookie(w http.ResponseWriter) {
+func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request) {
 	token := g.newSession()
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -516,12 +621,29 @@ func (g *authGate) issueSessionCookie(w http.ResponseWriter) {
 		Path:     "/",
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
+		Secure:   g.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
+func (g *authGate) secureCookie(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if !g.isTrustedProxy(host) {
+		return false
+	}
+	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(proto, "https")
+}
+
 // handleLogout clears the session cookie and invalidates the session.
 func (g *authGate) handleLogout(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -535,6 +657,7 @@ func (g *authGate) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   g.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	w.Header().Set("Content-Type", "application/json")
@@ -649,6 +772,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/apps", s.handleApps)
 	s.mux.HandleFunc("/api/apps/", s.handleAppAction)
 	s.mux.HandleFunc("/api/deploy", s.handleDeploy)
+	s.mux.HandleFunc("/api/operations", s.handleOperations)
+	s.mux.HandleFunc("/api/operations/", s.handleOperation)
+	s.mux.HandleFunc("/api/manifests", s.handleManifests)
+	s.mux.HandleFunc("/api/manifests/", s.handleManifest)
 	s.mux.HandleFunc("/api/config/servers", s.handleConfigServers)
 	s.mux.HandleFunc("/api/config/servers/", s.handleConfigServerAction)
 	s.mux.HandleFunc("/api/notifications", s.handleNotifications)
@@ -674,6 +801,7 @@ func (s *Server) routes() {
 
 	// System
 	s.mux.HandleFunc("/api/cli/status", s.handleCLIStatus)
+	s.mux.HandleFunc("/api/capabilities", s.handleCapabilities)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
 
 	// MCP: bearer-authed AI-client endpoint + session-authed token management.
@@ -698,13 +826,17 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apps := s.collectFleetApps(r.Context())
+	apps, err := s.collectFleetApps(r.Context())
+	if err != nil {
+		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	s.fleet.set(apps)
 	writeData(w, apps)
 }
 
 // collectFleetApps gathers app state from all servers in parallel.
-func (s *Server) collectFleetApps(ctx context.Context) []remote.AppState {
+func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error) {
 	servers := s.resolveServers()
 
 	if len(servers) == 0 {
@@ -721,7 +853,7 @@ func (s *Server) collectFleetApps(ctx context.Context) []remote.AppState {
 				Status:       a.Status,
 			})
 		}
-		return apps
+		return apps, nil
 	}
 
 	// Bound the whole fleet refresh so a single slow/unreachable server can't
@@ -738,7 +870,7 @@ func (s *Server) collectFleetApps(ctx context.Context) []remote.AppState {
 	for _, srv := range servers {
 		srv := srv
 		go func() {
-			apps, err := remote.ListApps(ctx, srv)
+			apps, err := s.readMachineApps(ctx, srv)
 			ch <- result{apps, err}
 		}()
 	}
@@ -758,21 +890,25 @@ func (s *Server) collectFleetApps(ctx context.Context) []remote.AppState {
 		all = append(all, r.apps...)
 	}
 	if errCount == len(servers) && len(all) == 0 {
-		log.Printf("[fleet] all %d server(s) unreachable — app list is empty because every server failed, not because there are no apps", len(servers))
+		return nil, fmt.Errorf("fleet app collection failed for all %d server(s)", len(servers))
 	}
-	return all
+	return all, nil
 }
 
 // resolveServers returns server connections from the CLI's servers.yml via the CLI delegate.
 func (s *Server) resolveServers() []remote.ServerConn {
-	if !cli.IsInstalled() {
+	if !s.cliInstalled() {
 		return nil
 	}
-	result, err := cli.ServerList()
+	result, err := s.runCLI(context.Background(), "server", "list", "--json")
 	if err != nil {
 		// Don't silently treat a CLI failure as "no servers" (which would fall
 		// through to the empty local-state path) — log it so the cause is visible.
 		log.Printf("[fleet] could not list servers from the teploy CLI: %v", err)
+		return nil
+	}
+	if result.ExitCode != 0 {
+		log.Printf("[fleet] could not list servers from the teploy CLI: %v", commandFailure([]string{"server", "list", "--json"}, result))
 		return nil
 	}
 
@@ -846,8 +982,8 @@ func (s *Server) cliAppRun(serverName, appName string, parts ...string) (*cli.Re
 
 // ── App Actions ──────────────────────────────────────────────────────────
 
-// handleAppAction handles /api/apps/{server}/{app}/{action}
-// stop, start, restart use SSH direct; rollback and env use CLI delegate.
+// handleAppAction handles /api/apps/{server}/{app}/{action}. Mutations are
+// delegated to the CLI, with long-running actions tracked as operations.
 func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/apps/")
 	parts := strings.SplitN(path, "/", 3)
@@ -863,12 +999,15 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	if len(parts) >= 3 {
 		action = parts[2]
 	}
+	if action == "env" || strings.HasPrefix(action, "env/") {
+		noStore(w)
+	}
 
 	// Reject anything that isn't a plain identifier BEFORE it reaches an SSH
 	// shell command or a CLI delegate. server/app names are interpolated into
 	// remote `docker` invocations; without this a name like `x'; rm -rf / #`
 	// would be remote code execution as the SSH user (root) on the fleet.
-	if !store.ValidID(serverName) || !appNamePattern.MatchString(appName) {
+	if !store.ValidID(serverName) || !validAppName(appName) {
 		writeError(w, "invalid server or app name")
 		return
 	}
@@ -896,7 +1035,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "server not found: "+serverName)
 			return
 		}
-		apps, err := remote.ListApps(r.Context(), srv)
+		apps, err := s.readMachineApps(r.Context(), srv)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -992,57 +1131,22 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverName, appName, action string) {
-	srv, hasSrv := s.lookupServer(serverName)
-
 	switch action {
-	case "stop":
-		if !hasSrv {
-			writeError(w, "server not found: "+serverName)
+	case "stop", "start", "restart":
+		if !s.cliInstalled() {
+			writeError(w, "teploy CLI not installed")
 			return
 		}
-		if err := remote.StopApp(r.Context(), srv, appName); err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		s.fleet.set(nil) // invalidate cache
-		writeData(w, map[string]bool{"ok": true})
-
-	case "start":
-		if !hasSrv {
-			writeError(w, "server not found: "+serverName)
-			return
-		}
-		if err := remote.StartApp(r.Context(), srv, appName); err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		s.fleet.set(nil)
-		writeData(w, map[string]bool{"ok": true})
-
-	case "restart":
-		if !hasSrv {
-			writeError(w, "server not found: "+serverName)
-			return
-		}
-		if err := remote.RestartApp(r.Context(), srv, appName); err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		s.fleet.set(nil)
-		writeData(w, map[string]bool{"ok": true})
+		s.enqueueOperation(w, r, operation.Request{
+			Kind: operation.KindAppLifecycle, Server: serverName, App: appName, Action: action,
+		})
 
 	case "rollback":
 		if !cli.IsInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "rollback")
-		if err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		s.fleet.set(nil)
-		writeData(w, result)
+		s.enqueueOperation(w, r, operation.Request{Kind: operation.KindRollback, Server: serverName, App: appName})
 
 	case "remove":
 		if !cli.IsInstalled() {
@@ -1054,20 +1158,10 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			Redirect string `json:"redirect"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
-		parts := []string{"remove", "--yes", "--json"}
-		if body.Purge {
-			parts = append(parts, "--purge")
-		}
-		if body.Redirect != "" {
-			parts = append(parts, "--redirect", body.Redirect)
-		}
-		result, err := s.cliAppRun(serverName, appName, parts...)
-		if err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		s.fleet.set(nil)
-		writeRawJSON(w, result.Stdout)
+		s.enqueueOperation(w, r, operation.Request{
+			Kind: operation.KindRemove, Server: serverName, App: appName,
+			Purge: body.Purge, Redirect: body.Redirect,
+		})
 
 	case "lock":
 		if !cli.IsInstalled() {
@@ -1174,7 +1268,7 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 	}
 	serverName, appName := parts[0], parts[1]
 	// Same injection guard as handleAppAction — appName reaches a remote shell.
-	if !store.ValidID(serverName) || !appNamePattern.MatchString(appName) {
+	if !store.ValidID(serverName) || !validAppName(appName) {
 		http.Error(w, "invalid server or app name", 400)
 		return
 	}
@@ -1307,22 +1401,10 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args := []string{"template", "install", body.Template,
-		"--domain", body.Domain,
-		"--server", body.Server,
-	}
-	for k, v := range body.Vars {
-		args = append(args, "--var", k+"="+v)
-	}
-
-	result, err := cli.RunChecked(args...)
-	if err != nil {
-		writeError(w, err.Error())
-		return
-	}
-
-	s.fleet.set(nil) // invalidate cache after install
-	writeData(w, result)
+	s.enqueueOperation(w, r, operation.Request{
+		Kind: operation.KindTemplateInstall, Server: body.Server,
+		Template: body.Template, Domain: body.Domain, Vars: body.Vars,
+	})
 }
 
 // ── Servers ───────────────────────────────────────────────────────────────
@@ -1373,7 +1455,7 @@ func tcpReachable(host string, timeout time.Duration) bool {
 }
 
 func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
-	if !cli.IsInstalled() {
+	if !s.cliInstalled() {
 		writeData(w, map[string]interface{}{"error": "CLI not installed"})
 		return
 	}
@@ -1388,28 +1470,51 @@ func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "status":
-		// Host-level status (uptime/load/mem/disk/containers). The CLI's
-		// `status` reports app state and needs an app context, so it returned
-		// null here and the detail page rendered blank — gather over SSH.
 		srv, ok := s.lookupServer(serverName)
 		if !ok {
 			writeError(w, "unknown server: "+serverName)
 			return
 		}
-		st, err := remote.GetServerStatus(r.Context(), srv)
+		machineStatus, unsupported, err := s.readMachineServer(r.Context(), serverName)
 		if err != nil {
-			writeError(w, err.Error())
+			writeErrorStatus(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+		if unsupported {
+			st, err := s.remoteServerStatus(r.Context(), srv)
+			if err != nil {
+				writeErrorStatus(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			st.ObservedAt = time.Now().UTC()
+			st.Errors = []remote.ObservationError{}
+			st.Source = "ssh_fallback"
+			writeData(w, st)
+			return
+		}
+		st := mapMachineServer(machineStatus, serverName, time.Now())
 		writeData(w, st)
 	case "proxy":
-		// Server-level status (no specific app in scope here).
-		result, err := cli.Run("status", "--host", s.serverHost(serverName), "--json")
-		if err != nil {
-			writeData(w, nil)
+		srv, ok := s.lookupServer(serverName)
+		if !ok {
+			writeError(w, "unknown server: "+serverName)
 			return
 		}
-		writeRawJSON(w, result.Stdout)
+		machineStatus, unsupported, err := s.readMachineServer(r.Context(), serverName)
+		if err != nil {
+			writeErrorStatus(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if unsupported {
+			st, err := s.remoteServerStatus(r.Context(), srv)
+			if err != nil {
+				writeErrorStatus(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			writeData(w, fallbackProxy(st, time.Now()))
+			return
+		}
+		writeData(w, mapMachineProxy(machineStatus, time.Now()))
 	default:
 		writeError(w, "unknown action: "+action)
 	}
@@ -1435,13 +1540,10 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&body)
 
-	result, err := cli.Deploy(body.Server, s.serverUser(body.Server), body.App, body.Image, body.Domain, body.Port)
-	if err != nil {
-		writeError(w, err.Error())
-		return
-	}
-	s.fleet.set(nil)
-	writeData(w, result)
+	s.enqueueOperation(w, r, operation.Request{
+		Kind: operation.KindDeploy, Server: body.Server, App: body.App,
+		Mode: "ad-hoc", Image: body.Image, Domain: body.Domain, Port: body.Port,
+	})
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────
@@ -1974,6 +2076,7 @@ func saveNotificationsConfig(cfg alert.Config) error {
 }
 
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	switch r.Method {
 	case "GET":
 		cfg := loadNotificationsConfig()
@@ -2017,6 +2120,7 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	switch r.Method {
 	case "GET":
 		result, err := cli.Run("registry", "list", "--json")
@@ -2206,14 +2310,13 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 // ── System ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleCLIStatus(w http.ResponseWriter, r *http.Request) {
-	installed := cli.IsInstalled()
-	var version string
-	if installed {
-		v, _ := cli.Version()
-		version = v
+	capabilities := s.capabilities(r.Context())
+	version := capabilities.CLI.Version
+	if version != "" {
+		version = "teploy " + version
 	}
 	writeJSON(w, map[string]interface{}{
-		"installed": installed,
+		"installed": capabilities.CLI.Installed,
 		"version":   version,
 	})
 }
@@ -2393,8 +2496,17 @@ func writeData(w http.ResponseWriter, data interface{}) {
 }
 
 func writeError(w http.ResponseWriter, msg string) {
+	writeErrorStatus(w, msg, http.StatusBadRequest)
+}
+
+func writeErrorStatus(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 }
 
 // validEnvKey enforces POSIX env var naming (^[A-Za-z_][A-Za-z0-9_]*$). This

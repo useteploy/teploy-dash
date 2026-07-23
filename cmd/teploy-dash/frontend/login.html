@@ -13,97 +13,75 @@
       justify-content: center;
       padding: 24px;
       overflow: hidden;
-      background: #090a0c;
-      color: #f2f3f5;
-      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
       -webkit-font-smoothing: antialiased;
-    }
-    body::before {
-      content: "";
-      position: fixed;
-      width: 620px;
-      height: 620px;
-      top: -390px;
-      left: 50%;
-      border-radius: 50%;
-      background: rgba(101, 130, 237, 0.13);
-      filter: blur(90px);
-      transform: translateX(-50%);
-      pointer-events: none;
     }
     .card {
       position: relative;
       width: 100%;
       max-width: 390px;
       padding: 34px;
-      border: 1px solid #282b31;
-      border-radius: 14px;
-      background: linear-gradient(145deg, rgba(255,255,255,.02), transparent 42%), #111317;
-      box-shadow: 0 24px 80px rgba(0, 0, 0, .45);
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      background: #161b22;
     }
-    .brand-row { display: flex; margin-bottom: 28px; align-items: center; gap: 9px; }
-    .brand-mark { position: relative; width: 24px; height: 24px; overflow: hidden; border-radius: 7px; background: linear-gradient(145deg, #8ba6ff, #536fe0); box-shadow: 0 4px 16px rgba(83,111,224,.28); }
-    .brand-mark::before, .brand-mark::after { content: ""; position: absolute; height: 3px; border-radius: 3px; background: #fff; transform: rotate(-24deg); }
-    .brand-mark::before { top: 8px; left: 6px; width: 12px; }
-    .brand-mark::after { right: 5px; bottom: 6px; width: 8px; opacity: .8; }
-    .brand { font-size: 15px; font-weight: 680; letter-spacing: -.025em; }
-    .brand span { color: #7f858f; font-weight: 500; }
+    .brand-row { margin-bottom: 28px; }
+    .brand { font-size: 13px; font-weight: 700; letter-spacing: .04em; }
     h1 {
       margin-bottom: 7px;
-      font-size: 24px;
-      font-weight: 650;
-      letter-spacing: -.035em;
+      font-size: 20px;
+      font-weight: 700;
     }
     .subtitle {
       margin-bottom: 26px;
-      color: #7f858f;
-      font-size: 13px;
+      color: #8b949e;
+      font-size: 12px;
     }
     label {
       display: block;
       margin-bottom: 6px;
-      color: #a9afb9;
-      font-size: 11px;
-      font-weight: 580;
+      color: #8b949e;
+      font-size: 12px;
     }
     input[type="password"] {
       width: 100%;
       min-height: 40px;
       margin-bottom: 16px;
       padding: 9px 11px;
-      border: 1px solid #292c32;
-      border-radius: 7px;
+      border: 1px solid #30363d;
+      border-radius: 6px;
       outline: none;
-      background: #0c0e11;
-      color: #f2f3f5;
-      font-size: 14px;
+      background: #0d1117;
+      color: #e6edf3;
+      font-size: 13px;
       transition: border-color .12s, box-shadow .12s;
     }
-    input[type="password"]:focus { border-color: #7594ff; box-shadow: 0 0 0 3px rgba(117,148,255,.1); }
+    input[type="password"]:focus { border-color: #58a6ff; box-shadow: 0 0 0 2px rgba(88,166,255,.1); }
     button {
       width: 100%;
       min-height: 40px;
-      border: 1px solid #809bfa;
-      border-radius: 7px;
-      background: #718ef2;
-      box-shadow: inset 0 1px rgba(255,255,255,.18), 0 5px 18px rgba(75,105,215,.18);
-      color: #0a1022;
+      border: 1px solid #58a6ff;
+      border-radius: 6px;
+      background: #161b22;
+      color: #58a6ff;
       cursor: pointer;
       font-size: 13px;
-      font-weight: 650;
+      font-weight: 600;
       transition: background .12s, transform .12s;
     }
-    button:hover:not(:disabled) { background: #8aa5ff; }
+    button:hover:not(:disabled) { background: rgba(88,166,255,.1); }
     button:active:not(:disabled) { transform: translateY(1px); }
     button:disabled { opacity: 0.6; cursor: default; }
-    .error { margin-top: 12px; color: #ec6a72; font-size: 12px; }
-    .security-note { margin-top: 18px; color: #575d66; font-size: 10px; text-align: center; }
+    .error { margin-top: 12px; color: #f85149; font-size: 12px; }
+    .security-note { margin-top: 18px; color: #6e7681; font-size: 10px; text-align: center; }
     @media (max-width: 440px) { .card { padding: 26px 22px; } }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="brand-row"><span class="brand-mark" aria-hidden="true"></span><div class="brand">teploy <span>dash</span></div></div>
+    <div class="brand-row"><div class="brand">TEPLOY DASH</div></div>
     <h1>Welcome back</h1>
     <div class="subtitle">Sign in to manage your deployment fleet.</div>
     <label for="password">Password</label>

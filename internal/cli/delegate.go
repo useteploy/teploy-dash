@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,9 +26,118 @@ type Result struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+type Stream string
+
+const (
+	StreamStdout Stream = "stdout"
+	StreamStderr Stream = "stderr"
+)
+
+type StreamEvent struct {
+	Stream Stream
+	Data   string
+}
+
+// RunStream executes an allowlisted teploy argument vector and emits stdout and
+// stderr as they arrive. Cancellation terminates the subprocess process group,
+// including SSH or shell descendants spawned by the CLI.
+func RunStream(ctx context.Context, args []string, timeout time.Duration, onEvent func(StreamEvent)) (*Result, error) {
+	if timeout <= 0 {
+		timeout = cliTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "teploy", args...)
+	configureProcessGroup(cmd)
+	cmd.Cancel = func() error { return terminateProcessGroup(cmd) }
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("open teploy stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("open teploy stderr: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to run teploy %s: %w", strings.Join(args, " "), err)
+	}
+
+	var stdoutBuffer, stderrBuffer lockedBuffer
+	var wg sync.WaitGroup
+	var callbackMu sync.Mutex
+	scan := func(stream Stream, scanner *bufio.Scanner, output *lockedBuffer) {
+		defer wg.Done()
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			output.WriteLine(line)
+			if onEvent != nil {
+				callbackMu.Lock()
+				onEvent(StreamEvent{Stream: stream, Data: line})
+				callbackMu.Unlock()
+			}
+		}
+	}
+	wg.Add(2)
+	go scan(StreamStdout, bufio.NewScanner(stdout), &stdoutBuffer)
+	go scan(StreamStderr, bufio.NewScanner(stderr), &stderrBuffer)
+	waitErr := cmd.Wait()
+	wg.Wait()
+
+	result := &Result{Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}
+	if exitErr, ok := waitErr.(*exec.ExitError); ok {
+		result.ExitCode = exitErr.ExitCode()
+	}
+	if ctx.Err() != nil {
+		return result, ctx.Err()
+	}
+	if waitErr != nil {
+		if _, ok := waitErr.(*exec.ExitError); !ok {
+			return result, fmt.Errorf("failed to run teploy %s: %w", strings.Join(args, " "), waitErr)
+		}
+	}
+	return result, nil
+}
+
+// lockedBuffer bounds captured output while the complete stream remains
+// available through callbacks.
+type lockedBuffer struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+func (b *lockedBuffer) WriteLine(line string) {
+	const maxCapturedOutput = 1024 * 1024
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.data) >= maxCapturedOutput {
+		return
+	}
+	remaining := maxCapturedOutput - len(b.data)
+	chunk := []byte(line + "\n")
+	if len(chunk) > remaining {
+		chunk = chunk[:remaining]
+	}
+	b.data = append(b.data, chunk...)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.data)
+}
+
 // Run executes a teploy CLI command and returns the result.
 func Run(args ...string) (*Result, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	return RunContext(context.Background(), args...)
+}
+
+// RunContext executes a teploy CLI command while honoring caller cancellation.
+// Machine reads use this so a canceled HTTP/fleet request also stops its CLI
+// subprocess instead of waiting for the global delegate timeout.
+func RunContext(ctx context.Context, args ...string) (*Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "teploy", args...)
@@ -53,6 +164,28 @@ func Run(args ...string) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+// UnsupportedCommand reports whether a completed CLI invocation failed because
+// the installed teploy predates the requested command or JSON flag. Callers may
+// use compatibility reads only for this case; command failures and malformed
+// successful output must remain visible.
+func UnsupportedCommand(result *Result) bool {
+	if result == nil || result.ExitCode == 0 {
+		return false
+	}
+	output := strings.ToLower(result.Stderr + "\n" + result.Stdout)
+	for _, marker := range []string{
+		"unknown command",
+		"unknown flag: --json",
+		"flag provided but not defined: -json",
+		"no help topic",
+	} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // RunWithStdin runs a teploy CLI command, feeding stdin to it, and treats a

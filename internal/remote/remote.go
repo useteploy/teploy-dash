@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/useteploy/teploy-dash/internal/state"
 	uissh "github.com/useteploy/teploy-dash/internal/ssh"
+	"github.com/useteploy/teploy-dash/internal/state"
 )
 
 const deploymentsDir = "/deployments"
@@ -27,18 +27,43 @@ func shellQuote(s string) string {
 // validAppName matches the deployment app-name charset (^[A-Za-z0-9._-]+$).
 var validAppNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-func validAppName(s string) bool { return validAppNameRe.MatchString(s) }
+func validAppName(s string) bool { return s != "." && s != ".." && validAppNameRe.MatchString(s) }
 
 // AppState is the state of a deployed app on a remote server.
 type AppState struct {
-	App          string    `json:"app"`
-	Server       string    `json:"server"`
-	Domain       string    `json:"domain"`
-	CurrentHash  string    `json:"current_hash"`
-	PreviousHash string    `json:"previous_hash"`
-	CurrentPort  int       `json:"port"`
-	Status       string    `json:"status"` // "running", "stopped", "unknown"
-	DeployedAt   time.Time `json:"deployed_at"`
+	App           string             `json:"app"`
+	Server        string             `json:"server"`
+	Domain        string             `json:"domain"`
+	Type          string             `json:"type,omitempty"`
+	Ingress       string             `json:"ingress,omitempty"`
+	CurrentHash   string             `json:"current_hash"`
+	PreviousHash  string             `json:"previous_hash"`
+	CurrentPort   int                `json:"port"`
+	CurrentPorts  []int              `json:"current_ports,omitempty"`
+	PreviousPorts []int              `json:"previous_ports,omitempty"`
+	Status        string             `json:"status"` // "running", "stopped", "unknown"
+	DeployedAt    time.Time          `json:"deployed_at"`
+	Containers    []ContainerInfo    `json:"containers"`
+	Processes     []ProcessInfo      `json:"processes,omitempty"`
+	Locked        bool               `json:"locked"`
+	Maintenance   bool               `json:"maintenance"`
+	ObservedAt    time.Time          `json:"observed_at,omitempty"`
+	Errors        []ObservationError `json:"errors"`
+	Source        string             `json:"source,omitempty"`
+}
+
+// ObservationError is a partial machine-read failure scoped to one resource.
+type ObservationError struct {
+	Scope   string `json:"scope"`
+	Message string `json:"message"`
+}
+
+// ProcessInfo summarizes one process type reported by the CLI machine API.
+type ProcessInfo struct {
+	Name       string   `json:"name"`
+	Replicas   int      `json:"replicas"`
+	Running    int      `json:"running"`
+	Containers []string `json:"containers"`
 }
 
 // MarshalJSON also emits a "name" field mirroring App. The frontend keys and
@@ -120,6 +145,7 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 		PreviousHash: parsed.PreviousHash,
 		CurrentPort:  parsed.Port,
 		Domain:       parsed.Domain,
+		Containers:   []ContainerInfo{},
 	}
 
 	// Get state file mtime as deployed_at.
@@ -128,6 +154,20 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 		if unix, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64); err == nil {
 			st.DeployedAt = time.Unix(unix, 0).UTC()
 		}
+	}
+
+	// Read the app's web containers and operational flags in one SSH round trip.
+	// Accessories are exposed separately and intentionally excluded here.
+	live, liveErr := c.Run(ctx, fmt.Sprintf(
+		"docker ps -a --filter %s --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Status}}' 2>/dev/null; "+
+			"echo '@@LOCK@@'; test -f %s && echo true || echo false; "+
+			"echo '@@MAINT@@'; test -f %s && echo true || echo false",
+		shellQuote("name="+appName+"-web-"),
+		shellQuote(fmt.Sprintf("%s/%s/.lock/info", deploymentsDir, appName)),
+		shellQuote(fmt.Sprintf("%s/%s/.maintenance-block", deploymentsDir, appName)),
+	))
+	if liveErr == nil {
+		applyLiveState(st, live)
 	}
 
 	// Check live status. A container deploy records a port; a static-file
@@ -140,18 +180,12 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 			// would always read "stopped". A deployed static site is live via
 			// Caddy — report it running rather than falsely down.
 			st.Status = "running"
-		} else {
-			containerFilter := fmt.Sprintf("name=%s-", appName)
-			running, err := c.Run(ctx, fmt.Sprintf(
-				"docker ps -q --filter %q 2>/dev/null | wc -l",
-				containerFilter,
-			))
-			if err == nil {
-				count, _ := strconv.Atoi(strings.TrimSpace(running))
-				if count > 0 {
+		} else if liveErr == nil {
+			st.Status = "stopped"
+			for _, container := range st.Containers {
+				if container.State == "running" {
 					st.Status = "running"
-				} else {
-					st.Status = "stopped"
+					break
 				}
 			}
 		}
@@ -160,28 +194,65 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 	return st, nil
 }
 
+func applyLiveState(st *AppState, live string) {
+	section := "containers"
+	for _, line := range strings.Split(live, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		switch line {
+		case "@@LOCK@@":
+			section = "lock"
+			continue
+		case "@@MAINT@@":
+			section = "maintenance"
+			continue
+		}
+		switch section {
+		case "containers":
+			p := strings.SplitN(line, "|", 5)
+			if len(p) == 5 {
+				st.Containers = append(st.Containers, ContainerInfo{ID: p[0], Name: p[1], Image: p[2], State: p[3], Status: p[4]})
+			}
+		case "lock":
+			st.Locked = line == "true"
+		case "maintenance":
+			st.Maintenance = line == "true"
+		}
+	}
+}
+
 // ServerStatus is host-level status for the Servers detail page.
 type ServerStatus struct {
-	Name        string          `json:"name"`
-	Host        string          `json:"host"`
-	Uptime      string          `json:"uptime"`
-	CPULoad     string          `json:"cpu_load"`
-	MemUsed     string          `json:"mem_used"`
-	MemTotal    string          `json:"mem_total"`
-	MemPercent  string          `json:"mem_percent"`
-	DiskUsed    string          `json:"disk_used"`
-	DiskTotal   string          `json:"disk_total"`
-	DiskPercent string          `json:"disk_percent"`
-	Containers  []ContainerInfo `json:"containers"`
+	Name        string             `json:"name"`
+	Host        string             `json:"host"`
+	Uptime      string             `json:"uptime"`
+	CPULoad     string             `json:"cpu_load"`
+	MemUsed     string             `json:"mem_used"`
+	MemTotal    string             `json:"mem_total"`
+	MemPercent  string             `json:"mem_percent"`
+	DiskUsed    string             `json:"disk_used"`
+	DiskTotal   string             `json:"disk_total"`
+	DiskPercent string             `json:"disk_percent"`
+	Containers  []ContainerInfo    `json:"containers"`
+	ObservedAt  time.Time          `json:"observed_at,omitempty"`
+	Errors      []ObservationError `json:"errors"`
+	Partial     bool               `json:"partial"`
+	Stale       bool               `json:"stale"`
+	Source      string             `json:"source,omitempty"`
 }
 
 // ContainerInfo is one container row on the server-detail page.
 type ContainerInfo struct {
-	ID     string `json:"ID"`
-	Name   string `json:"Name"`
-	Image  string `json:"Image"`
-	State  string `json:"State"`
-	Status string `json:"Status"`
+	ID        string `json:"ID"`
+	Name      string `json:"Name"`
+	Image     string `json:"Image"`
+	State     string `json:"State"`
+	Status    string `json:"Status"`
+	CreatedAt string `json:"CreatedAt,omitempty"`
+	Process   string `json:"Process,omitempty"`
+	Version   string `json:"Version,omitempty"`
 }
 
 // GetServerStatus SSHes to a server and gathers host-level status (uptime,
@@ -277,16 +348,20 @@ func fmtGiB(mb int) string {
 }
 
 // StopApp stops all containers for an app on a server.
+// Deprecated: mutations must go through the CLI operation manager. Retained
+// temporarily for source compatibility; read fallbacks do not call it.
 func StopApp(ctx context.Context, srv ServerConn, appName string) error {
 	return runDockerOp(ctx, srv, appName, "stop")
 }
 
 // StartApp starts all stopped containers for an app on a server.
+// Deprecated: mutations must go through the CLI operation manager.
 func StartApp(ctx context.Context, srv ServerConn, appName string) error {
 	return runDockerOp(ctx, srv, appName, "start")
 }
 
 // RestartApp restarts all containers for an app on a server.
+// Deprecated: mutations must go through the CLI operation manager.
 func RestartApp(ctx context.Context, srv ServerConn, appName string) error {
 	return runDockerOp(ctx, srv, appName, "restart")
 }
@@ -313,21 +388,28 @@ func runDockerOp(ctx context.Context, srv ServerConn, appName, op string) error 
 }
 
 // StreamLogs streams docker logs for an app to w until ctx is cancelled.
-func StreamLogs(ctx context.Context, srv ServerConn, appName string, w io.Writer) error {
+func StreamLogs(ctx context.Context, srv ServerConn, appName, process string, lines int, w io.Writer) error {
 	c, err := uissh.Connect(ctx, srv.Host, srv.User, srv.KeyPath)
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", srv.Name, err)
 	}
 	defer c.Close()
 
-	// Get the name of the current (most recently started) web container.
+	if process == "" {
+		process = "web"
+	}
+	if lines < 1 {
+		lines = 200
+	}
+
+	// Get the current container for the selected process.
 	container, err := c.Run(ctx, fmt.Sprintf(
 		"docker ps --filter %s --format '{{.Names}}' | head -1 2>/dev/null",
-		shellQuote("name="+appName+"-web-"),
+		shellQuote("name="+appName+"-"+process+"-"),
 	))
 	if err != nil || strings.TrimSpace(container) == "" {
 		return fmt.Errorf("no running container found for app %q", appName)
 	}
 
-	return c.Stream(ctx, fmt.Sprintf("docker logs -f --tail=200 %s", strings.TrimSpace(container)), w)
+	return c.Stream(ctx, fmt.Sprintf("docker logs -f --tail=%d %s", lines, shellQuote(strings.TrimSpace(container))), w)
 }

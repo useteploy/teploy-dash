@@ -2,7 +2,23 @@
 # via go:embed, so the image just copies the goreleaser-built binary in — no
 # Go or Node toolchain at image-build time.
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata wget
+
+# Teploy CLI - used by dash to delegate deploy/rollback actions. BuildKit sets
+# TARGETARCH from the goreleaser build platform (amd64 or arm64).
+ARG TARGETARCH
+ARG TEPLOY_VERSION=v0.1.21
+RUN set -eux; \
+    archive="teploy_linux_${TARGETARCH}.tar.gz"; \
+    release_url="https://github.com/useteploy/teploy-cli/releases/download/${TEPLOY_VERSION}"; \
+    wget -qO "/tmp/${archive}" "${release_url}/${archive}"; \
+    wget -qO /tmp/checksums.txt "${release_url}/checksums.txt"; \
+    grep "  ${archive}$" /tmp/checksums.txt > /tmp/teploy.sha256; \
+    (cd /tmp && sha256sum -c teploy.sha256); \
+    tar xzf "/tmp/${archive}" -C /usr/local/bin teploy; \
+    chmod +x /usr/local/bin/teploy; \
+    rm -f "/tmp/${archive}" /tmp/checksums.txt /tmp/teploy.sha256
+
 COPY teploy-dash /usr/local/bin/teploy-dash
 
 EXPOSE 3456

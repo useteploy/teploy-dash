@@ -98,3 +98,16 @@ func TestStatusPage_Toggle(t *testing.T) {
 		t.Fatalf("enabled status page should render, got %d", w.Code)
 	}
 }
+
+func TestAppNamePatternMatchesCLIAppNames(t *testing.T) {
+	for _, name := range []string{"api", "my-app", "my_app", "my.app", "release-1.2"} {
+		if !validAppName(name) {
+			t.Errorf("expected %q to be a valid app name", name)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "../app", "my app", "app;rm"} {
+		if validAppName(name) {
+			t.Errorf("expected %q to be rejected", name)
+		}
+	}
+}

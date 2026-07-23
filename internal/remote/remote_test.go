@@ -24,3 +24,31 @@ func TestShellQuote(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyLiveState(t *testing.T) {
+	st := &AppState{Containers: []ContainerInfo{}}
+	applyLiveState(st, "abc|myapp-web-v2|ghcr.io/acme/app:v2|running|Up 2 minutes\n@@LOCK@@\ntrue\n@@MAINT@@\ntrue\n")
+
+	if len(st.Containers) != 1 {
+		t.Fatalf("expected one container, got %d", len(st.Containers))
+	}
+	if st.Containers[0].Name != "myapp-web-v2" || st.Containers[0].State != "running" {
+		t.Fatalf("unexpected container: %+v", st.Containers[0])
+	}
+	if !st.Locked || !st.Maintenance {
+		t.Fatalf("expected lock and maintenance flags, got locked=%v maintenance=%v", st.Locked, st.Maintenance)
+	}
+}
+
+func TestValidAppName(t *testing.T) {
+	for _, name := range []string{"api", "my.app", "release-1.2"} {
+		if !validAppName(name) {
+			t.Errorf("expected %q to be valid", name)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "../app", "app;rm"} {
+		if validAppName(name) {
+			t.Errorf("expected %q to be rejected", name)
+		}
+	}
+}

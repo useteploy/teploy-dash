@@ -73,6 +73,12 @@ func TestAuth_AcceptsCorrectPassword(t *testing.T) {
 	if cookie == nil {
 		t.Fatal("no session cookie after login")
 	}
+	if cookie.Secure {
+		t.Fatal("local HTTP login cookie must not be Secure")
+	}
+	if got := lw.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("login Cache-Control = %q, want no-store", got)
+	}
 
 	// Use the session cookie.
 	req := httptest.NewRequest("GET", "/api/apps", nil)
@@ -81,6 +87,44 @@ func TestAuth_AcceptsCorrectPassword(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Errorf("expected 200 with valid session, got %d", w.Code)
+	}
+}
+
+func TestAuth_SecureCookieForHTTPSAndTrustedForwardedProto(t *testing.T) {
+	_, trusted, _ := net.ParseCIDR("10.0.0.0/8")
+	g := newAuthGate("admin", "secret", "")
+	g.trustedProxies = []*net.IPNet{trusted}
+
+	tests := []struct {
+		name       string
+		target     string
+		remoteAddr string
+		proto      string
+		wantSecure bool
+	}{
+		{name: "direct HTTPS", target: "https://dash.local/api/login", remoteAddr: "203.0.113.1:1234", wantSecure: true},
+		{name: "trusted HTTPS proxy", target: "http://dash.local/api/login", remoteAddr: "10.1.2.3:1234", proto: "https", wantSecure: true},
+		{name: "untrusted forwarded proto", target: "http://dash.local/api/login", remoteAddr: "203.0.113.1:1234", proto: "https", wantSecure: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tt.target, loginBody("secret"))
+			req.RemoteAddr = tt.remoteAddr
+			if tt.proto != "" {
+				req.Header.Set("X-Forwarded-Proto", tt.proto)
+			}
+			w := httptest.NewRecorder()
+			g.handleLogin(w, req)
+
+			cookies := w.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatalf("got %d cookies, want 1", len(cookies))
+			}
+			if cookies[0].Secure != tt.wantSecure {
+				t.Errorf("Secure = %v, want %v", cookies[0].Secure, tt.wantSecure)
+			}
+		})
 	}
 }
 
