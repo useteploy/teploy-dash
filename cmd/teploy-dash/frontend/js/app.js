@@ -106,6 +106,12 @@ const rawFetch = {
   },
 };
 
+// An enqueued operation, not a completed result. Mutating actions now return
+// one of these, so callers must follow it rather than report success.
+function isOperation(result) {
+  return !!(result && typeof result === 'object' && result.id && result.status && result.request);
+}
+
 // ── Toast ──
 function showToast(message, type = 'info') {
   const container = document.getElementById('toast-container');
@@ -282,14 +288,20 @@ document.addEventListener('alpine:init', () => {
       }
       this.deploying = true;
       try {
-        await api.post('/api/deploy', f);
+        const op = await api.post('/api/deploy', f);
         // Auto-assign the app to this group
         if (groupName) {
           await api.post(`/api/groups/${encodeURIComponent(groupName)}/apps`, { app: f.app }).catch(() => {});
         }
-        showToast(`Deployed ${f.app} successfully`, 'success');
         this.deployingToGroup = null;
         this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
+        // A deploy is a queued operation — follow it live rather than
+        // claiming success before the build has even started.
+        if (isOperation(op)) {
+          Alpine.store('router').navigate('operation-detail', { id: op.id });
+          return;
+        }
+        showToast(`Deployed ${f.app} successfully`, 'success');
         await this.load();
       } catch (e) {
         showToast(e.message, 'error');
@@ -476,13 +488,17 @@ document.addEventListener('alpine:init', () => {
       }
       this.deploying = true;
       try {
-        await api.post('/api/deploy', f);
+        const op = await api.post('/api/deploy', f);
         // Auto-assign to the group and project
         await api.post(`/api/groups/${encodeURIComponent(this.groupName)}/apps`, { app: f.app }).catch(() => {});
         await api.post(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}/apps`, { app: f.app }).catch(() => {});
-        showToast(`Deployed ${f.app} successfully`, 'success');
         this.deployingToProject = false;
         this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
+        if (isOperation(op)) {
+          Alpine.store('router').navigate('operation-detail', { id: op.id });
+          return;
+        }
+        showToast(`Deployed ${f.app} successfully`, 'success');
         await this.load();
       } catch (e) {
         showToast(e.message, 'error');
@@ -557,9 +573,16 @@ document.addEventListener('alpine:init', () => {
     async doAction(action) {
       this.actionLoading = true;
       try {
-        await api.post(`${this.appPath()}/${action}`);
-        showToast(`${action} successful`, 'success');
-        await this.loadStatus();
+        const result = await api.post(`${this.appPath()}/${action}`);
+        // Long-running actions return a queued operation rather than a
+        // finished result — hand off to the operation center so the user
+        // watches it live instead of being told it already succeeded.
+        if (isOperation(result)) {
+          Alpine.store('router').navigate('operation-detail', { id: result.id });
+        } else {
+          showToast(`${action} successful`, 'success');
+          await this.loadStatus();
+        }
       } catch (e) {
         showToast(e.message, 'error');
       }
@@ -573,9 +596,13 @@ document.addEventListener('alpine:init', () => {
       if (redirect === null) return; // cancelled
       this.actionLoading = true;
       try {
-        await api.post(`${this.appPath()}/remove`, { redirect: redirect.trim() });
-        showToast(`Removed ${name}`, 'success');
-        Alpine.store('router').navigate('projects');
+        const op = await api.post(`${this.appPath()}/remove`, { redirect: redirect.trim() });
+        if (isOperation(op)) {
+          Alpine.store('router').navigate('operation-detail', { id: op.id });
+        } else {
+          showToast(`Removed ${name}`, 'success');
+          Alpine.store('router').navigate('projects');
+        }
       } catch (e) {
         showToast(e.message, 'error');
       }

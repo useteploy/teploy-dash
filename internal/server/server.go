@@ -1189,31 +1189,15 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 		s.fleet.set(nil)
 		writeData(w, result)
 
-	case "maintenance/on":
-		if !cli.IsInstalled() {
+	case "maintenance/on", "maintenance/off":
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "maintenance", "on")
-		if err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		s.fleet.set(nil)
-		writeData(w, result)
-
-	case "maintenance/off":
-		if !cli.IsInstalled() {
-			writeError(w, "teploy CLI not installed")
-			return
-		}
-		result, err := s.cliAppRun(serverName, appName, "maintenance", "off")
-		if err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		s.fleet.set(nil)
-		writeData(w, result)
+		s.enqueueOperation(w, r, operation.Request{
+			Kind: operation.KindMaintenance, Server: serverName, App: appName,
+			Action: strings.TrimPrefix(action, "maintenance/"),
+		})
 
 	default:
 		if strings.HasPrefix(action, "accessories/") {
