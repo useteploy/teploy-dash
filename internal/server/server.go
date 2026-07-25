@@ -1110,6 +1110,21 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeRawJSON(w, result.Stdout)
 
+	// Drift is read-only and quick, so it answers inline rather than becoming
+	// an operation (those are for mutations). --exit-code is deliberately not
+	// passed: detected drift is a successful answer, not a command failure.
+	case action == "drift" && r.Method == "GET":
+		if !cli.IsInstalled() {
+			writeError(w, "teploy CLI not installed")
+			return
+		}
+		result, err := s.cliAppRun(serverName, appName, "drift", "--json")
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeRawJSON(w, result.Stdout)
+
 	case action == "accessories" && r.Method == "GET":
 		if !cli.IsInstalled() {
 			writeError(w, "teploy CLI not installed")

@@ -396,6 +396,38 @@
                 <button class="btn btn-danger" @click="removeApp()" :disabled="actionLoading">Remove</button>
               </div>
 
+              <!-- Drift: live containers vs what was deployed -->
+              <template x-if="drift && !drift.unavailable && drift.deployed !== false">
+                <div style="margin-bottom: 24px;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                    <h3 style="font-size: 15px;">Drift</h3>
+                    <span class="status-dot" :class="drift.drift ? 'stopped' : 'running'"></span>
+                    <span style="font-size:13px;" x-text="drift.drift ? (drift.items || []).length + ' difference(s) from the deployed version' : 'In sync with the deployed version'"></span>
+                    <button class="btn btn-sm" style="margin-left:auto;" @click="loadDrift()" :disabled="driftLoading">Re-check</button>
+                  </div>
+                  <template x-if="drift.drift">
+                    <div class="table-wrap">
+                      <table>
+                        <thead><tr><th>Container</th><th>Divergence</th></tr></thead>
+                        <tbody>
+                          <template x-for="item in (drift.items || [])" :key="item.name">
+                            <tr>
+                              <td style="font-family: var(--mono); font-size: 12px;" x-text="item.name"></td>
+                              <td x-text="item.detail"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+                  <template x-if="drift.mode === 'state'">
+                    <div class="card-meta" style="margin-top:8px;">
+                      Derived from server state — replica-count drift needs teploy.yml.
+                    </div>
+                  </template>
+                </div>
+              </template>
+
               <!-- Containers Table -->
               <template x-if="app.containers && app.containers.length > 0">
                 <div>

@@ -518,9 +518,25 @@ document.addEventListener('alpine:init', () => {
     actionLoading: false,
     newEnvKey: '',
     newEnvValue: '',
+    drift: null,
+    driftLoading: false,
 
     async init() {
       await Promise.all([this.loadStatus(), this.loadAccessories()]);
+      this.loadDrift();
+    },
+
+    // Drift is a separate SSH round trip, so it loads after the page rather
+    // than blocking it. A failure here must not break the detail view — an
+    // older bundled CLI simply has no `drift --app`.
+    async loadDrift() {
+      this.driftLoading = true;
+      try {
+        this.drift = await api.get(`${this.appPath()}/drift`);
+      } catch (e) {
+        this.drift = { unavailable: true, error: e.message };
+      }
+      this.driftLoading = false;
     },
 
     appPath() {
