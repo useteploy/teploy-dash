@@ -117,6 +117,12 @@ func TestLegacyMutationFlowsReturnAcceptedOperation(t *testing.T) {
 		{"rollback", "/api/apps/prod/web/rollback", `{}`, func(w http.ResponseWriter, r *http.Request) { server.handleAppPost(w, r, "prod", "web", "rollback") }},
 		{"remove", "/api/apps/prod/web/remove", `{"purge":true}`, func(w http.ResponseWriter, r *http.Request) { server.handleAppPost(w, r, "prod", "web", "remove") }},
 		{"template install", "/api/templates/install", `{"template":"postgres","domain":"db.example","server":"prod"}`, server.handleTemplateInstall},
+		{"maintenance on", "/api/apps/prod/web/maintenance/on", `{}`, func(w http.ResponseWriter, r *http.Request) {
+			server.handleAppPost(w, r, "prod", "web", "maintenance/on")
+		}},
+		{"maintenance off", "/api/apps/prod/web/maintenance/off", `{}`, func(w http.ResponseWriter, r *http.Request) {
+			server.handleAppPost(w, r, "prod", "web", "maintenance/off")
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -270,4 +276,30 @@ func TestManifestAPIRejectsTraversalSecretsAndProjectDir(t *testing.T) {
 func jsonNumber(value uint64) string {
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+// Lock/unlock are instant state-file toggles with no output worth streaming,
+// so they deliberately answer inline instead of enqueueing an operation.
+// Pinned as a test so the distinction survives future refactors.
+func TestInstantTogglesStaySynchronous(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/teploy", []byte("#!/bin/sh\necho '{}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := operationTestServer(t, false)
+
+	for _, action := range []string{"lock", "unlock"} {
+		t.Run(action, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/apps/prod/web/"+action, strings.NewReader(`{}`))
+			response := httptest.NewRecorder()
+			server.handleAppPost(response, request, "prod", "web", action)
+			if response.Code == http.StatusAccepted {
+				t.Fatalf("%s should answer inline, not enqueue an operation (202)", action)
+			}
+			if strings.Contains(response.Body.String(), `"status":"queued"`) {
+				t.Fatalf("%s returned a queued operation: %s", action, response.Body.String())
+			}
+		})
+	}
 }
