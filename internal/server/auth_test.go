@@ -12,7 +12,7 @@ import (
 // authedReq creates a request carrying a live session cookie issued by g.
 func authedReq(g *authGate, method, target string) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
-	token := g.newSession()
+	token := g.newSession("admin", RoleAdmin)
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	return req
 }

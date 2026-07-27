@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,8 +19,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/cli"
@@ -159,6 +156,14 @@ func New(config Config) *Server {
 	}
 	if !config.NoAuth {
 		s.gate = newAuthGate(config.AuthUser, config.AuthPass, filepath.Join(config.DataDir, "auth.json"))
+		if oa := newOIDCAuth(); oa != nil {
+			s.gate.oidc = oa
+			// SSO satisfies authentication even with no local users, so don't
+			// force local first-run setup — the login page offers the SSO button.
+			s.gate.credMu.Lock()
+			s.gate.setupRequired = false
+			s.gate.credMu.Unlock()
+		}
 	}
 	if s.restore != nil {
 		// Restore-test runs go through the CLI delegate with --host <server>;
@@ -241,21 +246,32 @@ func limitMutationBodies(next http.Handler) http.Handler {
 // backoff (brute-force resistance) and a same-origin requirement on
 // state-changing requests (CSRF defense).
 type authGate struct {
-	// Bootstrap credentials from env vars (plaintext, fallback when no auth.json).
+	// Bootstrap credentials from env vars (plaintext, fallback when no users
+	// file). The env-var user is always treated as an admin.
 	user, pass string
-	// On-disk credentials (bcrypt). Protected by credMu.
+	// On-disk users (bcrypt hashes + role). Protected by credMu.
+	usersFile     string // users.json — canonical multi-user store
+	legacyFile    string // auth.json — single-user file migrated on first load
 	credMu        sync.RWMutex
-	credFile      string
-	credUser      string
-	credHash      string
+	users         map[string]*dashUser
 	setupRequired bool
+	// Optional OIDC single sign-on. nil when not configured.
+	oidc *oidcAuth
 	// Rate limiting
 	trustedProxies []*net.IPNet
 	mu             sync.Mutex
 	fails          map[string]*failInfo
-	// Sessions
+	// Sessions carry the authenticated user's identity + role so the gate can
+	// enforce RBAC and handlers can attribute actions.
 	sessMu   sync.Mutex
-	sessions map[string]time.Time
+	sessions map[string]*sessionInfo
+}
+
+// sessionInfo is one live session: which user, what role, and when it expires.
+type sessionInfo struct {
+	user string
+	role string
+	exp  time.Time
 }
 
 type failInfo struct {
@@ -271,83 +287,27 @@ const (
 	maxRequestBodySize = 1 << 20
 )
 
-// authCredFile is the on-disk credential format.
-type authCredFile struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"password_hash"`
-}
-
 func newAuthGate(user, pass, credFile string) *authGate {
 	g := &authGate{
 		user:           user,
 		pass:           pass,
-		credFile:       credFile,
+		usersFile:      filepath.Join(filepath.Dir(credFile), "users.json"),
+		legacyFile:     credFile,
+		users:          make(map[string]*dashUser),
 		trustedProxies: parseTrustedProxies(os.Getenv("TEPLOY_DASH_TRUSTED_PROXY")),
 		fails:          make(map[string]*failInfo),
-		sessions:       make(map[string]time.Time),
+		sessions:       make(map[string]*sessionInfo),
 	}
-	// Try loading stored credentials. If none exist and no env-var password
-	// is set, enter setup mode so the user can create their account.
-	if err := g.loadCredFile(); err != nil && pass == "" {
+	// Load stored users (migrating a legacy single-user auth.json if present).
+	// If none exist and no env-var password is set, enter setup mode so the
+	// operator can create the first account.
+	if err := g.loadUsers(); err != nil && pass == "" {
 		g.setupRequired = true
 	}
 	return g
 }
 
-func (g *authGate) loadCredFile() error {
-	data, err := os.ReadFile(g.credFile)
-	if err != nil {
-		return err
-	}
-	var creds authCredFile
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return err
-	}
-	g.credMu.Lock()
-	g.credUser = creds.Username
-	g.credHash = creds.PasswordHash
-	g.setupRequired = false
-	g.credMu.Unlock()
-	return nil
-}
-
-func (g *authGate) saveCredFile(username, password string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-	creds := authCredFile{Username: username, PasswordHash: string(hash)}
-	data, err := json.Marshal(creds)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(g.credFile), 0700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(g.credFile, data, 0600); err != nil {
-		return err
-	}
-	g.credMu.Lock()
-	g.credUser = username
-	g.credHash = string(hash)
-	g.setupRequired = false
-	g.credMu.Unlock()
-	return nil
-}
-
-// validatePassword checks the submitted password against stored bcrypt hash
-// (auth.json) or the env-var plaintext fallback.
-func (g *authGate) validatePassword(password string) bool {
-	g.credMu.RLock()
-	hash := g.credHash
-	g.credMu.RUnlock()
-	if hash != "" {
-		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
-	}
-	return subtle.ConstantTimeCompare([]byte(password), []byte(g.pass)) == 1
-}
-
-func (g *authGate) newSession() string {
+func (g *authGate) newSession(user, role string) string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand failed: " + err.Error())
@@ -356,36 +316,49 @@ func (g *authGate) newSession() string {
 	g.sessMu.Lock()
 	defer g.sessMu.Unlock()
 	now := time.Now()
-	for k, exp := range g.sessions {
-		if now.After(exp) {
+	for k, si := range g.sessions {
+		if now.After(si.exp) {
 			delete(g.sessions, k)
 		}
 	}
-	g.sessions[token] = now.Add(sessionTTL)
+	g.sessions[token] = &sessionInfo{user: user, role: normalizeRole(role), exp: now.Add(sessionTTL)}
 	return token
 }
 
-func (g *authGate) validSession(token string) bool {
+// lookupSession returns the live session for a token, or false if absent/expired.
+func (g *authGate) lookupSession(token string) (*sessionInfo, bool) {
 	if token == "" {
-		return false
+		return nil, false
 	}
 	g.sessMu.Lock()
 	defer g.sessMu.Unlock()
-	exp, ok := g.sessions[token]
+	si, ok := g.sessions[token]
 	if !ok {
-		return false
+		return nil, false
 	}
-	if time.Now().After(exp) {
+	if time.Now().After(si.exp) {
 		delete(g.sessions, token)
-		return false
+		return nil, false
 	}
-	return true
+	return si, true
 }
 
 func (g *authGate) deleteSession(token string) {
 	g.sessMu.Lock()
 	defer g.sessMu.Unlock()
 	delete(g.sessions, token)
+}
+
+// deleteUserSessions invalidates every live session belonging to one user —
+// used when their password or role changes, or the account is removed.
+func (g *authGate) deleteUserSessions(user string) {
+	g.sessMu.Lock()
+	defer g.sessMu.Unlock()
+	for k, si := range g.sessions {
+		if si.user == user {
+			delete(g.sessions, k)
+		}
+	}
 }
 
 // parseTrustedProxies parses a comma-separated list of proxy IPs/CIDRs. When the
@@ -421,6 +394,8 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		inSetup := g.setupRequired
 		g.credMu.RUnlock()
 		if inSetup {
+			// When SSO is configured, setup mode is never entered (New clears it),
+			// so this branch only runs for the local-account first-run flow.
 			switch r.URL.Path {
 			case "/api/health", "/setup", "/api/setup":
 				next.ServeHTTP(w, r)
@@ -439,7 +414,8 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// the MCP endpoint — it enforces its own bearer-token auth and is
 		// used by non-browser clients that have no session cookie.
 		switch r.URL.Path {
-		case "/api/health", "/login", "/api/login", "/api/logout", "/status", "/api/status", "/api/mcp":
+		case "/api/health", "/login", "/api/login", "/api/logout", "/api/login/methods",
+			"/oidc/login", "/oidc/callback", "/status", "/api/status", "/api/mcp":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -454,8 +430,12 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		cookie, err := r.Cookie(sessionCookie)
-		if err != nil || !g.validSession(cookie.Value) {
+		cookie, cookieErr := r.Cookie(sessionCookie)
+		var session *sessionInfo
+		if cookieErr == nil {
+			session, _ = g.lookupSession(cookie.Value)
+		}
+		if session == nil {
 			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
 				jsonError(w, "unauthorized", http.StatusUnauthorized)
 			} else {
@@ -475,7 +455,19 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		// RBAC: enforce the minimum role for this route. Fail closed — a
+		// mutating route with no explicit classification requires editor, never
+		// viewer, so a new endpoint can't silently be viewer-writable.
+		if need := requiredRole(r.Method, r.URL.Path); !roleAllows(session.role, need) {
+			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+				jsonError(w, "forbidden: this action requires the "+need+" role", http.StatusForbidden)
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}
+			return
+		}
+		next.ServeHTTP(w, withUser(r, session))
 	})
 }
 
@@ -498,19 +490,21 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if !g.validatePassword(body.Password) {
+	user, ok := g.authenticate(body.Username, body.Password)
+	if !ok {
 		g.recordFail(ip)
-		jsonError(w, "incorrect password", http.StatusUnauthorized)
+		jsonError(w, "incorrect username or password", http.StatusUnauthorized)
 		return
 	}
 	g.recordSuccess(ip)
-	g.issueSessionCookie(w, r)
+	g.issueSessionCookie(w, r, user.Username, user.Role)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -541,20 +535,16 @@ func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if body.Username == "" {
 		body.Username = "admin"
 	}
-	if len(body.Password) < 8 {
-		jsonError(w, "password must be at least 8 characters", http.StatusBadRequest)
-		return
-	}
 	if body.Password != body.ConfirmPassword {
 		jsonError(w, "passwords do not match", http.StatusBadRequest)
 		return
 	}
-	if err := g.saveCredFile(body.Username, body.Password); err != nil {
-		log.Printf("auth: failed to save credentials: %v", err)
-		jsonError(w, "failed to save credentials", http.StatusInternalServerError)
+	// The first account is always an admin.
+	if err := g.createUser(body.Username, body.Password, RoleAdmin); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	g.issueSessionCookie(w, r)
+	g.issueSessionCookie(w, r, body.Username, RoleAdmin)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -575,36 +565,25 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if !g.validatePassword(body.CurrentPassword) {
-		jsonError(w, "current password is incorrect", http.StatusUnauthorized)
+	session, ok := currentUser(r)
+	if !ok {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if len(body.NewPassword) < 8 {
-		jsonError(w, "new password must be at least 8 characters", http.StatusBadRequest)
+	if _, ok := g.authenticate(session.user, body.CurrentPassword); !ok {
+		jsonError(w, "current password is incorrect", http.StatusUnauthorized)
 		return
 	}
 	if body.NewPassword != body.ConfirmPassword {
 		jsonError(w, "passwords do not match", http.StatusBadRequest)
 		return
 	}
-	g.credMu.RLock()
-	username := g.credUser
-	g.credMu.RUnlock()
-	if username == "" {
-		username = g.user
-		if username == "" {
-			username = "admin"
-		}
-	}
-	if err := g.saveCredFile(username, body.NewPassword); err != nil {
-		log.Printf("auth: failed to save credentials: %v", err)
-		jsonError(w, "failed to save credentials", http.StatusInternalServerError)
+	if err := g.setPassword(session.user, body.NewPassword); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Invalidate all sessions — the user must log in again with the new password.
-	g.sessMu.Lock()
-	g.sessions = make(map[string]time.Time)
-	g.sessMu.Unlock()
+	// Invalidate only this user's sessions — other users stay signed in.
+	g.deleteUserSessions(session.user)
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: g.secureCookie(r), SameSite: http.SameSiteLaxMode,
@@ -613,8 +592,8 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request) {
-	token := g.newSession()
+func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request, user, role string) {
+	token := g.newSession(user, role)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
@@ -761,6 +740,14 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("/api/logout", s.gate.handleLogout)
 		s.mux.HandleFunc("/api/setup", s.gate.handleSetup)
 		s.mux.HandleFunc("/api/auth/password", s.gate.handleChangePassword)
+		s.mux.HandleFunc("/api/auth/me", s.handleWhoami)
+		s.mux.HandleFunc("/api/login/methods", s.handleLoginMethods)
+		s.mux.HandleFunc("/api/users", s.handleUsers)
+		s.mux.HandleFunc("/api/users/", s.handleUserAction)
+		if s.gate.oidc != nil {
+			s.mux.HandleFunc("/oidc/login", s.gate.handleOIDCLogin)
+			s.mux.HandleFunc("/oidc/callback", s.gate.handleOIDCCallback)
+		}
 	}
 
 	// Homepage
@@ -802,6 +789,7 @@ func (s *Server) routes() {
 	// System
 	s.mux.HandleFunc("/api/cli/status", s.handleCLIStatus)
 	s.mux.HandleFunc("/api/capabilities", s.handleCapabilities)
+	s.mux.HandleFunc("/api/nav", s.handleNav)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
 
 	// MCP: bearer-authed AI-client endpoint + session-authed token management.
@@ -1119,6 +1107,20 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, err := s.cliAppRun(serverName, appName, "drift", "--json")
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeRawJSON(w, result.Stdout)
+
+	// Per-container CPU/memory/IO. Read-only and quick, so it answers inline
+	// like drift rather than becoming an operation.
+	case action == "stats" && r.Method == "GET":
+		if !cli.IsInstalled() {
+			writeError(w, "teploy CLI not installed")
+			return
+		}
+		result, err := s.cliAppRun(serverName, appName, "stats", "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -2322,6 +2324,34 @@ func (s *Server) handleCLIStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// teployNav returns the cross-product dashboard switcher entries: the current
+// app (marked, no link) plus any sibling Teploy dashboards whose URL is
+// configured via TEPLOY_NAV_{DASH,OBSERVE,SHIP}_URL. Same env convention across
+// Dash, Observe, and Ship, so one set of vars drives the switcher everywhere.
+func teployNav(current string) map[string]interface{} {
+	products := []struct{ key, label, env string }{
+		{"dash", "Dash", "TEPLOY_NAV_DASH_URL"},
+		{"observe", "Observe", "TEPLOY_NAV_OBSERVE_URL"},
+		{"ship", "Ship", "TEPLOY_NAV_SHIP_URL"},
+	}
+	apps := make([]map[string]string, 0, len(products))
+	for _, p := range products {
+		url := strings.TrimSpace(os.Getenv(p.env))
+		if p.key == current {
+			apps = append(apps, map[string]string{"key": p.key, "label": p.label, "url": ""})
+		} else if url != "" {
+			apps = append(apps, map[string]string{"key": p.key, "label": p.label, "url": url})
+		}
+	}
+	return map[string]interface{}{"current": current, "apps": apps}
+}
+
+// handleNav serves the cross-product dashboard switcher config.
+func (s *Server) handleNav(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	writeJSON(w, teployNav("dash"))
 }
 
 // ── Frontend ──────────────────────────────────────────────────────────────

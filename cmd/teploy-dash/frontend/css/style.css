@@ -270,3 +270,29 @@ tbody tr:hover { background: var(--bg-card-hover); }
 
 /* Operation center */
 .op-line-err { color: var(--red); }
+
+/* ── Cross-product dashboard switcher (top-left) ── */
+.product-switcher { position: relative; margin-right: 8px; }
+.product-switcher .ps-btn {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 10px; background: var(--bg-card); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.product-switcher .ps-btn:hover { border-color: var(--border-strong); }
+.product-switcher .ps-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), #a78bfa); flex: none;
+}
+.product-switcher .ps-caret { font-size: 10px; opacity: 0.6; }
+.product-switcher .ps-menu {
+  position: absolute; left: 0; top: 100%; margin-top: 4px; z-index: 60;
+  min-width: 160px; background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.4); overflow: hidden;
+}
+.product-switcher .ps-item {
+  display: block; padding: 9px 12px; font-size: 13px;
+  color: var(--text); text-decoration: none;
+}
+.product-switcher a.ps-item:hover { background: var(--bg-card-hover); }
+.product-switcher .ps-item.current { color: var(--text-muted); font-weight: 600; cursor: default; }

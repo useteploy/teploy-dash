@@ -167,6 +167,83 @@ return 404.
 | `TEPLOY_DASH_USER` | `admin` | Username used when `TEPLOY_DASH_PASSWORD` is set (env-var bootstrap mode). |
 | `TEPLOY_DASH_PASSWORD` | _(optional)_ | Bootstrap password. If set, credentials are taken from this env var. If absent and no `auth.json` exists, the first run shows the setup page to create an account. |
 | `TEPLOY_DASH_PUBLIC_STATUS` | _(off)_ | Set to `1`/`true` to enable the public `/status` page (same as `--public-status`). |
+| `TEPLOY_DASH_TRUSTED_PROXY` | _(none)_ | Comma-separated proxy IPs/CIDRs. When set, the real client IP is read from `X-Forwarded-For` (for rate-limiting) and `X-Forwarded-Proto` is trusted for the secure-cookie flag. Set this when running behind Caddy/nginx. |
+| `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
+| `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
+
+### Single sign-on (OIDC)
+
+Optional. When `TEPLOY_DASH_OIDC_ISSUER` and `TEPLOY_DASH_OIDC_CLIENT_ID` are set,
+the login page offers an SSO button and Dash acts as an OpenID Connect relying
+party (authorization-code flow with PKCE). Password login stays available as the
+break-glass path. Register `https://<your-dash-host>/oidc/callback` as the
+redirect URI with your provider.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEPLOY_DASH_OIDC_ISSUER` | _(none)_ | IdP issuer URL (discovery base, e.g. `https://your-org.okta.com`). Required to enable SSO. |
+| `TEPLOY_DASH_OIDC_CLIENT_ID` | _(none)_ | OAuth client ID. Required to enable SSO. |
+| `TEPLOY_DASH_OIDC_CLIENT_SECRET` | _(none)_ | OAuth client secret. Omit for a public (PKCE-only) client. |
+| `TEPLOY_DASH_OIDC_REDIRECT_URL` | _(derived)_ | Callback URL. Derived from the request Host when unset; set it explicitly behind a proxy that rewrites Host. Must be `.../oidc/callback`. |
+| `TEPLOY_DASH_OIDC_SCOPES` | `openid profile email` | Space/comma-separated scopes (`openid` is always included). Add `groups` if you use group-based role mapping. |
+| `TEPLOY_DASH_OIDC_LABEL` | `Single sign-on` | Text on the SSO button. |
+| `TEPLOY_DASH_OIDC_USERNAME_CLAIM` | `preferred_username` | Token claim used as the Dash username (falls back to `email`, then `sub`). |
+| `TEPLOY_DASH_OIDC_ROLE_CLAIM` | `teploy_role` | Token claim carrying the role directly (`admin`/`editor`/`viewer`). Checked first. |
+| `TEPLOY_DASH_OIDC_GROUPS_CLAIM` | `groups` | Token claim listing the user's groups, used when no direct role claim matches. |
+| `TEPLOY_DASH_OIDC_ADMIN_GROUP` | _(none)_ | Group whose members become `admin`. |
+| `TEPLOY_DASH_OIDC_EDITOR_GROUP` | _(none)_ | Group whose members become `editor`. |
+| `TEPLOY_DASH_OIDC_VIEWER_GROUP` | _(none)_ | Group whose members become `viewer`. |
+| `TEPLOY_DASH_OIDC_DEFAULT_ROLE` | `viewer` | Role for an authenticated user matching no role claim or group (least privilege). |
+
+Role resolution order: a recognized `teploy_role` claim wins; otherwise groups
+are matched (admin > editor > viewer); otherwise the default role. SSO users are
+not stored in `users.json` — their role comes fresh from the IdP on every login,
+so manage them in your IdP, not in Settings → Users.
+
+#### Self-hosted identity providers
+
+Any OIDC provider works. Two are worth calling out because if you already run
+Teploy you probably already run one of them, so SSO costs you no new software.
+
+**Forgejo** (or Gitea) is a full OIDC provider. Its discovery document
+advertises `openid profile email groups` and a `groups` claim.
+
+1. Register an OAuth2 application — Site Administration → Applications for an
+   org-wide one, or user Settings → Applications for a personal one. Set the
+   redirect URI to `https://<your-dash-host>/oidc/callback`.
+2. Point Dash at it:
+
+```bash
+TEPLOY_DASH_OIDC_ISSUER=https://forgejo.example.com
+TEPLOY_DASH_OIDC_CLIENT_ID=<client id>
+TEPLOY_DASH_OIDC_CLIENT_SECRET=<client secret>
+TEPLOY_DASH_OIDC_SCOPES="openid profile email groups"
+TEPLOY_DASH_OIDC_ADMIN_GROUP=platform:owners
+TEPLOY_DASH_OIDC_EDITOR_GROUP=platform:deployers
+```
+
+- Request `groups` explicitly. It is not in the default scopes, and without it
+  no group matches, so every user lands on `TEPLOY_DASH_OIDC_DEFAULT_ROLE`.
+- Forgejo emits one entry per org (`platform`) and one per team
+  (`platform:deployers`). Group comparison is exact and case-sensitive, so copy
+  the names as Forgejo spells them.
+- Forgejo cannot mint a custom claim, so leave `ROLE_CLAIM` at its default and
+  map roles by group.
+- Each dashboard needs its own OAuth2 application because the redirect URIs
+  differ, but all three can map against the same orgs and teams.
+
+**OpenBao** also serves OIDC (`identity/oidc/provider`), which is convenient if
+you already run it for `teploy secret --provider openbao`. Create a provider,
+an assignment, and a client, then use the provider's discovery URL as the
+issuer:
+
+```bash
+TEPLOY_DASH_OIDC_ISSUER=https://openbao.example.com/v1/identity/oidc/provider/teploy
+```
+
+Map roles with a scope template that emits a `groups` array (matched as above),
+or one that emits a `teploy_role` string — OpenBao can produce a custom claim,
+so the direct role claim is available here and takes precedence over groups.
 
 ## API
 
