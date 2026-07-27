@@ -1,6 +1,9 @@
 package alert
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -132,5 +135,82 @@ func TestSend_WebhookContentType(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("webhook not called")
+	}
+}
+
+// signWebhook uses the signature scheme shared by teploy-cli and
+// teploy-observe. These tests pin it: a receiver of all three products writes
+// one verifier, so a change here silently breaks every one of them.
+func verifyDashSignature(secret string, body []byte, ts, sig string) bool {
+	sig = strings.TrimPrefix(sig, "sha256=")
+	got, err := hex.DecodeString(sig)
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(ts))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return hmac.Equal(got, mac.Sum(nil))
+}
+
+func TestSendWebhook_SignedWhenSecretSet(t *testing.T) {
+	const secret = "dash-secret"
+	type captured struct {
+		body []byte
+		ts   string
+		sig  string
+	}
+	got := make(chan captured, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got <- captured{body, r.Header.Get("X-Teploy-Timestamp"), r.Header.Get("X-Teploy-Signature")}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	New(Config{WebhookURL: srv.URL, WebhookSecret: secret}).Send(Event{
+		MonitorID: "m1", MonitorName: "akiroo-lite", Status: "down",
+		Message: "connection refused", OccurredAt: time.Unix(1700000000, 0).UTC(),
+	})
+
+	select {
+	case c := <-got:
+		if c.sig == "" || c.ts == "" {
+			t.Fatalf("delivery was not signed (sig=%q ts=%q)", c.sig, c.ts)
+		}
+		if !verifyDashSignature(secret, c.body, c.ts, c.sig) {
+			t.Error("signature did not verify against the received body")
+		}
+		if verifyDashSignature("wrong", c.body, c.ts, c.sig) {
+			t.Error("signature verified under the wrong secret")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("webhook was never delivered")
+	}
+}
+
+func TestSendWebhook_UnsignedWhenNoSecret(t *testing.T) {
+	// An install that has not configured a secret must keep delivering exactly
+	// what it delivered before, so an existing receiver is unaffected.
+	type hdrs struct{ ts, sig string }
+	got := make(chan hdrs, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- hdrs{r.Header.Get("X-Teploy-Timestamp"), r.Header.Get("X-Teploy-Signature")}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	New(Config{WebhookURL: srv.URL}).Send(Event{MonitorName: "m", Status: "up"})
+
+	select {
+	case h := <-got:
+		if h.sig != "" || h.ts != "" {
+			t.Errorf("unsigned config still sent signature headers (sig=%q ts=%q)", h.sig, h.ts)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("webhook was never delivered")
 	}
 }
