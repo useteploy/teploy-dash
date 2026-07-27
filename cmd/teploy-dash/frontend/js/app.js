@@ -520,10 +520,33 @@ document.addEventListener('alpine:init', () => {
     newEnvValue: '',
     drift: null,
     driftLoading: false,
+    stats: [],
+    statsLoading: false,
 
     async init() {
       await Promise.all([this.loadStatus(), this.loadAccessories()]);
+      // Both are extra SSH round trips; run them after the page paints and in
+      // parallel with each other so neither delays the view.
       this.loadDrift();
+      this.loadStats();
+    },
+
+    // Resource usage per container. Like drift, a failure here (older bundled
+    // CLI without `stats --app`) hides the panel rather than breaking the page.
+    async loadStats() {
+      this.statsLoading = true;
+      try {
+        this.stats = (await api.get(`${this.appPath()}/stats`)) || [];
+      } catch (e) {
+        this.stats = [];
+      }
+      this.statsLoading = false;
+    },
+
+    // Docker reports a stopped container as all-zero rather than omitting it;
+    // showing those rows implies the app is idle when it is actually down.
+    get liveStats() {
+      return (this.stats || []).filter(s => s.memory_usage && !s.memory_usage.startsWith('0B /'));
     },
 
     // Drift is a separate SSH round trip, so it loads after the page rather
@@ -930,6 +953,12 @@ document.addEventListener('alpine:init', () => {
     mcpTokens: [],
     newMcpToken: { name: '', readOnly: 'false' },
     createdMcpToken: '',
+    // Current user + team management
+    me: { username: '', role: 'viewer' },
+    users: [],
+    newUser: { username: '', password: '', role: 'editor' },
+
+    isAdmin() { return (this.me && this.me.role) === 'admin'; },
 
     async init() {
       await this.loadAll();
@@ -938,21 +967,83 @@ document.addEventListener('alpine:init', () => {
     async loadAll() {
       this.loading = true;
       try {
-        [this.servers, this.groups, this.notifications, this.registries, this.mcpTokens] = await Promise.all([
-          api.get('/api/config/servers').catch(() => ({})),
+        this.me = await api.get('/api/auth/me').catch(() => ({ username: '', role: 'viewer' }));
+        const admin = this.isAdmin();
+        // Admin-only endpoints are only fetched for admins — non-admins would
+        // just get 403s. Groups (editor-writable) and the current user load for
+        // everyone.
+        const [servers, groups, notifications, registries, mcpTokens, users] = await Promise.all([
+          admin ? api.get('/api/config/servers').catch(() => ({})) : Promise.resolve({}),
           api.get('/api/groups').catch(() => []),
-          api.get('/api/notifications').catch(() => ({})),
-          api.get('/api/registries').catch(() => []),
-          api.get('/api/mcp-tokens').catch(() => []),
+          admin ? api.get('/api/notifications').catch(() => ({})) : Promise.resolve({}),
+          admin ? api.get('/api/registries').catch(() => []) : Promise.resolve([]),
+          admin ? api.get('/api/mcp-tokens').catch(() => []) : Promise.resolve([]),
+          admin ? api.get('/api/users').catch(() => []) : Promise.resolve([]),
         ]);
-        this.servers = this.servers || {};
-        this.groups = this.groups || [];
-        this.registries = this.registries || [];
-        this.mcpTokens = this.mcpTokens || [];
+        this.servers = servers || {};
+        this.groups = groups || [];
+        this.notifications = notifications || {};
+        this.registries = registries || [];
+        this.mcpTokens = mcpTokens || [];
+        this.users = users || [];
+        // A non-admin can't see the admin tabs; if the default landed on one,
+        // move to a tab they can use.
+        if (!admin && ['servers', 'notifications', 'registry', 'mcp', 'users'].includes(this.tab)) {
+          this.tab = 'groups';
+        }
       } catch (e) {
         showToast(e.message, 'error');
       }
       this.loading = false;
+    },
+
+    async createUser() {
+      if (!this.newUser.username || !this.newUser.password) return;
+      try {
+        await api.post('/api/users', {
+          username: this.newUser.username,
+          password: this.newUser.password,
+          role: this.newUser.role,
+        });
+        showToast('User added', 'success');
+        this.newUser = { username: '', password: '', role: 'editor' };
+        this.users = await api.get('/api/users').catch(() => this.users);
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    async changeRole(username, role) {
+      try {
+        await api.put(`/api/users/${encodeURIComponent(username)}`, { role });
+        showToast(`${username} is now ${role}`, 'success');
+        this.users = await api.get('/api/users').catch(() => this.users);
+      } catch (e) {
+        showToast(e.message, 'error');
+        this.users = await api.get('/api/users').catch(() => this.users);
+      }
+    },
+
+    async resetUserPassword(username) {
+      const pw = prompt(`New password for ${username} (at least 8 characters):`);
+      if (!pw) return;
+      try {
+        await api.post(`/api/users/${encodeURIComponent(username)}/password`, { password: pw });
+        showToast('Password reset', 'success');
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    async deleteUser(username) {
+      if (!confirm(`Remove user ${username}? Any active sessions are ended immediately.`)) return;
+      try {
+        await api.del(`/api/users/${encodeURIComponent(username)}`);
+        showToast('User removed', 'success');
+        this.users = await api.get('/api/users').catch(() => []);
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
     },
 
     async createMcpToken() {

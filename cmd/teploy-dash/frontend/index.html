@@ -14,6 +14,18 @@
 
 <!-- Application header -->
 <nav class="navbar" aria-label="Primary navigation">
+  <div class="product-switcher" x-data="{ open:false, current:'', apps:[], async init(){ try{ const r=await fetch('/api/nav'); if(r.ok){ const d=await r.json(); this.apps=d.apps||[]; this.current=d.current||''; } }catch(e){} } }" x-show="apps.filter(a=>a.url).length>0" @click.outside="open=false" x-cloak>
+    <button class="ps-btn" @click="open=!open" title="Switch dashboard">
+      <span class="ps-dot"></span>
+      <span x-text="(apps.find(a=>a.key===current)||{}).label||'Teploy'"></span>
+      <span class="ps-caret">&#9662;</span>
+    </button>
+    <div class="ps-menu" x-show="open" x-transition.opacity x-cloak>
+      <template x-for="a in apps" :key="a.key">
+        <a class="ps-item" :class="{ current: a.key===current }" :href="a.url||null" x-text="a.label" @click="if(a.key===current) $event.preventDefault()"></a>
+      </template>
+    </div>
+  </div>
   <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('homepage')">TEPLOY DASH</a>
   <ul class="navbar-nav">
     <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
@@ -425,6 +437,34 @@
                       Derived from server state — replica-count drift needs teploy.yml.
                     </div>
                   </template>
+                </div>
+              </template>
+
+              <!-- Resource usage per container -->
+              <template x-if="liveStats.length > 0">
+                <div style="margin-bottom: 24px;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                    <h3 style="font-size: 15px;">Resources</h3>
+                    <button class="btn btn-sm" style="margin-left:auto;" @click="loadStats()" :disabled="statsLoading">Refresh</button>
+                  </div>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th>Container</th><th>CPU</th><th>Memory</th><th>Network I/O</th><th>Block I/O</th></tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="s in liveStats" :key="s.name">
+                          <tr>
+                            <td style="font-family: var(--mono); font-size: 12px;" x-text="s.name"></td>
+                            <td x-text="s.cpu_percent"></td>
+                            <td><span x-text="s.memory_usage"></span> <span class="card-meta" style="margin:0;" x-text="'(' + s.memory_percent + ')'"></span></td>
+                            <td x-text="s.network_io"></td>
+                            <td x-text="s.block_io"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </template>
 
@@ -1328,11 +1368,12 @@
       </div>
 
       <div class="tabs">
-        <button class="tab" :class="{ active: tab === 'servers' }" @click="tab = 'servers'">Servers</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'servers' }" @click="tab = 'servers'">Servers</button>
         <button class="tab" :class="{ active: tab === 'groups' }" @click="tab = 'groups'">Groups</button>
-        <button class="tab" :class="{ active: tab === 'notifications' }" @click="tab = 'notifications'">Notifications</button>
-        <button class="tab" :class="{ active: tab === 'registry' }" @click="tab = 'registry'">Registry</button>
-        <button class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'">MCP</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'notifications' }" @click="tab = 'notifications'">Notifications</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'registry' }" @click="tab = 'registry'">Registry</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'">MCP</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'users' }" @click="tab = 'users'">Users</button>
         <button class="tab" :class="{ active: tab === 'account' }" @click="tab = 'account'">Account</button>
       </div>
 
@@ -1640,6 +1681,72 @@
             <pre style="font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto;">claude mcp add teploy --transport http \
   --header "Authorization: Bearer &lt;token&gt;" \
   <span x-text="location.origin + '/api/mcp'"></span></pre>
+          </div>
+        </div>
+      </template>
+
+      <!-- Users Tab -->
+      <template x-if="!loading && tab === 'users'">
+        <div style="max-width: 720px;">
+          <div class="card" style="padding: 24px; margin-bottom: 16px;">
+            <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Team access</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
+              Dashboard accounts and their roles. <strong>Admin</strong> manages users, servers, and settings;
+              <strong>Editor</strong> can deploy and run app actions; <strong>Viewer</strong> is read-only.
+              Access governs this dashboard only — anyone with SSH to a server can still act on it directly.
+            </p>
+            <div class="form-row" style="margin-bottom: 16px; align-items: flex-end;">
+              <div class="form-group">
+                <label class="form-label">Username</label>
+                <input class="form-input" x-model="newUser.username" placeholder="jane">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Password</label>
+                <input class="form-input" type="password" x-model="newUser.password" placeholder="At least 8 characters">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Role</label>
+                <select class="form-input" x-model="newUser.role">
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" @click="createUser()">Add user</button>
+            </div>
+
+            <template x-if="users.length > 0">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Username</th><th>Role</th><th style="width: 220px;"></th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="u in users" :key="u.username">
+                      <tr>
+                        <td x-text="u.username"></td>
+                        <td>
+                          <select class="form-input" style="max-width: 130px; padding: 4px 8px;"
+                                  @change="changeRole(u.username, $event.target.value)">
+                            <option value="viewer" :selected="u.role === 'viewer'">Viewer</option>
+                            <option value="editor" :selected="u.role === 'editor'">Editor</option>
+                            <option value="admin" :selected="u.role === 'admin'">Admin</option>
+                          </select>
+                        </td>
+                        <td style="display: flex; gap: 6px; justify-content: flex-end;">
+                          <button class="btn btn-sm" @click="resetUserPassword(u.username)">Reset password</button>
+                          <button class="btn btn-sm btn-danger" @click="deleteUser(u.username)"
+                                  x-show="u.username !== (me && me.username)">Remove</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+            <template x-if="users.length === 0">
+              <p style="font-size: 13px; color: var(--text-muted);">No users yet.</p>
+            </template>
           </div>
         </div>
       </template>

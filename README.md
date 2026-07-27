@@ -167,6 +167,38 @@ return 404.
 | `TEPLOY_DASH_USER` | `admin` | Username used when `TEPLOY_DASH_PASSWORD` is set (env-var bootstrap mode). |
 | `TEPLOY_DASH_PASSWORD` | _(optional)_ | Bootstrap password. If set, credentials are taken from this env var. If absent and no `auth.json` exists, the first run shows the setup page to create an account. |
 | `TEPLOY_DASH_PUBLIC_STATUS` | _(off)_ | Set to `1`/`true` to enable the public `/status` page (same as `--public-status`). |
+| `TEPLOY_DASH_TRUSTED_PROXY` | _(none)_ | Comma-separated proxy IPs/CIDRs. When set, the real client IP is read from `X-Forwarded-For` (for rate-limiting) and `X-Forwarded-Proto` is trusted for the secure-cookie flag. Set this when running behind Caddy/nginx. |
+| `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
+| `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
+
+### Single sign-on (OIDC)
+
+Optional. When `TEPLOY_DASH_OIDC_ISSUER` and `TEPLOY_DASH_OIDC_CLIENT_ID` are set,
+the login page offers an SSO button and Dash acts as an OpenID Connect relying
+party (authorization-code flow with PKCE). Password login stays available as the
+break-glass path. Register `https://<your-dash-host>/oidc/callback` as the
+redirect URI with your provider.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEPLOY_DASH_OIDC_ISSUER` | _(none)_ | IdP issuer URL (discovery base, e.g. `https://your-org.okta.com`). Required to enable SSO. |
+| `TEPLOY_DASH_OIDC_CLIENT_ID` | _(none)_ | OAuth client ID. Required to enable SSO. |
+| `TEPLOY_DASH_OIDC_CLIENT_SECRET` | _(none)_ | OAuth client secret. Omit for a public (PKCE-only) client. |
+| `TEPLOY_DASH_OIDC_REDIRECT_URL` | _(derived)_ | Callback URL. Derived from the request Host when unset; set it explicitly behind a proxy that rewrites Host. Must be `.../oidc/callback`. |
+| `TEPLOY_DASH_OIDC_SCOPES` | `openid profile email` | Space/comma-separated scopes (`openid` is always included). Add `groups` if you use group-based role mapping. |
+| `TEPLOY_DASH_OIDC_LABEL` | `Single sign-on` | Text on the SSO button. |
+| `TEPLOY_DASH_OIDC_USERNAME_CLAIM` | `preferred_username` | Token claim used as the Dash username (falls back to `email`, then `sub`). |
+| `TEPLOY_DASH_OIDC_ROLE_CLAIM` | `teploy_role` | Token claim carrying the role directly (`admin`/`editor`/`viewer`). Checked first. |
+| `TEPLOY_DASH_OIDC_GROUPS_CLAIM` | `groups` | Token claim listing the user's groups, used when no direct role claim matches. |
+| `TEPLOY_DASH_OIDC_ADMIN_GROUP` | _(none)_ | Group whose members become `admin`. |
+| `TEPLOY_DASH_OIDC_EDITOR_GROUP` | _(none)_ | Group whose members become `editor`. |
+| `TEPLOY_DASH_OIDC_VIEWER_GROUP` | _(none)_ | Group whose members become `viewer`. |
+| `TEPLOY_DASH_OIDC_DEFAULT_ROLE` | `viewer` | Role for an authenticated user matching no role claim or group (least privilege). |
+
+Role resolution order: a recognized `teploy_role` claim wins; otherwise groups
+are matched (admin > editor > viewer); otherwise the default role. SSO users are
+not stored in `users.json` — their role comes fresh from the IdP on every login,
+so manage them in your IdP, not in Settings → Users.
 
 ## API
 

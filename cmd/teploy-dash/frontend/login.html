@@ -45,7 +45,7 @@
       color: #8b949e;
       font-size: 12px;
     }
-    input[type="password"] {
+    input[type="password"], input[type="text"] {
       width: 100%;
       min-height: 40px;
       margin-bottom: 16px;
@@ -58,7 +58,7 @@
       font-size: 13px;
       transition: border-color .12s, box-shadow .12s;
     }
-    input[type="password"]:focus { border-color: #58a6ff; box-shadow: 0 0 0 2px rgba(88,166,255,.1); }
+    input[type="password"]:focus, input[type="text"]:focus { border-color: #58a6ff; box-shadow: 0 0 0 2px rgba(88,166,255,.1); }
     button {
       width: 100%;
       min-height: 40px;
@@ -74,6 +74,29 @@
     button:hover:not(:disabled) { background: rgba(88,166,255,.1); }
     button:active:not(:disabled) { transform: translateY(1px); }
     button:disabled { opacity: 0.6; cursor: default; }
+    a.sso {
+      display: block;
+      width: 100%;
+      min-height: 40px;
+      margin-bottom: 8px;
+      padding: 10px 11px;
+      border: 1px solid #58a6ff;
+      border-radius: 6px;
+      background: #161b22;
+      color: #58a6ff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      text-decoration: none;
+      transition: background .12s;
+    }
+    a.sso:hover { background: rgba(88,166,255,.1); }
+    .divider {
+      display: flex; align-items: center; gap: 10px;
+      margin: 16px 0; color: #6e7681; font-size: 11px;
+    }
+    .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: #30363d; }
     .error { margin-top: 12px; color: #f85149; font-size: 12px; }
     .security-note { margin-top: 18px; color: #6e7681; font-size: 10px; text-align: center; }
     @media (max-width: 440px) { .card { padding: 26px 22px; } }
@@ -84,8 +107,12 @@
     <div class="brand-row"><div class="brand">TEPLOY DASH</div></div>
     <h1>Welcome back</h1>
     <div class="subtitle">Sign in to manage your deployment fleet.</div>
+    <a class="sso" id="sso" href="#" hidden></a>
+    <div class="divider" id="divider" hidden>or</div>
+    <label for="username">Username</label>
+    <input type="text" id="username" placeholder="admin" autocomplete="username" autofocus>
     <label for="password">Password</label>
-    <input type="password" id="password" placeholder="" autofocus>
+    <input type="password" id="password" placeholder="" autocomplete="current-password">
     <button id="btn">Sign in</button>
     <div class="error" id="err" hidden></div>
     <p class="security-note">Credentials stay on this Teploy Dash instance.</p>
@@ -93,10 +120,34 @@
 
   <script>
     const btn = document.getElementById('btn');
+    const userInput = document.getElementById('username');
     const input = document.getElementById('password');
     const err = document.getElementById('err');
+    const sso = document.getElementById('sso');
+    const divider = document.getElementById('divider');
+
+    function safeNext() {
+      const next = new URLSearchParams(location.search).get('next') || '/';
+      return next.startsWith('/') && !next.startsWith('//') ? next : '/';
+    }
+
+    // Surface an SSO failure bounced back via ?error=.
+    const initialError = new URLSearchParams(location.search).get('error');
+    if (initialError) { err.textContent = initialError; err.hidden = false; }
+
+    // Ask the server which sign-in methods to show; reveal the SSO button when
+    // OIDC is configured.
+    fetch('/api/login/methods').then(r => r.ok ? r.json() : null).then(m => {
+      if (m && m.oidc) {
+        sso.textContent = m.oidc_label || 'Single sign-on';
+        sso.href = '/oidc/login?next=' + encodeURIComponent(safeNext());
+        sso.hidden = false;
+        divider.hidden = false;
+      }
+    }).catch(() => {});
 
     async function login() {
+      const username = userInput.value.trim();
       const password = input.value;
       if (!password) return;
       btn.disabled = true;
@@ -105,15 +156,13 @@
         const resp = await fetch('/api/login', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({password}),
+          body: JSON.stringify({username, password}),
         });
         if (resp.ok) {
-          const params = new URLSearchParams(location.search);
-          const next = params.get('next') || '/';
-          location.href = next.startsWith('/') && !next.startsWith('//') ? next : '/';
+          location.href = safeNext();
         } else {
           const data = await resp.json().catch(() => ({}));
-          err.textContent = data.error || 'Incorrect password.';
+          err.textContent = data.error || 'Incorrect username or password.';
           err.hidden = false;
           btn.disabled = false;
           input.select();
@@ -127,6 +176,7 @@
 
     btn.addEventListener('click', login);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+    userInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.focus(); } });
   </script>
 </body>
 </html>

@@ -5,6 +5,30 @@ All notable changes to teploy-dash are recorded here.
 ## [Unreleased]
 
 ### Added
+- Teams and roles. The dashboard is now multi-user with three roles matching
+  teploy-observe: **admin** (manage users, servers, settings, secrets),
+  **editor** (deploy, rollback, restart, env — the operator), and **viewer**
+  (read-only). Accounts live in `users.json`; a pre-existing single-user
+  `auth.json` migrates automatically to the first admin on upgrade, so no
+  operator is locked out. Roles are enforced at the auth gate: reads need
+  viewer, mutations need editor, and account/credential/config routes need
+  admin — failing closed so an unclassified mutating route requires editor,
+  never viewer. Login now takes a username; manage accounts in Settings →
+  Users (admin only). Changing a password or role signs out only that user's
+  sessions, and the last admin can't be demoted or removed. RBAC governs the
+  dashboard surface — it does not replace server SSH controls.
+- Single sign-on (OIDC). Dash can act as an OpenID Connect relying party:
+  delegate login to your own identity provider (Okta, Azure AD/Entra, Google
+  Workspace, Keycloak, Authentik — "generic OIDC") or to Teploy Platform acting
+  as the IdP for Cloud. The IdP authenticates the user; Dash verifies the signed
+  ID token (authorization-code flow with PKCE, state, and nonce) and maps a
+  claim to the same admin/editor/viewer roles — a `teploy_role` claim wins,
+  otherwise a group claim is matched to configured admin/editor/viewer groups,
+  otherwise a configurable default (viewer). The role is re-read from the token
+  on every login, so the IdP stays authoritative. Local username/password login
+  remains as the break-glass path so a down IdP never locks everyone out. Enable
+  by setting `TEPLOY_DASH_OIDC_ISSUER` and `TEPLOY_DASH_OIDC_CLIENT_ID` (see the
+  README for the full variable list); when unset, SSO is simply absent.
 - MCP server at `POST /api/mcp` — Claude Code, Cursor, or any MCP client can
   inspect the fleet and run deploy actions. 17 curated tools; reads come from
   the CLI's server state files, actions delegate to the CLI binary exactly
@@ -16,6 +40,11 @@ All notable changes to teploy-dash are recorded here.
 - `main.version` ldflags variables now exist, so goreleaser's long-standing
   `-X main.version=...` flags actually take effect (previously a silent
   no-op).
+- Cross-product dashboard switcher. A top-left dropdown lets you jump between the
+  deployed Teploy dashboards — Dash, Observe, and Ship. Configure the sibling
+  URLs with `TEPLOY_NAV_OBSERVE_URL` and `TEPLOY_NAV_SHIP_URL` (the same env
+  convention is used by all three products); the switcher only appears once at
+  least one sibling URL is set. Served from `/api/nav`.
 
 ## [0.1.9] - 2026-07-15
 
