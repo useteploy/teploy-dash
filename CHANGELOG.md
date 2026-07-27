@@ -4,6 +4,8 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-07-27
+
 ### Added
 - Teams and roles. The dashboard is now multi-user with three roles matching
   teploy-observe: **admin** (manage users, servers, settings, secrets),
@@ -29,6 +31,19 @@ All notable changes to teploy-dash are recorded here.
   remains as the break-glass path so a down IdP never locks everyone out. Enable
   by setting `TEPLOY_DASH_OIDC_ISSUER` and `TEPLOY_DASH_OIDC_CLIENT_ID` (see the
   README for the full variable list); when unset, SSO is simply absent.
+- Cross-product dashboard switcher. A top-left dropdown lets you jump between the
+  deployed Teploy dashboards — Dash, Observe, and Ship. Configure the sibling
+  URLs with `TEPLOY_NAV_OBSERVE_URL` and `TEPLOY_NAV_SHIP_URL` (the same env
+  convention is used by all three products); the switcher only appears once at
+  least one sibling URL is set. Served from `/api/nav`.
+- Resources panel on the app detail page: CPU, memory, network and block I/O
+  per container, from the CLI's `stats`. Stopped containers are filtered out —
+  Docker reports them as all-zero rather than omitting them, and showing those
+  rows reads as "idle" when the app is actually down.
+
+## [0.1.10] - 2026-07-26
+
+### Added
 - MCP server at `POST /api/mcp` — Claude Code, Cursor, or any MCP client can
   inspect the fleet and run deploy actions. 17 curated tools; reads come from
   the CLI's server state files, actions delegate to the CLI binary exactly
@@ -37,14 +52,38 @@ All notable changes to teploy-dash are recorded here.
   per-token read-only mode; tokens managed in Settings → MCP (hashed at rest,
   immediate revocation). Env values never cross the MCP boundary — the env
   tool returns variable names only.
+- Operation center. Every long-running action — deploy, rollback, remove,
+  start/stop/restart, maintenance, template install — is now a recorded
+  operation with live streaming logs (SSE, resumable via `Last-Event-ID`),
+  cancel, retry, and an idempotency key, instead of a request that blocks
+  until the CLI exits. `/operations` lists them; `/operations/{id}` follows
+  one live.
+- URL routing. Every view has a real path (`/deployments`, `/servers/{name}`,
+  `/operations/{id}`), so views are linkable and reloadable and browser
+  back/forward work.
+- Drift panel on the app detail page: whether an app's live containers still
+  match what was deployed — a container stopped outside teploy, or an old
+  version still running.
+- `Remove` action to retire an app: stops and removes its containers, removes
+  its proxy route, and deletes its deploy state. Volumes and accessory data
+  are always preserved from the dashboard.
+- Signed monitor webhook deliveries.
 - `main.version` ldflags variables now exist, so goreleaser's long-standing
   `-X main.version=...` flags actually take effect (previously a silent
   no-op).
-- Cross-product dashboard switcher. A top-left dropdown lets you jump between the
-  deployed Teploy dashboards — Dash, Observe, and Ship. Configure the sibling
-  URLs with `TEPLOY_NAV_OBSERVE_URL` and `TEPLOY_NAV_SHIP_URL` (the same env
-  convention is used by all three products); the switcher only appears once at
-  least one sibling URL is set. Served from `/api/nav`.
+
+### Fixed
+- The Deployments view rendered empty for every app: the fleet API serialized
+  each app as `app` while the frontend keyed on `name`, so the list crashed on
+  undefined keys and showed nothing.
+- The Servers page rendered blank, and server detail was a black page — the
+  server list is a map, not an array, and the detail endpoint delegated to a
+  CLI verb that reports app state rather than host metrics.
+- Static-site deploys (no container by design) were reported as stopped.
+- CLI-delegated actions (logs, deploys, env, rollback) failed from the
+  container: the server alias was passed where a raw host was expected, and
+  accepted host keys were never recorded for the bundled CLI to reuse.
+- Replaced inline spinners with a top-loading bar in the header.
 
 ## [0.1.9] - 2026-07-15
 
