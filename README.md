@@ -200,6 +200,51 @@ are matched (admin > editor > viewer); otherwise the default role. SSO users are
 not stored in `users.json` — their role comes fresh from the IdP on every login,
 so manage them in your IdP, not in Settings → Users.
 
+#### Self-hosted identity providers
+
+Any OIDC provider works. Two are worth calling out because if you already run
+Teploy you probably already run one of them, so SSO costs you no new software.
+
+**Forgejo** (or Gitea) is a full OIDC provider. Its discovery document
+advertises `openid profile email groups` and a `groups` claim.
+
+1. Register an OAuth2 application — Site Administration → Applications for an
+   org-wide one, or user Settings → Applications for a personal one. Set the
+   redirect URI to `https://<your-dash-host>/oidc/callback`.
+2. Point Dash at it:
+
+```bash
+TEPLOY_DASH_OIDC_ISSUER=https://forgejo.example.com
+TEPLOY_DASH_OIDC_CLIENT_ID=<client id>
+TEPLOY_DASH_OIDC_CLIENT_SECRET=<client secret>
+TEPLOY_DASH_OIDC_SCOPES="openid profile email groups"
+TEPLOY_DASH_OIDC_ADMIN_GROUP=platform:owners
+TEPLOY_DASH_OIDC_EDITOR_GROUP=platform:deployers
+```
+
+- Request `groups` explicitly. It is not in the default scopes, and without it
+  no group matches, so every user lands on `TEPLOY_DASH_OIDC_DEFAULT_ROLE`.
+- Forgejo emits one entry per org (`platform`) and one per team
+  (`platform:deployers`). Group comparison is exact and case-sensitive, so copy
+  the names as Forgejo spells them.
+- Forgejo cannot mint a custom claim, so leave `ROLE_CLAIM` at its default and
+  map roles by group.
+- Each dashboard needs its own OAuth2 application because the redirect URIs
+  differ, but all three can map against the same orgs and teams.
+
+**OpenBao** also serves OIDC (`identity/oidc/provider`), which is convenient if
+you already run it for `teploy secret --provider openbao`. Create a provider,
+an assignment, and a client, then use the provider's discovery URL as the
+issuer:
+
+```bash
+TEPLOY_DASH_OIDC_ISSUER=https://openbao.example.com/v1/identity/oidc/provider/teploy
+```
+
+Map roles with a scope template that emits a `groups` array (matched as above),
+or one that emits a `teploy_role` string — OpenBao can produce a custom claim,
+so the direct role claim is available here and takes precedence over groups.
+
 ## API
 
 | Method | Path | Description |
