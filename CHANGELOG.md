@@ -4,6 +4,17 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-07-27
+
+### Fixed
+- The Docker image could not build. An unused indirect dependency had drifted
+  up to a version requiring Go 1.25 while the builder image, CI, and `go.mod`
+  all target 1.23/1.24, so `go mod download` — which resolves the whole module
+  graph, not just what is imported — failed before compilation started. The
+  release binaries were unaffected (they only build what is imported), which
+  is why this surfaced at deploy time rather than in CI. Pinned back to a
+  version the rest of the graph agrees with; every module now builds on 1.24.
+
 ## [0.1.11] - 2026-07-27
 
 ### Added
