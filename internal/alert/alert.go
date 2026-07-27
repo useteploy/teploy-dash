@@ -2,13 +2,17 @@ package alert
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/smtp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,12 +25,15 @@ var webhookClient = &http.Client{Timeout: 10 * time.Second}
 // Config holds alerting configuration.
 type Config struct {
 	WebhookURL string `json:"webhook_url,omitempty"`
-	SMTPHost   string `json:"smtp_host,omitempty"`
-	SMTPPort   int    `json:"smtp_port,omitempty"`
-	SMTPUser   string `json:"smtp_user,omitempty"`
-	SMTPPass   string `json:"smtp_pass,omitempty"`
-	EmailTo    string `json:"email_to,omitempty"`
-	EmailFrom  string `json:"email_from,omitempty"`
+	// WebhookSecret signs deliveries so the receiver can tell a real alert from
+	// anyone who learned the URL. Empty sends unsigned, as before.
+	WebhookSecret string `json:"webhook_secret,omitempty"`
+	SMTPHost      string `json:"smtp_host,omitempty"`
+	SMTPPort      int    `json:"smtp_port,omitempty"`
+	SMTPUser      string `json:"smtp_user,omitempty"`
+	SMTPPass      string `json:"smtp_pass,omitempty"`
+	EmailTo       string `json:"email_to,omitempty"`
+	EmailFrom     string `json:"email_from,omitempty"`
 }
 
 // Event represents a monitor state change.
@@ -58,6 +65,29 @@ func (d *Dispatcher) Send(event Event) {
 	}
 }
 
+// Webhook deliveries carry the same signature every teploy product sends:
+//
+//	X-Teploy-Timestamp: <unix seconds>
+//	X-Teploy-Signature: sha256=hex(HMAC-SHA256(secret, timestamp + "." + body))
+//
+// teploy-cli (internal/notify/sign.go) and teploy-observe
+// (internal/platform/webhooks.go) sign identically, so a receiver of all three
+// writes one verifier. The construction is duplicated rather than shared
+// because these are separate binaries in separate modules; if it ever changes,
+// it changes in all three or receivers break.
+func signWebhook(req *http.Request, secret string, body []byte) {
+	if secret == "" {
+		return
+	}
+	ts := strconv.FormatInt(time.Now().UTC().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(ts))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	req.Header.Set("X-Teploy-Timestamp", ts)
+	req.Header.Set("X-Teploy-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+}
+
 func (d *Dispatcher) sendWebhook(event Event) {
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -65,7 +95,15 @@ func (d *Dispatcher) sendWebhook(event Event) {
 		return
 	}
 
-	resp, err := webhookClient.Post(d.config.WebhookURL, "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodPost, d.config.WebhookURL, bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[alert] Webhook request build failed: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	signWebhook(req, d.config.WebhookSecret, payload)
+
+	resp, err := webhookClient.Do(req)
 	if err != nil {
 		log.Printf("[alert] Webhook failed: %v", err)
 		return
