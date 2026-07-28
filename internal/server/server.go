@@ -205,7 +205,30 @@ func New(config Config) *Server {
 
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe(addr string) error {
+	s.warmFleet()
 	return s.httpServer(addr).ListenAndServe()
+}
+
+// warmFleet populates the fleet cache once in the background at startup.
+// Without it the cache only fills when someone opens the deployments page, so
+// immediately after a restart the first fleet view pays the full SSH sweep and
+// the product switcher — which infers siblings from fleet state — is missing
+// entries until then. Runs detached so a slow or unreachable fleet never delays
+// the listener.
+func (s *Server) warmFleet() {
+	if !cli.IsInstalled() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		apps, err := s.collectFleetApps(ctx)
+		if err != nil {
+			log.Printf("[fleet] startup warm failed (will fill on first request): %v", err)
+			return
+		}
+		s.fleet.set(apps)
+	}()
 }
 
 func (s *Server) httpServer(addr string) *http.Server {

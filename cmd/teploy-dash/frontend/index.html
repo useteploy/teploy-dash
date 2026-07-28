@@ -14,11 +14,16 @@
 
 <!-- Application header -->
 <nav class="navbar" aria-label="Primary navigation">
-  <div class="product-switcher" x-data="{ open:false, current:'', apps:[], async init(){ try{ const r=await fetch('/api/nav'); if(r.ok){ const d=await r.json(); this.apps=d.apps||[]; this.current=d.current||''; } }catch(e){} } }" x-show="apps.filter(a=>a.url).length>0" @click.outside="open=false" x-cloak>
-    <button class="ps-btn" @click="open=!open" title="Switch dashboard">
-      <span class="ps-dot"></span>
-      <span x-text="(apps.find(a=>a.key===current)||{}).label||'Teploy'"></span>
-      <span class="ps-caret">&#9662;</span>
+  <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('homepage')">Teploy</a>
+  <!-- Product switcher. The current product is always named, so you can tell
+       which dashboard you are in; it only becomes a dropdown once a sibling
+       is reachable. -->
+  <div class="product-switcher" x-data="{ open:false, current:'dash', apps:[], get siblings(){ return this.apps.filter(a=>a.url) }, get label(){ return (this.apps.find(a=>a.key===this.current)||{}).label || 'Dash' }, async init(){ try{ const r=await fetch('/api/nav'); if(r.ok){ const d=await r.json(); this.apps=d.apps||[]; this.current=d.current||'dash'; } }catch(e){} } }" @click.outside="open=false">
+    <button class="ps-btn" :class="{ 'ps-static': siblings.length===0 }" @click="if(siblings.length) open=!open"
+            :aria-haspopup="siblings.length>0" :aria-expanded="open"
+            :title="siblings.length ? 'Switch dashboard' : null">
+      <span x-text="label"></span>
+      <span class="ps-caret" x-show="siblings.length>0" x-cloak>&#9662;</span>
     </button>
     <div class="ps-menu" x-show="open" x-transition.opacity x-cloak>
       <template x-for="a in apps" :key="a.key">
@@ -26,7 +31,6 @@
       </template>
     </div>
   </div>
-  <a class="navbar-brand" href="#" @click.prevent="$store.router.navigate('homepage')">TEPLOY DASH</a>
   <ul class="navbar-nav">
     <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
     <li><a href="#" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
