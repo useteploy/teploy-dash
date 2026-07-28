@@ -4,6 +4,23 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-07-28
+
+### Changed
+- The header leads with the Teploy wordmark and lets the product switcher
+  carry the product name, replacing the combined "TEPLOY DASH" that showed the
+  brand twice. The same shape now applies across Dash, Observe and Ship.
+- The switcher always names the current product. It previously hid entirely
+  when no sibling was configured, so a single-product install had nothing
+  saying which dashboard it was; it becomes a dropdown only when a sibling is
+  reachable.
+
+### Fixed
+- The fleet cache is warmed once at startup. Sibling discovery reads that
+  cache, so after a restart the switcher was missing entries until someone
+  opened the deployments page — and that first fleet view paid a full SSH
+  sweep.
+
 ## [0.1.13] - 2026-07-27
 
 ### Added
