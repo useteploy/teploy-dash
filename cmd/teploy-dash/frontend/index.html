@@ -46,9 +46,44 @@
     <li><a href="#" :class="{ active: $store.router.page === 'settings' }" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
   <div class="navbar-spacer"></div>
-  <span class="navbar-env">self-hosted</span>
-  <button class="theme-toggle" @click="$store.theme.toggle()" x-text="$store.theme.mode === 'dark' ? 'Light' : 'Dark'"></button>
-  <button class="btn-logout" @click="logout()">Sign out</button>
+  <!-- Pinned service links. Same shortcut list as the Home grid; the ones
+       flagged in Settings > Links surface here as icons, so Forgejo / Proxmox /
+       TrueNAS and friends are one click away from every page. -->
+  <div class="nav-links" x-data="navLinks" x-show="items.length > 0" x-cloak>
+    <template x-for="item in items" :key="item.id">
+      <a class="nav-link" :class="{ 'dark-icon': item.dark_icon && !linkGlyph(item) }"
+         :href="item.url" target="_blank" rel="noopener"
+         :title="item.description ? item.name + ' — ' + item.description : item.name">
+        <!-- A monochrome glyph tracks the theme; the favicon is the fallback. -->
+        <template x-if="linkGlyph(item)">
+          <svg class="nav-link-glyph" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path :d="linkGlyph(item)"></path>
+          </svg>
+        </template>
+        <template x-if="!linkGlyph(item)">
+          <img class="nav-link-favicon" :src="faviconUrl(item.url)" alt=""
+               :style="item._faviconFailed ? 'display:none' : ''"
+               @error="item._faviconFailed = true">
+        </template>
+        <span class="nav-link-letters" :style="`background:${item.color || '#3b82f6'};${item._faviconFailed && !linkGlyph(item) ? '' : 'display:none'}`"
+              x-text="iconLetters(item.name)"></span>
+      </a>
+    </template>
+  </div>
+  <!-- Theme toggle: shows the theme it switches TO. -->
+  <button class="icon-btn theme-toggle" @click="$store.theme.toggle()"
+          :title="$store.theme.mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+          :aria-label="$store.theme.mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'">
+    <svg x-show="$store.theme.mode === 'dark'" width="15" height="15" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="4.2"></circle>
+      <path d="M12 2.6v2.2M12 19.2v2.2M4.2 12H2M22 12h-2.2M6.4 6.4 4.9 4.9M19.1 19.1l-1.5-1.5M17.6 6.4l1.5-1.5M4.9 19.1l1.5-1.5"></path>
+    </svg>
+    <svg x-show="$store.theme.mode !== 'dark'" width="15" height="15" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M20.5 14.4A8.6 8.6 0 0 1 9.6 3.5a8.6 8.6 0 1 0 10.9 10.9Z"></path>
+    </svg>
+  </button>
   <div id="load-bar" class="load-bar"></div>
 </nav>
 
@@ -81,7 +116,7 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading && items.length === 0 && !editing">
+      <template x-if="!loading && visibleItems.length === 0 && !editing">
         <div class="empty-state">
           <p>No shortcuts yet.</p>
           <button class="btn btn-primary" style="margin-top:12px;" @click="editing = true; openAdd()">Add your first shortcut</button>
@@ -112,9 +147,10 @@
             </div>
           </template>
 
-          <!-- Card grid -->
+          <!-- Card grid. Header-only links (hidden) are managed in
+               Settings > Links and deliberately don't take a card here. -->
           <div class="homepage-grid">
-            <template x-for="item in items" :key="item.id">
+            <template x-for="item in visibleItems" :key="item.id">
               <div class="homepage-card"
                    :class="{ 'homepage-card-edit': editing, 'homepage-card-dragging': editing && _dragId === item.id, 'homepage-card-dragover': editing && _dragOverId === item.id && _dragId !== item.id }"
                    :draggable="editing"
@@ -126,14 +162,22 @@
                 <template x-if="editing">
                   <button class="homepage-card-remove" @click.stop="remove(item.id)" title="Remove">&times;</button>
                 </template>
-                <!-- Favicon with colored-initials fallback -->
+                <!-- Monochrome glyph, else favicon, else colored initials -->
                 <div class="homepage-card-icon-wrap">
-                  <img class="homepage-card-favicon"
-                       :src="faviconUrl(item.url)"
-                       :style="item._faviconFailed ? 'display:none' : ''"
-                       @error="item._faviconFailed = true">
+                  <template x-if="linkGlyph(item)">
+                    <svg class="homepage-card-glyph" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path :d="linkGlyph(item)"></path>
+                    </svg>
+                  </template>
+                  <template x-if="!linkGlyph(item)">
+                    <img class="homepage-card-favicon"
+                         :class="{ 'dark-icon': item.dark_icon }"
+                         :src="faviconUrl(item.url)"
+                         :style="item._faviconFailed ? 'display:none' : ''"
+                         @error="item._faviconFailed = true">
+                  </template>
                   <div class="homepage-card-icon"
-                       :style="`background:${item.color || '#3b82f6'};${item._faviconFailed ? '' : 'display:none'}`"
+                       :style="`background:${item.color || '#3b82f6'};${item._faviconFailed && !linkGlyph(item) ? '' : 'display:none'}`"
                        x-text="iconLetters(item.name)"></div>
                 </div>
                 <div class="homepage-card-body">
@@ -1382,6 +1426,7 @@
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'registry' }" @click="tab = 'registry'">Registry</button>
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'">MCP</button>
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'users' }" @click="tab = 'users'">Users</button>
+        <button class="tab" :class="{ active: tab === 'links' }" @click="tab = 'links'">Links</button>
         <button class="tab" :class="{ active: tab === 'account' }" @click="tab = 'account'">Account</button>
       </div>
 
@@ -1759,9 +1804,127 @@
         </div>
       </template>
 
+      <!-- Links Tab: custom service shortcuts. The same list the Home grid
+           renders; "Header" pins one to the top-right icon row. -->
+      <template x-if="!loading && tab === 'links'">
+        <div x-data="linksSettings" x-init="init()">
+          <p class="subtitle" style="margin: 0 0 16px;">
+            Shortcuts to services you run alongside Teploy — Forgejo, Proxmox, TrueNAS, anything with a URL.
+            Home and Header are independent: a link can be a card on Home, an icon in the top-right of
+            every page, or both.
+          </p>
+
+          <template x-if="canEdit()">
+            <div style="margin-bottom: 16px;">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">Name</label>
+                  <input class="form-input" x-model="form.name" placeholder="Forgejo">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">URL</label>
+                  <input class="form-input" type="url" x-model="form.url" placeholder="http://10.0.0.5:3000">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Description <span class="text-muted">(optional)</span></label>
+                  <input class="form-input" x-model="form.description" placeholder="Self-hosted git">
+                </div>
+                <button class="btn btn-primary" @click="save()" x-text="editingId ? 'Save' : 'Add'"></button>
+                <button class="btn" x-show="editingId" @click="cancel()">Cancel</button>
+              </div>
+              <div class="form-group" style="max-width: 620px;">
+                <label class="form-label">
+                  Icon <span class="text-muted">(optional — SVG path data, 24&times;24 viewBox)</span>
+                </label>
+                <input class="form-input" x-model="form.icon" placeholder="M12 .297c-6.63 0-12 5.373-12 12 …"
+                       style="font-size: 12px;">
+                <p class="text-muted" style="margin-top: 5px; font-size: 11px;">
+                  Drawn in the current text colour, so it is white on the dark theme and black on the light one —
+                  no tile, no background. Leave blank to use the site's favicon. GitHub and X have built-in glyphs.
+                </p>
+              </div>
+              <div class="link-opts">
+                <label><input type="checkbox" x-model="form.home"> Show on Home</label>
+                <label><input type="checkbox" x-model="form.pinned"> Pin to Header</label>
+                <!-- Favicons are cross-origin, so the browser can't measure how
+                     dark one is; this is the manual escape hatch for logos that
+                     vanish against a dark header, short of supplying a glyph. -->
+                <label><input type="checkbox" x-model="form.dark_icon"> Dark favicon — show on a light tile</label>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="items.length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 40px;"></th>
+                    <th>Name</th>
+                    <th>URL</th>
+                    <th style="width: 80px;">Home</th>
+                    <th style="width: 90px;">Header</th>
+                    <th style="width: 150px;"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="item in items" :key="item.id">
+                    <tr>
+                      <td>
+                        <span class="nav-link" :class="{ 'dark-icon': item.dark_icon && !linkGlyph(item) }" style="pointer-events: none;">
+                          <template x-if="linkGlyph(item)">
+                            <svg class="nav-link-glyph" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                              <path :d="linkGlyph(item)"></path>
+                            </svg>
+                          </template>
+                          <template x-if="!linkGlyph(item)">
+                            <img class="nav-link-favicon" :src="faviconUrl(item.url)" alt=""
+                                 :style="item._faviconFailed ? 'display:none' : ''"
+                                 @error="item._faviconFailed = true">
+                          </template>
+                          <span class="nav-link-letters"
+                                :style="`background:${item.color || '#3b82f6'};${item._faviconFailed && !linkGlyph(item) ? '' : 'display:none'}`"
+                                x-text="iconLetters(item.name)"></span>
+                        </span>
+                      </td>
+                      <td>
+                        <div x-text="item.name"></div>
+                        <div class="text-muted" style="font-size: 11px;" x-text="item.description"></div>
+                      </td>
+                      <td style="font-family: var(--mono); font-size: 12px;">
+                        <a :href="item.url" target="_blank" rel="noopener" style="color: var(--accent);" x-text="item.url"></a>
+                      </td>
+                      <td>
+                        <button class="btn btn-sm" :class="{ 'btn-primary': !item.hidden }"
+                                :disabled="!canEdit()" @click="toggle(item, 'hidden')"
+                                x-text="item.hidden ? 'Off' : 'On'"></button>
+                      </td>
+                      <td>
+                        <button class="btn btn-sm" :class="{ 'btn-primary': item.pinned }"
+                                :disabled="!canEdit()" @click="toggle(item, 'pinned')"
+                                x-text="item.pinned ? 'Pinned' : 'Pin'"></button>
+                      </td>
+                      <td>
+                        <div style="display: flex; gap: 6px; justify-content: flex-end;">
+                          <button class="btn btn-sm" x-show="canEdit()" @click="edit(item)">Edit</button>
+                          <button class="btn btn-sm btn-danger" x-show="canEdit()" @click="remove(item.id)">Remove</button>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <template x-if="items.length === 0">
+            <p style="font-size: 13px; color: var(--text-muted);">No links yet.</p>
+          </template>
+        </div>
+      </template>
+
       <template x-if="!loading && tab === 'account'">
         <div style="max-width: 420px;">
-          <div class="card" style="padding: 24px;">
+          <div class="card" style="padding: 24px; cursor: default;">
             <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Change password</h3>
             <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">After changing your password you will be signed out.</p>
             <div class="form-group">
@@ -1783,6 +1946,19 @@
             </div>
             <p x-show="pw.error" x-text="pw.error" style="font-size: 13px; color: var(--red); margin-top: 12px;"></p>
           </div>
+
+          <!-- Sign out lives here rather than in the header: it is a rare,
+               irreversible action and does not need permanent chrome. Hidden
+               when auth is off (--no-auth), where there is no session to end. -->
+          <template x-if="me.username">
+            <div class="card" style="padding: 24px; margin-top: 16px; cursor: default;">
+              <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Session</h3>
+              <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
+                Signed in as <strong x-text="me.username"></strong> (<span x-text="me.role || 'viewer'"></span>).
+              </p>
+              <button class="btn btn-danger" @click="logout()">Sign out</button>
+            </div>
+          </template>
         </div>
       </template>
     </div>

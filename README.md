@@ -107,6 +107,18 @@ teploy-dash --no-auth                                   # local dev only
 - Notification config persisted to `~/.teploy/notifications.json`
   and reloadable from the UI without restart.
 
+### Service links
+- **Settings → Links** holds shortcuts to whatever else you run — Forgejo,
+  Proxmox, TrueNAS, a NAS UI, anything with a URL.
+- **Home** and **Header** are independent per link: a card on Home, an icon in
+  the top-right of every page, or both. Up to eight header icons are shown.
+- Icons use the site's favicon by default. A link can instead carry SVG path
+  data (24×24 viewBox) in its **Icon** field, drawn in the current text colour
+  so it is white on the dark theme and black on the light one — GitHub and X
+  have that built in. Failing both, coloured initials.
+- Stored in `homepage.json` in the data dir; editing requires the `editor`
+  role.
+
 ### Why no desync
 The CLI is the source of truth. Dash never writes deployment state — it
 reads the same JSON files the CLI writes, and shells out to the CLI for
@@ -274,6 +286,7 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / DELETE | `/api/restore-tests/{id}` | Detail / delete. |
 | POST | `/api/restore-tests/{id}/run` | Verify the latest backup now (restores into a scratch container via `teploy accessory verify-backup`). |
 | GET / POST | `/api/notifications` | Read / write alert config. |
+| GET / PUT | `/api/homepage` | Service links (Home grid + pinned header icons). |
 
 All non-health routes require a valid session cookie. Sessions are issued by
 `POST /api/login` (24-hour TTL). Failed login attempts are rate-limited

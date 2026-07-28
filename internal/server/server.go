@@ -2616,6 +2616,22 @@ type HomepageItem struct {
 	URL         string `json:"url"`
 	Description string `json:"description,omitempty"`
 	Color       string `json:"color,omitempty"`
+	// Pinned surfaces the shortcut as an icon in the header, right side. One
+	// list backs both the Home grid and the header so a service (Forgejo,
+	// Proxmox, TrueNAS) is only ever entered once.
+	Pinned bool `json:"pinned,omitempty"`
+	// Hidden keeps the shortcut off the Home grid. With Pinned, that makes a
+	// header-only link; the two surfaces are independent.
+	Hidden bool `json:"hidden,omitempty"`
+	// DarkIcon marks a favicon that is dark on transparent (GitHub's mark, for
+	// one) so the UI can brighten it on dark backgrounds. Not detectable in the
+	// browser: favicons are cross-origin, which taints the canvas.
+	DarkIcon bool `json:"dark_icon,omitempty"`
+	// Icon is SVG path data on a 24x24 viewBox, drawn in the current text
+	// colour instead of the site's favicon — so the mark tracks the theme
+	// (white on dark, black on light) rather than carrying its own background.
+	// Some hosts have a built-in glyph and need nothing here.
+	Icon string `json:"icon,omitempty"`
 }
 
 type homepageData struct {

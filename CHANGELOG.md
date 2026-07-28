@@ -4,6 +4,27 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+- Settings → Links: manage shortcuts to the services you run alongside Teploy
+  (Forgejo, Proxmox, TrueNAS, anything with a URL) and pin any of them to the
+  header. Pinned links render as icons on the right of every page, mirroring
+  the product switcher on the left. It is the same list the Home grid uses, so
+  a service is only ever entered once.
+- Home and Header are independent per link, so a link can be a header icon
+  without taking a card on Home.
+- Links can carry a monochrome glyph (SVG path data, 24×24) drawn in the
+  current text colour, so the mark is white on the dark theme and black on the
+  light one. GitHub and X have built-in glyphs; their favicons are a dark tile
+  that reads as a smudge in a dark header. Links without a glyph can instead be
+  flagged as having a dark favicon, which puts it on a light tile.
+
+### Changed
+- The header right side is now icons only: the `self-hosted` label is gone (it
+  said nothing an operator didn't know), and the theme toggle is a sun/moon
+  button instead of a "Light"/"Dark" word.
+- Sign out moved from the header to Settings → Account, alongside the password
+  form. It is a rare action that did not need permanent chrome.
+
 ## [0.1.14] - 2026-07-28
 
 ### Changed

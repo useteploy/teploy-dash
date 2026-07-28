@@ -222,6 +222,59 @@ document.addEventListener('alpine:init', () => {
   Alpine.store('router').restore();
   window.addEventListener('popstate', () => Alpine.store('router').restore());
 
+  // ── Service-link icons ──
+  // Built-in monochrome glyphs, drawn in the current text colour so they flip
+  // with the theme instead of relying on the site's favicon. Favicons are fine
+  // when they are colourful; the ones that are a dark mark (or a dark tile with
+  // the mark cut out) read as a smudge against a dark header. Path data is
+  // 24x24 viewBox; a link can supply its own via the Icon field in Settings.
+  const LINK_GLYPHS = {
+    'github.com': 'M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12',
+    'x.com': 'M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z',
+    'twitter.com': 'M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z',
+  };
+
+  // glyphPath returns the SVG path to draw for a link, or '' to fall back to
+  // the favicon. An explicit icon always wins over the built-in table.
+  window.linkGlyph = function (item) {
+    if (item.icon) return item.icon;
+    try {
+      const host = new URL(item.url).hostname.replace(/^www\./, '');
+      return LINK_GLYPHS[host] || '';
+    } catch { return ''; }
+  };
+
+  // ── Header service links ──
+  // Renders the shortcuts pinned in Settings > Links as icons on the right of
+  // the header. Reads the same /api/homepage list the Home grid uses, and
+  // reloads when either surface edits it.
+  Alpine.data('navLinks', () => ({
+    items: [],
+
+    async init() {
+      await this.load();
+      window.addEventListener('teploy:links-changed', () => this.load());
+    },
+
+    async load() {
+      try {
+        const raw = (await api.get('/api/homepage')) || [];
+        // Capped: the header is chrome, not a bookmarks bar.
+        this.items = raw.filter(i => i.pinned).slice(0, 8).map(i => ({ ...i, _faviconFailed: false }));
+      } catch (e) {
+        this.items = [];
+      }
+    },
+
+    faviconUrl(url) {
+      try { return new URL(url).origin + '/favicon.ico'; } catch { return ''; }
+    },
+
+    iconLetters(name) {
+      return name.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+    },
+  }));
+
   // ── Theme Store ──
   Alpine.store('theme', {
     mode: initTheme(),
@@ -1462,6 +1515,10 @@ document.addEventListener('alpine:init', () => {
     _dragOverId: null,
     _didDrag: false,
 
+    // Header-only links (Settings > Links, Home off) stay out of the grid but
+    // remain in `items` so persisting order doesn't drop them.
+    get visibleItems() { return this.items.filter(i => !i.hidden); },
+
     async init() {
       try {
         const raw = (await api.get('/api/homepage')) || [];
@@ -1523,6 +1580,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const clean = this.items.map(({ _faviconFailed, ...i }) => i);
         await api.put('/api/homepage', clean);
+        window.dispatchEvent(new CustomEvent('teploy:links-changed'));
       } catch(e) {
         showToast(e.message, 'error');
       }
@@ -1554,6 +1612,100 @@ document.addEventListener('alpine:init', () => {
       this._dragOverId = null;
       this._didDrag = false;
       if (moved) this.persist();
+    },
+  }));
+
+  // ── Settings > Links ──
+  // Table view over the same /api/homepage list the Home grid edits, plus the
+  // pin flag that puts a link in the header. Home keeps drag-ordering; this is
+  // the surface for adding a service and deciding whether it earns header space.
+  Alpine.data('linksSettings', () => ({
+    items: [],
+    editingId: null,
+    role: null, // null = auth disabled (no /api/auth/me route)
+    // `home` is the inverse of the stored `hidden` flag: the form asks what to
+    // show, the record stores the exception.
+    form: { name: '', url: '', description: '', color: '#3b82f6', icon: '', home: true, pinned: false, dark_icon: false },
+
+    async init() {
+      // The API makes links editor-writable; with --no-auth it enforces nothing
+      // and the Home grid edits freely, so match that rather than showing a
+      // read-only table on an install that has no roles at all.
+      this.role = await api.get('/api/auth/me').then(u => (u && u.role) || null).catch(() => null);
+      try {
+        const raw = (await api.get('/api/homepage')) || [];
+        this.items = raw.map(i => ({ ...i, _faviconFailed: false }));
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    canEdit() { return this.role === null || this.role === 'admin' || this.role === 'editor'; },
+
+    faviconUrl(url) {
+      try { return new URL(url).origin + '/favicon.ico'; } catch { return ''; }
+    },
+
+    iconLetters(name) {
+      return name.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+    },
+
+    edit(item) {
+      this.editingId = item.id;
+      this.form = {
+        name: item.name, url: item.url, description: item.description || '', color: item.color || '#3b82f6',
+        icon: item.icon || '', home: !item.hidden, pinned: !!item.pinned, dark_icon: !!item.dark_icon,
+      };
+    },
+
+    cancel() {
+      this.editingId = null;
+      this.form = { name: '', url: '', description: '', color: '#3b82f6', icon: '', home: true, pinned: false, dark_icon: false };
+    },
+
+    async save() {
+      const name = this.form.name.trim();
+      const url = this.form.url.trim();
+      if (!name || !url) { showToast('Name and URL are required', 'error'); return; }
+      const fields = {
+        name, url,
+        description: this.form.description.trim(),
+        color: this.form.color,
+        icon: this.form.icon.trim(),
+        hidden: !this.form.home,
+        pinned: this.form.pinned,
+        dark_icon: this.form.dark_icon,
+        _faviconFailed: false,
+      };
+      if (this.editingId) {
+        const idx = this.items.findIndex(i => i.id === this.editingId);
+        if (idx !== -1) this.items[idx] = { ...this.items[idx], ...fields };
+      } else {
+        this.items.push({ id: Math.random().toString(36).slice(2), ...fields });
+      }
+      await this.persist();
+      this.cancel();
+    },
+
+    async toggle(item, field) {
+      item[field] = !item[field];
+      await this.persist();
+    },
+
+    async remove(id) {
+      this.items = this.items.filter(i => i.id !== id);
+      if (this.editingId === id) this.cancel();
+      await this.persist();
+    },
+
+    async persist() {
+      try {
+        const clean = this.items.map(({ _faviconFailed, ...i }) => i);
+        await api.put('/api/homepage', clean);
+        window.dispatchEvent(new CustomEvent('teploy:links-changed'));
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
     },
   }));
 });
