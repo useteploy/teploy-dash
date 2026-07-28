@@ -75,6 +75,11 @@
     button:hover:not(:disabled) { background: rgba(88,166,255,.1); }
     button:active:not(:disabled) { transform: translateY(1px); }
     button:disabled { opacity: 0.6; cursor: default; }
+    /* A class selector beats the UA's [hidden] rule, so an element left hidden
+       (the SSO button before we know whether SSO is on) would still paint as an
+       empty box. Make the attribute win. */
+    [hidden] { display: none !important; }
+
     a.sso {
       display: block;
       width: 100%;

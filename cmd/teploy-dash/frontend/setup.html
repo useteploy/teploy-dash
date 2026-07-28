@@ -63,6 +63,11 @@
     button:hover:not(:disabled) { background: rgba(88,166,255,.1); }
     button:active:not(:disabled) { transform: translateY(1px); }
     button:disabled { opacity: 0.6; cursor: default; }
+    /* A class selector beats the UA's [hidden] rule, so an element left hidden
+       (the SSO button before we know whether SSO is on) would still paint as an
+       empty box. Make the attribute win. */
+    [hidden] { display: none !important; }
+
     .error { margin-top: 12px; color: #f85149; font-size: 12px; }
     .hint { margin: -10px 0 16px; color: #6e7681; font-size: 10px; }
     @media (max-width: 440px) { .card { padding: 26px 22px; } }

@@ -85,6 +85,27 @@ type fleetCache struct {
 	// app *status* fresh; consumers that only read stable facts (where a sibling
 	// dashboard lives) want the last known answer rather than none.
 	lastGood []remote.AppState
+	// refreshing is a single-flight latch: a background refresh SSHes every
+	// server, so concurrent stale reads must not each start their own sweep.
+	refreshing bool
+}
+
+// beginRefresh claims the right to run a background refresh. Returns false when
+// one is already in flight, so callers simply serve what they have.
+func (fc *fleetCache) beginRefresh() bool {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if fc.refreshing {
+		return false
+	}
+	fc.refreshing = true
+	return true
+}
+
+func (fc *fleetCache) endRefresh() {
+	fc.mu.Lock()
+	fc.refreshing = false
+	fc.mu.Unlock()
 }
 
 // snapshot returns the last successfully collected fleet regardless of age.
@@ -219,6 +240,27 @@ func New(config Config) *Server {
 func (s *Server) ListenAndServe(addr string) error {
 	s.warmFleet()
 	return s.httpServer(addr).ListenAndServe()
+}
+
+// refreshFleetAsync refreshes the fleet behind a request. Single-flighted, so a
+// burst of stale reads causes one sweep, not one per request. Uses a background
+// context: the refresh must outlive the request that triggered it, or a client
+// navigating away would cancel it and the cache would never re-warm.
+func (s *Server) refreshFleetAsync() {
+	if !cli.IsInstalled() || !s.fleet.beginRefresh() {
+		return
+	}
+	go func() {
+		defer s.fleet.endRefresh()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		apps, err := s.collectFleetApps(ctx)
+		if err != nil {
+			log.Printf("[fleet] background refresh failed (serving last known state): %v", err)
+			return
+		}
+		s.fleet.set(apps)
+	}()
 }
 
 // warmFleet populates the fleet cache once in the background at startup.
@@ -849,6 +891,19 @@ func (s *Server) routes() {
 func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 	if apps, ok := s.fleet.get(); ok {
 		writeData(w, apps)
+		return
+	}
+
+	// Stale-while-revalidate: a full sweep SSHes every server and can take tens
+	// of seconds, which is the whole delay when opening the deployments page.
+	// Serve the last known fleet at once and refresh behind the request, so the
+	// page paints immediately and is current a moment later. Deliberately not a
+	// background ticker — that would SSH the fleet forever even when nobody is
+	// looking; this only refreshes in response to real use.
+	if stale := s.fleet.snapshot(); len(stale) > 0 {
+		s.refreshFleetAsync()
+		w.Header().Set("X-Fleet-Cache", "stale")
+		writeData(w, stale)
 		return
 	}
 
@@ -2466,8 +2521,19 @@ func (s *Server) handleNav(w http.ResponseWriter, r *http.Request) {
 
 // ── Frontend ──────────────────────────────────────────────────────────────
 
-// handleLoginPage serves the standalone login.html page.
+// handleLoginPage serves the standalone login.html page. An already-signed-in
+// visitor is sent to the dashboard instead: /login is auth-exempt so the page
+// would otherwise render a sign-in form to someone whose session works fine,
+// which reads as being signed out.
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if s.gate != nil {
+		if cookie, err := r.Cookie(sessionCookie); err == nil {
+			if _, ok := s.gate.lookupSession(cookie.Value); ok {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
+		}
+	}
 	s.serveStandalonePage(w, "login.html")
 }
 
