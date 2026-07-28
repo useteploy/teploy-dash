@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/useteploy/teploy-dash/internal/remote"
 )
@@ -70,5 +71,23 @@ func TestNavCurrentProductHasNoURL(t *testing.T) {
 	s := navServer(t, nil)
 	if got := navURL(s.teployNav("dash"), "dash"); got != "" {
 		t.Fatalf("current product url = %q, want empty", got)
+	}
+}
+
+// Sibling discovery must not blink out when the fleet cache passes its TTL —
+// a sibling's address is a stable fact, and the TTL exists to keep app status
+// fresh, which nav never reads.
+func TestNavSurvivesStaleFleetCache(t *testing.T) {
+	s := New(Config{DataDir: t.TempDir(), NoAuth: true})
+	s.fleet.set([]remote.AppState{
+		{App: "observe", Server: "infra", Domain: "observe.acme.com", CurrentPort: 3000, Status: "running"},
+	})
+	// Expire the cache the way time would.
+	s.fleet.builtAt = time.Now().Add(-24 * time.Hour)
+	if _, fresh := s.fleet.get(); fresh {
+		t.Fatal("precondition: cache should read as expired")
+	}
+	if got := navURL(s.teployNav("dash"), "observe"); got != "https://observe.acme.com" {
+		t.Fatalf("observe url = %q, want it to survive an expired cache", got)
 	}
 }

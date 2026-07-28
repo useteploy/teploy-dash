@@ -81,6 +81,17 @@ type fleetCache struct {
 	apps    []remote.AppState
 	builtAt time.Time
 	ttl     time.Duration
+	// lastGood survives both TTL expiry and invalidation. The TTL exists to keep
+	// app *status* fresh; consumers that only read stable facts (where a sibling
+	// dashboard lives) want the last known answer rather than none.
+	lastGood []remote.AppState
+}
+
+// snapshot returns the last successfully collected fleet regardless of age.
+func (fc *fleetCache) snapshot() []remote.AppState {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.lastGood
 }
 
 func (fc *fleetCache) get() ([]remote.AppState, bool) {
@@ -100,6 +111,7 @@ func (fc *fleetCache) set(apps []remote.AppState) {
 		fc.builtAt = time.Time{} // zero time forces cache miss on next read
 	} else {
 		fc.builtAt = time.Now()
+		fc.lastGood = apps
 	}
 }
 
@@ -2384,8 +2396,8 @@ func (s *Server) teployNav(current string) map[string]interface{} {
 // nav stays cheap; a cold cache simply means no inferred URL until the next
 // fleet refresh.
 func (s *Server) discoverSibling(product string) string {
-	fleet, ok := s.fleet.get()
-	if !ok {
+	fleet := s.fleet.snapshot()
+	if len(fleet) == 0 {
 		return ""
 	}
 	return discoverSiblingURL(product, fleet, func(server string) string {
