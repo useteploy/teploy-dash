@@ -450,7 +450,10 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// used by non-browser clients that have no session cookie.
 		switch r.URL.Path {
 		case "/api/health", "/login", "/api/login", "/api/logout", "/api/login/methods",
-			"/oidc/login", "/oidc/callback", "/status", "/api/status", "/api/mcp":
+			"/oidc/login", "/oidc/callback", "/status", "/api/status", "/api/mcp",
+			// The browser requests the tab icon before anyone has signed in; it
+			// is a static brand asset and discloses nothing.
+			"/favicon.svg", "/favicon.ico":
 			next.ServeHTTP(w, r)
 			return
 		}

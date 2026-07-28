@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <title>teploy dash</title>
   <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('teploy-theme') || 'dark');</script>
   <link rel="stylesheet" href="/css/style.css">
@@ -27,8 +28,9 @@
       <span class="ps-caret" x-show="siblings.length>0" x-cloak>&#9662;</span>
     </button>
     <div class="ps-menu" x-show="open" x-transition.opacity x-cloak>
-      <template x-for="a in apps" :key="a.key">
-        <a class="ps-item" :class="{ current: a.key===current }" :href="a.url||null" x-text="a.label" @click="if(a.key===current) $event.preventDefault()"></a>
+      <!-- Only the other dashboards: the chip already names the current one. -->
+      <template x-for="a in siblings" :key="a.key">
+        <a class="ps-item" :href="a.url" x-text="a.label"></a>
       </template>
     </div>
   </div>
