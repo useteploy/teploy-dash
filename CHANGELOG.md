@@ -4,6 +4,19 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-07-27
+
+### Added
+- The cross-product switcher configures itself. Dash already SSH-polls the
+  whole fleet, so it now infers a sibling's URL from deploy state instead of
+  requiring `TEPLOY_NAV_*` for products it can already see: a running app named
+  `observe`/`ship` resolves to its domain, or to the server address and
+  published port when it has none (`ingress: host`). Reserved documentation
+  domains (RFC 2606, e.g. the sample `observe.example.com`) are rejected rather
+  than linked. `TEPLOY_NAV_*` still wins when set — needed for a product behind
+  a tunnel, or on a server this dashboard does not manage — and discovery reads
+  only the warm fleet cache, so `/api/nav` never triggers an SSH sweep.
+
 ## [0.1.12] - 2026-07-27
 
 ### Fixed

@@ -2330,7 +2330,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // app (marked, no link) plus any sibling Teploy dashboards whose URL is
 // configured via TEPLOY_NAV_{DASH,OBSERVE,SHIP}_URL. Same env convention across
 // Dash, Observe, and Ship, so one set of vars drives the switcher everywhere.
-func teployNav(current string) map[string]interface{} {
+func (s *Server) teployNav(current string) map[string]interface{} {
 	products := []struct{ key, label, env string }{
 		{"dash", "Dash", "TEPLOY_NAV_DASH_URL"},
 		{"observe", "Observe", "TEPLOY_NAV_OBSERVE_URL"},
@@ -2338,20 +2338,92 @@ func teployNav(current string) map[string]interface{} {
 	}
 	apps := make([]map[string]string, 0, len(products))
 	for _, p := range products {
-		url := strings.TrimSpace(os.Getenv(p.env))
 		if p.key == current {
 			apps = append(apps, map[string]string{"key": p.key, "label": p.label, "url": ""})
-		} else if url != "" {
+			continue
+		}
+		// An explicit URL always wins: the operator may front a product with a
+		// domain, a tunnel, or a port this dashboard can't infer.
+		url := strings.TrimSpace(os.Getenv(p.env))
+		if url == "" {
+			url = s.discoverSibling(p.key)
+		}
+		if url != "" {
 			apps = append(apps, map[string]string{"key": p.key, "label": p.label, "url": url})
 		}
 	}
 	return map[string]interface{}{"current": current, "apps": apps}
 }
 
+// discoverSibling finds a sibling product already deployed on this fleet, so the
+// switcher configures itself for the common case where all three were deployed
+// with teploy. Reads only the warm fleet cache — never triggers an SSH sweep, so
+// nav stays cheap; a cold cache simply means no inferred URL until the next
+// fleet refresh.
+func (s *Server) discoverSibling(product string) string {
+	fleet, ok := s.fleet.get()
+	if !ok {
+		return ""
+	}
+	return discoverSiblingURL(product, fleet, func(server string) string {
+		if srv, found := s.lookupServer(server); found {
+			return srv.Host
+		}
+		return ""
+	})
+}
+
+// discoverSiblingURL is the pure core of sibling discovery: it derives a URL
+// from fleet state alone, so it is directly testable without SSH or the CLI.
+func discoverSiblingURL(product string, fleet []remote.AppState, hostOf func(server string) string) string {
+	for _, app := range fleet {
+		if app.Status != "running" || !isProductApp(app.App, product) {
+			continue
+		}
+		// A real domain is the best URL: it survives the app moving servers.
+		for _, d := range strings.Split(app.Domain, ",") {
+			if d = strings.TrimSpace(d); d != "" && !isPlaceholderDomain(d) {
+				return "https://" + d
+			}
+		}
+		// No usable domain (ingress: host, or a docs-placeholder domain) — fall
+		// back to the server's own address and published port.
+		if host := hostOf(app.Server); host != "" && app.CurrentPort > 0 {
+			return fmt.Sprintf("http://%s:%d", host, app.CurrentPort)
+		}
+	}
+	return ""
+}
+
+// isProductApp reports whether a deployed app name denotes the given Teploy
+// product. Deliberately narrow — an app merely containing "ship" (say,
+// "shipping-api") is not Teploy Ship.
+func isProductApp(appName, product string) bool {
+	switch strings.ToLower(strings.TrimSpace(appName)) {
+	case product, "teploy-" + product:
+		return true
+	}
+	return false
+}
+
+// isPlaceholderDomain reports whether a domain is one of the reserved
+// documentation names (RFC 2606) rather than a real host. Teploy's own sample
+// configs ship `observe.example.com`, and linking the switcher at that would
+// send the operator nowhere.
+func isPlaceholderDomain(domain string) bool {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	for _, suffix := range []string{".example.com", ".example.net", ".example.org", ".example", ".invalid", ".test", ".localhost", ".local"} {
+		if strings.HasSuffix(d, suffix) {
+			return true
+		}
+	}
+	return d == "localhost"
+}
+
 // handleNav serves the cross-product dashboard switcher config.
 func (s *Server) handleNav(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	writeJSON(w, teployNav("dash"))
+	writeJSON(w, s.teployNav("dash"))
 }
 
 // ── Frontend ──────────────────────────────────────────────────────────────
