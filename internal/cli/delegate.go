@@ -17,6 +17,11 @@ import (
 // `teploy` subprocess (e.g. a stalled SSH session) can't block a dashboard
 // request forever. It's well above a slow first-time deploy with a large image
 // pull, so it never aborts legitimate work — it only backstops a genuine hang.
+//
+// It is a CEILING, not the effective deadline: a caller's context can be
+// shorter and wins (the fleet refresh allows 60s). Timeout errors therefore
+// report the elapsed time rather than this constant, which otherwise claimed
+// every fleet timeout took 20 minutes when it had given up after one.
 const cliTimeout = 20 * time.Minute
 
 // Result holds the output of a CLI command.
@@ -137,6 +142,7 @@ func Run(args ...string) (*Result, error) {
 // Machine reads use this so a canceled HTTP/fleet request also stops its CLI
 // subprocess instead of waiting for the global delegate timeout.
 func RunContext(ctx context.Context, args ...string) (*Result, error) {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 
@@ -154,7 +160,7 @@ func RunContext(ctx context.Context, args ...string) (*Result, error) {
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return result, fmt.Errorf("teploy %s timed out after %s", strings.Join(args, " "), cliTimeout)
+			return result, fmt.Errorf("teploy %s timed out after %s", strings.Join(args, " "), time.Since(started).Round(time.Second))
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
@@ -193,6 +199,7 @@ func UnsupportedCommand(result *Result) bool {
 // the CLI without putting them on the argv, where they'd show in the host's
 // process list.
 func RunWithStdin(stdin string, args ...string) (*Result, error) {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
 
@@ -206,7 +213,7 @@ func RunWithStdin(stdin string, args ...string) (*Result, error) {
 	result := &Result{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return result, fmt.Errorf("teploy %s timed out after %s", strings.Join(args, " "), cliTimeout)
+			return result, fmt.Errorf("teploy %s timed out after %s", strings.Join(args, " "), time.Since(started).Round(time.Second))
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
