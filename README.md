@@ -33,8 +33,19 @@ docker run -d -p 3456:3456 \
 
 ### Install script
 
+Downloads the installer from the latest release (not the mutable `main`
+branch) and verifies its SHA-256 against the release's `checksums.txt`
+before executing it:
+
 ```bash
-curl -sL https://raw.githubusercontent.com/useteploy/teploy-dash/main/scripts/install.sh | sh
+(
+  set -e
+  curl -fsSLO https://github.com/useteploy/teploy-dash/releases/latest/download/install.sh
+  curl -fsSLO https://github.com/useteploy/teploy-dash/releases/latest/download/checksums.txt
+  grep " install.sh\$" checksums.txt > checksum.txt
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum -c checksum.txt || exit 1; else shasum -a 256 -c checksum.txt || exit 1; fi
+  sh install.sh
+)
 ```
 
 On Linux the script also installs a `teploy-dash.service` systemd unit and
@@ -60,8 +71,9 @@ teploy-dash
 ```
 
 Open `http://localhost:3456`. On first launch you'll be taken to a setup page
-to create your username and password. Credentials are stored as a bcrypt hash
-in `/var/teploy-dash/auth.json`.
+to create your username and password. Credentials are stored as bcrypt hashes
+in `/var/teploy-dash/users.json` (a legacy single-user `auth.json` from older
+versions is migrated into it automatically on first load).
 
 You can also pre-set a password via environment variable (useful for Docker or
 automated deploys — the setup page is skipped when this is present):
@@ -177,7 +189,7 @@ return 404.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TEPLOY_DASH_USER` | `admin` | Username used when `TEPLOY_DASH_PASSWORD` is set (env-var bootstrap mode). |
-| `TEPLOY_DASH_PASSWORD` | _(optional)_ | Bootstrap password. If set, credentials are taken from this env var. If absent and no `auth.json` exists, the first run shows the setup page to create an account. |
+| `TEPLOY_DASH_PASSWORD` | _(optional)_ | Bootstrap password. If set, credentials are taken from this env var. If absent and no `users.json` exists, the first run shows the setup page to create an account. |
 | `TEPLOY_DASH_PUBLIC_STATUS` | _(off)_ | Set to `1`/`true` to enable the public `/status` page (same as `--public-status`). |
 | `TEPLOY_DASH_TRUSTED_PROXY` | _(none)_ | Comma-separated proxy IPs/CIDRs. When set, the real client IP is read from `X-Forwarded-For` (for rate-limiting) and `X-Forwarded-Proto` is trusted for the secure-cookie flag. Set this when running behind Caddy/nginx. |
 | `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |

@@ -79,11 +79,15 @@
     <h1>Secure your dashboard</h1>
     <div class="subtitle">Create the local account for this Teploy instance.</div>
 
+    <label for="bootstrap_token">Bootstrap token</label>
+    <input type="text" id="bootstrap_token" autocomplete="off" autofocus>
+    <p class="hint">Printed to the server log when teploy-dash started.</p>
+
     <label for="username">Username</label>
     <input type="text" id="username" value="admin" autocomplete="username">
 
     <label for="password">Password</label>
-    <input type="password" id="password" autocomplete="new-password" autofocus>
+    <input type="password" id="password" autocomplete="new-password">
     <p class="hint">At least 8 characters.</p>
 
     <label for="confirm">Confirm password</label>
@@ -95,16 +99,19 @@
 
   <script>
     const btn = document.getElementById('btn');
+    const tokenEl    = document.getElementById('bootstrap_token');
     const usernameEl = document.getElementById('username');
     const passwordEl = document.getElementById('password');
     const confirmEl  = document.getElementById('confirm');
     const err        = document.getElementById('err');
 
     async function setup() {
+      const bootstrap_token  = tokenEl.value.trim();
       const username         = usernameEl.value.trim() || 'admin';
       const password         = passwordEl.value;
       const confirm_password = confirmEl.value;
 
+      if (!bootstrap_token) { showErr('Bootstrap token is required — check the server log.'); return; }
       if (!password) { showErr('Password is required.'); return; }
       if (password.length < 8) { showErr('Password must be at least 8 characters.'); return; }
       if (password !== confirm_password) { showErr('Passwords do not match.'); return; }
@@ -116,7 +123,7 @@
         const resp = await fetch('/api/setup', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({username, password, confirm_password}),
+          body: JSON.stringify({bootstrap_token, username, password, confirm_password}),
         });
         if (resp.ok) {
           location.href = '/';
@@ -137,7 +144,7 @@
     }
 
     btn.addEventListener('click', setup);
-    [usernameEl, passwordEl, confirmEl].forEach(el =>
+    [tokenEl, usernameEl, passwordEl, confirmEl].forEach(el =>
       el.addEventListener('keydown', e => { if (e.key === 'Enter') setup(); })
     );
   </script>

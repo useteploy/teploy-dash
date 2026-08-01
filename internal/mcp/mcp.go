@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -68,9 +69,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// DASH-012: unknown top-level fields are tolerated (JSON-RPC extensions
+	// legitimately add them), but the body must decode to exactly one JSON
+	// value and declare jsonrpc 2.0 — a second concatenated object or a
+	// missing/wrong version previously passed straight through to dispatch.
+	dec := json.NewDecoder(r.Body)
 	var req rpcRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := dec.Decode(&req); err != nil {
 		writeRPC(w, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
+		return
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		writeRPC(w, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32700, Message: "parse error: request body must contain exactly one JSON value"}})
+		return
+	}
+	if req.JSONRPC != "2.0" {
+		writeRPC(w, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: `invalid request: "jsonrpc" must be "2.0"`}})
 		return
 	}
 

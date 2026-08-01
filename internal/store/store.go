@@ -38,6 +38,12 @@ type Monitor struct {
 	// HTTP-specific
 	ExpectedStatus int    `json:"expected_status,omitempty"`
 	Method         string `json:"method,omitempty"`
+	// AllowInternal opts this monitor out of the default network policy that
+	// rejects loopback/private/link-local/cloud-metadata targets (DASH-010).
+	// Internal fleet monitoring (e.g. over Tailscale) is a real, supported use
+	// case — this makes that reachability an explicit admin choice per
+	// monitor rather than a default every monitor gets.
+	AllowInternal bool `json:"allow_internal,omitempty"`
 }
 
 // UptimeStats represents uptime statistics for a monitor over a period.

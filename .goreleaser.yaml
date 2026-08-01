@@ -30,6 +30,15 @@ archives:
 
 checksum:
   name_template: 'checksums.txt'
+  # DASH-009: publish scripts/install.sh's own checksum alongside the binary
+  # archives', so the documented curl|sh install can be verified before
+  # execution instead of trusting a mutable-branch fetch outright.
+  extra_files:
+    - glob: ./scripts/install.sh
+
+release:
+  extra_files:
+    - glob: ./scripts/install.sh
 
 snapshot:
   version_template: '{{ incpatch .Version }}-next'

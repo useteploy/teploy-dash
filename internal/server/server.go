@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -62,6 +64,10 @@ type Config struct {
 	Frontend fs.FS
 	// Version is the dash build version (for MCP serverInfo).
 	Version string
+	// Backend is the active store backend ("nucleus" or "file"), surfaced
+	// through /api/health so a silent Nucleus-connect-failure fallback stays
+	// visible after the startup log line has scrolled away (DASH-003).
+	Backend string
 	// Operation hooks are primarily for tests and alternate CLI packaging. The
 	// production defaults resolve servers.yml and execute the bundled CLI.
 	OperationResolver  operation.Resolver
@@ -157,6 +163,9 @@ type Server struct {
 	remoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
 	remoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
 	capabilitiesCache  capabilityCache
+
+	httpSrvMu sync.Mutex
+	httpSrv   *http.Server
 }
 
 // New creates a new server.
@@ -236,10 +245,34 @@ func New(config Config) *Server {
 	return s
 }
 
-// ListenAndServe starts the HTTP server.
+// ListenAndServe starts the HTTP server, storing the *http.Server so Shutdown
+// can later stop it accepting new connections and drain in-flight requests.
+// Returns nil on a normal Shutdown-triggered close (http.ErrServerClosed),
+// matching the http.Server convention that callers shouldn't treat that as a
+// real error.
 func (s *Server) ListenAndServe(addr string) error {
 	s.warmFleet()
-	return s.httpServer(addr).ListenAndServe()
+	srv := s.httpServer(addr)
+	s.httpSrvMu.Lock()
+	s.httpSrv = srv
+	s.httpSrvMu.Unlock()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// Shutdown stops the HTTP server from accepting new connections and waits
+// (bounded by ctx) for in-flight requests to finish. Safe to call before
+// ListenAndServe has run (e.g. in tests) — it's then a no-op.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.httpSrvMu.Lock()
+	srv := s.httpSrv
+	s.httpSrvMu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }
 
 // refreshFleetAsync refreshes the fleet behind a request. Single-flighted, so a
@@ -342,7 +375,21 @@ type authGate struct {
 	// enforce RBAC and handlers can attribute actions.
 	sessMu   sync.Mutex
 	sessions map[string]*sessionInfo
+	// bootstrapToken gates account creation while setupRequired is true — a
+	// fresh, remotely-reachable instance would otherwise let ANY visitor claim
+	// the first (admin) account. Generated once in newAuthGate, printed to the
+	// log (never returned in an HTTP response), single-use (setupRequired
+	// flipping false on success makes it moot), and time-limited so an
+	// abandoned setup doesn't stay claimable indefinitely.
+	bootstrapToken       string
+	bootstrapTokenExpiry time.Time
 }
+
+// bootstrapTokenTTL bounds how long a printed setup token remains valid.
+// Long enough for an operator to copy it from the log and finish setup in one
+// sitting; short enough that a token from a log an operator forgot about
+// isn't a standing credential.
+const bootstrapTokenTTL = 30 * time.Minute
 
 // sessionInfo is one live session: which user, what role, and when it expires.
 type sessionInfo struct {
@@ -380,8 +427,36 @@ func newAuthGate(user, pass, credFile string) *authGate {
 	// operator can create the first account.
 	if err := g.loadUsers(); err != nil && pass == "" {
 		g.setupRequired = true
+		g.bootstrapToken = generateBootstrapToken()
+		g.bootstrapTokenExpiry = time.Now().Add(bootstrapTokenTTL)
+		log.Printf("=====================================================================")
+		log.Printf("First-run setup required. Bootstrap token (valid %s): %s", bootstrapTokenTTL, g.bootstrapToken)
+		log.Printf("Enter this token on the /setup page to create the initial admin account.")
+		log.Printf("=====================================================================")
 	}
 	return g
+}
+
+func generateBootstrapToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
+
+// checkBootstrapToken reports whether the supplied token is the live,
+// unexpired bootstrap token. Constant-time compare against a real token; a
+// timing difference on a missing/expired token doesn't disclose anything
+// because there is no valid token to find in that state.
+func (g *authGate) checkBootstrapToken(supplied string) bool {
+	g.credMu.RLock()
+	token, expiry := g.bootstrapToken, g.bootstrapTokenExpiry
+	g.credMu.RUnlock()
+	if token == "" || supplied == "" || time.Now().After(expiry) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(supplied), []byte(token)) == 1
 }
 
 func (g *authGate) newSession(user, role string) string {
@@ -492,10 +567,21 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// used by non-browser clients that have no session cookie.
 		switch r.URL.Path {
 		case "/api/health", "/login", "/api/login", "/api/logout", "/api/login/methods",
-			"/oidc/login", "/oidc/callback", "/status", "/api/status", "/api/mcp",
+			"/status", "/api/status", "/api/mcp",
 			// The browser requests the tab icon before anyone has signed in; it
 			// is a static brand asset and discloses nothing.
 			"/favicon.svg", "/favicon.ico":
+			next.ServeHTTP(w, r)
+			return
+		case "/oidc/login", "/oidc/callback":
+			// Pre-auth SSO endpoints — no session required yet, but still
+			// subject to the same per-IP lockout as password login so they
+			// can't be used to brute-force sign-in or spam the in-flight
+			// OIDC flow map unthrottled.
+			if g.lockedOut(g.clientIP(r)) {
+				http.Error(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -573,7 +659,7 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := strictDecode(r, &body); err != nil {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -607,9 +693,14 @@ func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Username        string `json:"username"`
 		Password        string `json:"password"`
 		ConfirmPassword string `json:"confirm_password"`
+		BootstrapToken  string `json:"bootstrap_token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := strictDecode(r, &body); err != nil {
 		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if !g.checkBootstrapToken(body.BootstrapToken) {
+		jsonError(w, "missing or invalid bootstrap token — check the server log", http.StatusUnauthorized)
 		return
 	}
 	if body.Username == "" {
@@ -641,7 +732,7 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 		NewPassword     string `json:"new_password"`
 		ConfirmPassword string `json:"confirm_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := strictDecode(r, &body); err != nil {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -1150,7 +1241,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			Key   string `json:"key"`
 			Value string `json:"value"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		strictDecode(r, &body)
 		if !validEnvKey(body.Key) {
 			writeError(w, "invalid env var name")
 			return
@@ -1267,7 +1358,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			Purge    bool   `json:"purge"`
 			Redirect string `json:"redirect"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		strictDecode(r, &body)
 		s.enqueueOperation(w, r, operation.Request{
 			Kind: operation.KindRemove, Server: serverName, App: appName,
 			Purge: body.Purge, Redirect: body.Redirect,
@@ -1486,7 +1577,7 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		Server   string            `json:"server"`
 		Vars     map[string]string `json:"vars"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := strictDecode(r, &body); err != nil {
 		writeError(w, "invalid request body")
 		return
 	}
@@ -1632,7 +1723,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Domain string `json:"domain"`
 		Port   int    `json:"port"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	strictDecode(r, &body)
 
 	s.enqueueOperation(w, r, operation.Request{
 		Kind: operation.KindDeploy, Server: body.Server, App: body.App,
@@ -1718,7 +1809,7 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		if err := strictDecode(r, &body); err != nil || body.Name == "" {
 			writeError(w, "name is required")
 			return
 		}
@@ -1775,7 +1866,7 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 			var body struct {
 				Name string `json:"name"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+			if err := strictDecode(r, &body); err != nil || body.Name == "" {
 				writeError(w, "name is required")
 				return
 			}
@@ -1827,7 +1918,7 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			App string `json:"app"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.App == "" {
+		if err := strictDecode(r, &body); err != nil || body.App == "" {
 			writeError(w, "app is required")
 			return
 		}
@@ -1857,7 +1948,7 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		if err := strictDecode(r, &body); err != nil || body.Name == "" {
 			writeError(w, "name is required")
 			return
 		}
@@ -1888,7 +1979,7 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		if err := strictDecode(r, &body); err != nil || body.Name == "" {
 			writeError(w, "name is required")
 			return
 		}
@@ -1974,7 +2065,7 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 			var body struct {
 				App string `json:"app"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.App == "" {
+			if err := strictDecode(r, &body); err != nil || body.App == "" {
 				writeError(w, "app is required")
 				return
 			}
@@ -2033,7 +2124,7 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 			User string `json:"user"`
 			Role string `json:"role"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		strictDecode(r, &body)
 		result, err := cli.ServerAdd(body.Name, body.Host, body.User, body.Role)
 		if err != nil {
 			writeError(w, err.Error())
@@ -2085,7 +2176,7 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 			User string `json:"user"`
 			Role string `json:"role"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Host == "" {
+		if err := strictDecode(r, &body); err != nil || body.Host == "" {
 			writeError(w, "host is required")
 			return
 		}
@@ -2187,7 +2278,7 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		})
 	case "POST":
 		var cfg alert.Config
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		if err := strictDecode(r, &cfg); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}
@@ -2229,7 +2320,7 @@ func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 			Username string `json:"username"`
 			Password string `json:"password"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		strictDecode(r, &body)
 		// Pass the password over stdin (--token reads it there) instead of on
 		// the argv, where it would be visible in the host's process list.
 		result, err := cli.RunWithStdin(body.Password, "registry", "login", body.Server, "--username", body.Username, "--token")
@@ -2289,7 +2380,7 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 
 	case "POST":
 		var m store.Monitor
-		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		if err := strictDecode(r, &m); err != nil {
 			http.Error(w, "invalid request body", 400)
 			return
 		}
@@ -2416,7 +2507,11 @@ func (s *Server) handleCLIStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"status": "ok"})
+	backend := s.config.Backend
+	if backend == "" {
+		backend = "file"
+	}
+	writeJSON(w, map[string]string{"status": "ok", "backend": backend})
 }
 
 // teployNav returns the cross-product dashboard switcher entries: the current
@@ -2687,7 +2782,7 @@ func (s *Server) handleHomepage(w http.ResponseWriter, r *http.Request) {
 		writeData(w, data.Items)
 	case "PUT":
 		var items []HomepageItem
-		if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+		if err := strictDecode(r, &items); err != nil {
 			writeError(w, "invalid JSON: "+err.Error())
 			return
 		}
@@ -2705,6 +2800,29 @@ func (s *Server) handleHomepage(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+// strictDecode decodes exactly one JSON object from r.Body into dst,
+// rejecting unknown fields and a second concatenated JSON value. The
+// per-request body-size cap is already applied globally by
+// limitMutationBodies (see handler()), so this only tightens what shape is
+// accepted, not how much is read. DASH-008: request handlers previously used
+// a bare json.NewDecoder(...).Decode(), which silently accepted mistyped
+// client fields and multiple concatenated JSON values.
+func strictDecode(r *http.Request, dst any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain exactly one JSON value")
+		}
+		return err
+	}
+	return nil
+}
 
 func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -2752,19 +2870,25 @@ func validEnvKey(k string) bool {
 	return true
 }
 
+// writeRawJSON wraps a delegated CLI command's stdout (expected to be JSON,
+// since the caller passed --json) as {"data": ...}. Unparseable output means
+// the CLI produced something other than the JSON its own flag promised — a
+// version mismatch, a stray warning on stdout, or corrupted output — so it is
+// reported as a typed 502 rather than concatenated raw into the response
+// body, which could itself produce invalid JSON (or, if the CLI output were
+// ever attacker-influenced, a response-shape injection).
 func writeRawJSON(w http.ResponseWriter, raw string) {
-	w.Header().Set("Content-Type", "application/json")
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		w.Write([]byte(`{"data":null}`))
+		writeData(w, nil)
 		return
 	}
 	var parsed interface{}
-	if json.Unmarshal([]byte(raw), &parsed) == nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"data": parsed})
-	} else {
-		w.Write([]byte(`{"data":` + raw + `}`))
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		writeErrorStatus(w, "delegated command returned non-JSON output", http.StatusBadGateway)
+		return
 	}
+	writeData(w, parsed)
 }
 
 // ── Restore Tests ─────────────────────────────────────────────────────────
@@ -2793,7 +2917,7 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 
 	case "POST":
 		var t store.RestoreTest
-		if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		if err := strictDecode(r, &t); err != nil {
 			http.Error(w, "invalid request body", 400)
 			return
 		}

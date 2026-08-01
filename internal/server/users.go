@@ -194,11 +194,25 @@ func (g *authGate) loadUsers() error {
 	return nil
 }
 
-// saveUsersLocked writes users.json atomically. The caller must hold g.credMu
-// (read or write).
+// saveUsersLocked writes users.json atomically from the live map. The caller
+// must hold g.credMu (read or write). Only safe to call when the live map is
+// already the state that should be durable — see saveUsersFile for the
+// copy-on-write path every mutating handler below actually uses.
 func (g *authGate) saveUsersLocked() error {
+	return saveUsersFile(g.usersFile, g.users)
+}
+
+// saveUsersFile writes the given user map to path atomically. Free-standing
+// (doesn't touch authGate state) so a mutation can persist a CANDIDATE map
+// and only publish it into the live g.users after the write succeeds —
+// otherwise a failed rename/write left the in-memory mutation applied while
+// the handler reported an error, so the running process and users.json
+// silently diverged (DASH-005). For createUser specifically this also keeps
+// g.setupRequired from flipping to false before the first account is
+// durably saved (DASH-006).
+func saveUsersFile(path string, users map[string]*dashUser) error {
 	var f usersFileFormat
-	for _, u := range g.users {
+	for _, u := range users {
 		f.Users = append(f.Users, *u)
 	}
 	sort.Slice(f.Users, func(i, j int) bool { return f.Users[i].Username < f.Users[j].Username })
@@ -206,14 +220,27 @@ func (g *authGate) saveUsersLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(g.usersFile), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	tmp := g.usersFile + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, g.usersFile)
+	return os.Rename(tmp, path)
+}
+
+// cloneUsersLocked returns an independent copy of the live user map (new map,
+// new *dashUser pointers) so a mutation can be built and persisted without
+// any live state changing until the write succeeds. Caller must hold
+// g.credMu.
+func cloneUsersLocked(users map[string]*dashUser) map[string]*dashUser {
+	out := make(map[string]*dashUser, len(users))
+	for k, v := range users {
+		cp := *v
+		out[k] = &cp
+	}
+	return out
 }
 
 // authenticate verifies username+password. It always performs a bcrypt compare
@@ -273,9 +300,14 @@ func (g *authGate) createUser(username, password, role string) error {
 	if _, exists := g.users[username]; exists {
 		return fmt.Errorf("user %q already exists", username)
 	}
-	g.users[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: normalizeRole(role)}
+	candidate := cloneUsersLocked(g.users)
+	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: normalizeRole(role)}
+	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+		return err
+	}
+	g.users = candidate
 	g.setupRequired = false
-	return g.saveUsersLocked()
+	return nil
 }
 
 // setPassword replaces a user's password. If the username isn't in the store
@@ -295,15 +327,20 @@ func (g *authGate) setPassword(username, password string) error {
 	}
 	g.credMu.Lock()
 	defer g.credMu.Unlock()
-	u := g.users[username]
+	candidate := cloneUsersLocked(g.users)
+	u := candidate[username]
 	if u == nil {
 		// Persist the previously-env-only admin.
 		u = &dashUser{Username: username, Role: RoleAdmin}
-		g.users[username] = u
+		candidate[username] = u
 	}
 	u.PasswordHash = string(hash)
+	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+		return err
+	}
+	g.users = candidate
 	g.setupRequired = false
-	return g.saveUsersLocked()
+	return nil
 }
 
 // setRole changes a user's role, refusing to demote the last remaining admin
@@ -319,8 +356,13 @@ func (g *authGate) setRole(username, role string) error {
 	if u.Role == RoleAdmin && role != RoleAdmin && g.countAdminsLocked() <= 1 {
 		return fmt.Errorf("cannot demote the last admin")
 	}
-	u.Role = role
-	return g.saveUsersLocked()
+	candidate := cloneUsersLocked(g.users)
+	candidate[username].Role = role
+	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+		return err
+	}
+	g.users = candidate
+	return nil
 }
 
 // deleteUser removes an account, refusing to remove the last remaining admin.
@@ -334,8 +376,13 @@ func (g *authGate) deleteUser(username string) error {
 	if u.Role == RoleAdmin && g.countAdminsLocked() <= 1 {
 		return fmt.Errorf("cannot remove the last admin")
 	}
-	delete(g.users, username)
-	return g.saveUsersLocked()
+	candidate := cloneUsersLocked(g.users)
+	delete(candidate, username)
+	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+		return err
+	}
+	g.users = candidate
+	return nil
 }
 
 func (g *authGate) countAdminsLocked() int {
@@ -410,7 +457,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			Password string `json:"password"`
 			Role     string `json:"role"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}
@@ -468,7 +515,7 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Role string `json:"role"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}
@@ -485,7 +532,7 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Password string `json:"password"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}

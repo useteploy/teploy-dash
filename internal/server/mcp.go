@@ -301,7 +301,7 @@ func (s *Server) handleMCPTokens(w http.ResponseWriter, r *http.Request) {
 			Name     string `json:"name"`
 			ReadOnly bool   `json:"read_only"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}

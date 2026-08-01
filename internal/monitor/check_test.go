@@ -21,7 +21,7 @@ func TestCheckHTTP_ExpectedStatusExactMatch(t *testing.T) {
 	}{
 		{"expect 200 get 200", 200, 200, "up"},
 		{"expect 201 get 201", 201, 201, "up"},
-		{"expect 401 get 401", 401, 401, "up"},   // would be "down" under old 2xx/3xx rule
+		{"expect 401 get 401", 401, 401, "up"}, // would be "down" under old 2xx/3xx rule
 		{"expect 200 get 500", 500, 200, "down"},
 		{"expect 201 get 200", 200, 201, "down"}, // would be "up" under old 2xx/3xx rule
 	}
@@ -35,7 +35,7 @@ func TestCheckHTTP_ExpectedStatusExactMatch(t *testing.T) {
 
 			r := New(&mockStore{})
 			got := r.checkHTTP(store.Monitor{
-				ID: "m", Type: "http", Target: srv.URL, ExpectedStatus: tc.expected,
+				ID: "m", Type: "http", Target: srv.URL, ExpectedStatus: tc.expected, AllowInternal: true,
 			})
 			if got.Status != tc.wantStatus {
 				t.Errorf("status %d expect %d: got %q want %q (%s)",
@@ -59,7 +59,7 @@ func TestCheckHTTP_DefaultRange(t *testing.T) {
 			w.WriteHeader(tc.code)
 		}))
 		r := New(&mockStore{})
-		got := r.checkHTTP(store.Monitor{ID: "m", Type: "http", Target: srv.URL})
+		got := r.checkHTTP(store.Monitor{ID: "m", Type: "http", Target: srv.URL, AllowInternal: true})
 		if got.Status != tc.wantStatus {
 			t.Errorf("code %d: got %q want %q", tc.code, got.Status, tc.wantStatus)
 		}
@@ -78,7 +78,7 @@ func TestCheckHTTP_PerMonitorTimeout(t *testing.T) {
 
 	r := New(&mockStore{})
 	got := r.checkHTTP(store.Monitor{
-		ID: "m", Type: "http", Target: srv.URL, Timeout: 50 * time.Millisecond,
+		ID: "m", Type: "http", Target: srv.URL, Timeout: 50 * time.Millisecond, AllowInternal: true,
 	})
 	if got.Status != "down" {
 		t.Errorf("expected timeout -> down, got %q (%s)", got.Status, got.Message)

@@ -54,13 +54,31 @@ type oidcAuth struct {
 	viewerGroup   string
 	defaultRole   string
 
+	// Optional identity allowlist. Empty (the default) means every identity
+	// the IdP authenticates is allowed — fine for a single-tenant issuer the
+	// customer controls. Set either to restrict SSO to specific users, which
+	// matters for a multi-tenant issuer (e.g. plain Google) where
+	// "authenticated by the IdP" does not imply "should have access here".
+	allowedEmails  map[string]bool
+	allowedDomains []string
+
 	initMu   sync.Mutex
 	provider *oidc.Provider
 	verifier *oidc.IDTokenVerifier
 
 	flowMu sync.Mutex
 	flows  map[string]*oidcFlow
+	// flowOrder is insertion order. Every flow shares the same TTL, so
+	// insertion order is also expiry order — storeFlow prunes from the front
+	// instead of sweeping the whole map, and caps total size so a
+	// distributed attacker (many source IPs, each under the per-IP login
+	// rate limit) can't grow this unboundedly.
+	flowOrder []string
 }
+
+// maxOIDCFlows bounds the in-flight SSO login count. Comfortably above any
+// real concurrent-login volume, well below what would trouble memory.
+const maxOIDCFlows = 10000
 
 // oidcFlow is one in-progress login, keyed by the OAuth state parameter and
 // bound to the initiating browser by the state cookie. It carries the nonce and
@@ -84,20 +102,22 @@ func newOIDCAuth() *oidcAuth {
 	scopes := parseOIDCScopes(os.Getenv("TEPLOY_DASH_OIDC_SCOPES"))
 	defaultRole := normalizeRole(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_DEFAULT_ROLE")))
 	o := &oidcAuth{
-		issuer:        issuer,
-		clientID:      clientID,
-		clientSecret:  strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_CLIENT_SECRET")),
-		redirectURL:   strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_REDIRECT_URL")),
-		scopes:        scopes,
-		label:         orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_LABEL")), "Single sign-on"),
-		usernameClaim: orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_USERNAME_CLAIM")), "preferred_username"),
-		roleClaim:     orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_ROLE_CLAIM")), "teploy_role"),
-		groupsClaim:   orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_GROUPS_CLAIM")), "groups"),
-		adminGroup:    strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_ADMIN_GROUP")),
-		editorGroup:   strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_EDITOR_GROUP")),
-		viewerGroup:   strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_VIEWER_GROUP")),
-		defaultRole:   defaultRole,
-		flows:         make(map[string]*oidcFlow),
+		issuer:         issuer,
+		clientID:       clientID,
+		clientSecret:   strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_CLIENT_SECRET")),
+		redirectURL:    strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_REDIRECT_URL")),
+		scopes:         scopes,
+		label:          orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_LABEL")), "Single sign-on"),
+		usernameClaim:  orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_USERNAME_CLAIM")), "preferred_username"),
+		roleClaim:      orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_ROLE_CLAIM")), "teploy_role"),
+		groupsClaim:    orDefault(strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_GROUPS_CLAIM")), "groups"),
+		adminGroup:     strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_ADMIN_GROUP")),
+		editorGroup:    strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_EDITOR_GROUP")),
+		viewerGroup:    strings.TrimSpace(os.Getenv("TEPLOY_DASH_OIDC_VIEWER_GROUP")),
+		defaultRole:    defaultRole,
+		allowedEmails:  parseOIDCAllowlist(os.Getenv("TEPLOY_DASH_OIDC_ALLOWED_EMAILS")),
+		allowedDomains: parseOIDCAllowlistSlice(os.Getenv("TEPLOY_DASH_OIDC_ALLOWED_DOMAINS")),
+		flows:          make(map[string]*oidcFlow),
 	}
 	log.Printf("auth: OIDC SSO enabled (issuer %s)", issuer)
 	return o
@@ -122,6 +142,58 @@ func parseOIDCScopes(raw string) []string {
 		out = append([]string{oidc.ScopeOpenID}, out...)
 	}
 	return out
+}
+
+// parseOIDCAllowlist parses a comma/space-separated list of emails into a
+// lowercased set. Empty input yields a nil (empty) map.
+func parseOIDCAllowlist(raw string) map[string]bool {
+	out := make(map[string]bool)
+	for _, f := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if f = strings.ToLower(strings.TrimSpace(f)); f != "" {
+			out[f] = true
+		}
+	}
+	return out
+}
+
+// parseOIDCAllowlistSlice parses a comma/space-separated list of domains into
+// a lowercased slice.
+func parseOIDCAllowlistSlice(raw string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if f = strings.ToLower(strings.TrimSpace(f)); f != "" && !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// allowed reports whether the authenticated identity may sign in. With no
+// allowlist configured it always returns true.
+func (o *oidcAuth) allowed(claims map[string]any) bool {
+	if len(o.allowedEmails) == 0 && len(o.allowedDomains) == 0 {
+		return true
+	}
+	email := strings.ToLower(claimString(claims["email"]))
+	if email == "" {
+		return false
+	}
+	if o.allowedEmails[email] {
+		return true
+	}
+	at := strings.LastIndex(email, "@")
+	if at < 0 {
+		return false
+	}
+	domain := email[at+1:]
+	for _, d := range o.allowedDomains {
+		if domain == d {
+			return true
+		}
+	}
+	return false
 }
 
 func orDefault(v, def string) string {
@@ -161,20 +233,32 @@ func (o *oidcAuth) oauthConfig(redirectURL string) *oauth2.Config {
 	}
 }
 
-// storeFlow records an in-progress login and prunes expired ones.
+// storeFlow records an in-progress login, pruning expired ones from the front
+// of the insertion-ordered queue and capping total size.
 func (o *oidcAuth) storeFlow(state string, f *oidcFlow) {
 	o.flowMu.Lock()
 	defer o.flowMu.Unlock()
 	now := time.Now()
-	for k, v := range o.flows {
-		if now.After(v.exp) {
-			delete(o.flows, k)
+	for len(o.flowOrder) > 0 {
+		oldest := o.flowOrder[0]
+		if of, ok := o.flows[oldest]; !ok || now.After(of.exp) {
+			o.flowOrder = o.flowOrder[1:]
+			delete(o.flows, oldest)
+			continue
 		}
+		break
+	}
+	if len(o.flowOrder) >= maxOIDCFlows {
+		delete(o.flows, o.flowOrder[0])
+		o.flowOrder = o.flowOrder[1:]
 	}
 	o.flows[state] = f
+	o.flowOrder = append(o.flowOrder, state)
 }
 
-// takeFlow returns and removes the flow for a state (one-time use).
+// takeFlow returns and removes the flow for a state (one-time use). The stale
+// key is left in flowOrder until it reaches the front of the queue in a
+// future storeFlow call, where it is pruned lazily.
 func (o *oidcAuth) takeFlow(state string) (*oidcFlow, bool) {
 	o.flowMu.Lock()
 	defer o.flowMu.Unlock()
@@ -397,15 +481,22 @@ func (g *authGate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		g.oidcFail(w, r, "SSO username is reserved")
 		return
 	}
+	if !o.allowed(claims) {
+		log.Printf("auth: OIDC login denied by allowlist (username %s)", username)
+		g.oidcFail(w, r, "your account is not authorized for SSO on this instance")
+		return
+	}
 	role := o.resolveRole(claims)
 	g.recordSuccess(g.clientIP(r))
 	g.issueSessionCookie(w, r, username, role)
 	http.Redirect(w, r, flow.next, http.StatusFound)
 }
 
-// oidcFail logs nothing sensitive and bounces the user back to the login page
+// oidcFail logs nothing sensitive, counts the attempt against the same per-IP
+// lockout password login uses, and bounces the user back to the login page
 // with a short human-readable message.
 func (g *authGate) oidcFail(w http.ResponseWriter, r *http.Request, msg string) {
+	g.recordFail(g.clientIP(r))
 	http.Redirect(w, r, "/login?error="+url.QueryEscape(msg), http.StatusFound)
 }
 

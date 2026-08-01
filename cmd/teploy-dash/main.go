@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,16 +63,30 @@ func main() {
 		authPass = ""
 	}
 
-	// Initialize store (Nucleus if configured, JSONL fallback)
+	// Initialize store (Nucleus if configured, JSONL fallback). The fallback is
+	// silent by default — a Nucleus outage otherwise degrades persistence,
+	// retention, and multi-replica consistency semantics while the process
+	// still reports healthy. TEPLOY_DASH_REQUIRE_NUCLEUS opts into failing
+	// startup instead, for deployments where that silent downgrade is worse
+	// than not starting. In the default (non-strict) fallback case, the active
+	// backend is surfaced through /api/health rather than only a startup log
+	// line, so it stays visible after the log has scrolled away.
+	requireNucleus := os.Getenv("TEPLOY_DASH_REQUIRE_NUCLEUS") == "1" || os.Getenv("TEPLOY_DASH_REQUIRE_NUCLEUS") == "true"
 	var st store.Store
 	var fileStore *store.FileStore
 	var err error
+	backend := "file"
 	if *nucleusURL != "" {
 		st, err = store.NewNucleusStore(*nucleusURL)
 		if err != nil {
+			if requireNucleus {
+				log.Fatalf("Nucleus required (TEPLOY_DASH_REQUIRE_NUCLEUS) but connection to %s failed: %v", *nucleusURL, err)
+			}
 			log.Printf("Warning: failed to connect to Nucleus (%s), falling back to file store: %v", *nucleusURL, err)
 			fileStore = store.NewFileStore(*dataDir)
 			st = fileStore
+		} else {
+			backend = "nucleus"
 		}
 	} else {
 		fileStore = store.NewFileStore(*dataDir)
@@ -103,6 +119,7 @@ func main() {
 		PublicStatus:   *publicStatus,
 		Frontend:       uiFS,
 		Version:        version,
+		Backend:        backend,
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.
@@ -119,37 +136,72 @@ func main() {
 
 	// Start daily cleanup for file store (removes checks older than store.RetentionDays)
 	// Runs for ANY backend now (previously fileStore-only, so the Nucleus
-	// checks table grew unbounded).
+	// checks table grew unbounded). Tied to cleanupCtx + cleanupWG so shutdown
+	// can cancel and join it: Ticker.Stop() alone doesn't close the channel,
+	// so a bare `for range ticker.C` blocks forever and the goroutine (and
+	// anything it touches on the store) can outlive st.Close().
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	var cleanupWG sync.WaitGroup
 	cleanupTicker := time.NewTicker(24 * time.Hour)
+	cleanupWG.Add(1)
 	go func() {
+		defer cleanupWG.Done()
+		defer cleanupTicker.Stop()
 		if err := st.Cleanup(); err != nil {
 			log.Printf("Cleanup error: %v", err)
 		}
-		for range cleanupTicker.C {
-			if err := st.Cleanup(); err != nil {
-				log.Printf("Cleanup error: %v", err)
+		for {
+			select {
+			case <-cleanupCtx.Done():
+				return
+			case <-cleanupTicker.C:
+				if err := st.Cleanup(); err != nil {
+					log.Printf("Cleanup error: %v", err)
+				}
 			}
 		}
 	}()
 
 	// Start server
+	serverErrCh := make(chan error, 1)
 	go func() {
 		addr := fmt.Sprintf("%s:%d", *host, *port)
 		log.Printf("teploy-dash listening on http://%s", addr)
 		if err := srv.ListenAndServe(addr); err != nil {
-			log.Fatalf("Server error: %v", err)
+			serverErrCh <- err
 		}
 	}()
 
-	// Graceful shutdown
+	// Graceful shutdown: stop accepting HTTP traffic and drain in-flight
+	// requests FIRST, then stop background workers, then close storage last —
+	// so no in-flight handler or worker can touch a closed store.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("Shutting down...")
-	if cleanupTicker != nil {
-		cleanupTicker.Stop()
+	select {
+	case <-quit:
+		log.Println("Shutting down...")
+	case err := <-serverErrCh:
+		log.Printf("Server error: %v", err)
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP shutdown error: %v", err)
+	}
+
+	cleanupCancel()
+	cleanupDone := make(chan struct{})
+	go func() {
+		cleanupWG.Wait()
+		close(cleanupDone)
+	}()
+	select {
+	case <-cleanupDone:
+	case <-time.After(5 * time.Second):
+		log.Println("cleanup worker did not stop in time")
+	}
+
 	mon.Stop()
 	rst.Stop()
 	st.Close()

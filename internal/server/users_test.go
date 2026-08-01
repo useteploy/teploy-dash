@@ -226,3 +226,133 @@ func TestDeleteUserSessionsScoped(t *testing.T) {
 		t.Error("bob's session should survive alice's password change")
 	}
 }
+
+// ── DASH-005 / DASH-006: copy-on-write persistence ───────────────────────
+//
+// createUser/setPassword/setRole/deleteUser used to mutate the live g.users
+// map (and, for createUser, flip g.setupRequired) BEFORE persisting, so a
+// failed write left the running process and users.json silently diverged —
+// a failed role change still took effect until restart, a failed first
+// account left setup mode disabled with nothing durable behind it. These
+// tests force the persist step to fail (an unwritable users.json directory)
+// and assert live state is byte-for-byte what it was before the call.
+
+// unwritableDir makes dir's contents unwritable so saveUsersFile's
+// MkdirAll/WriteFile/Rename fails, and registers a cleanup to restore
+// permissions (t.TempDir() cleanup requires the dir be writable again).
+func unwritableDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0700) })
+}
+
+func TestCreateUser_PersistFailureLeavesLiveStateUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	g := newAuthGate("", "", filepath.Join(dir, "auth.json"))
+
+	if err := g.createUser("existing", "existingpassword", RoleViewer); err != nil {
+		t.Fatalf("seed createUser: %v", err)
+	}
+	before := g.listUsers()
+
+	unwritableDir(t, dir)
+
+	if err := g.createUser("newuser", "newpassword123", RoleViewer); err == nil {
+		t.Fatal("expected error when persistence fails")
+	}
+
+	after := g.listUsers()
+	if len(after) != len(before) {
+		t.Fatalf("live user count changed after failed persist: before=%d after=%d", len(before), len(after))
+	}
+	for _, u := range after {
+		if u.Username == "newuser" {
+			t.Error("newuser is live in memory despite failed persistence")
+		}
+	}
+}
+
+func TestCreateUser_FirstUserPersistFailureKeepsSetupRequired(t *testing.T) {
+	dir := t.TempDir()
+	g := newAuthGate("", "", filepath.Join(dir, "auth.json"))
+	if !g.setupRequired {
+		t.Fatal("expected setupRequired=true for a fresh gate with no users")
+	}
+
+	unwritableDir(t, dir)
+
+	if err := g.createUser("admin", "adminpassword", RoleAdmin); err == nil {
+		t.Fatal("expected error when persistence fails")
+	}
+	if !g.setupRequired {
+		t.Error("setupRequired flipped to false despite the first account never being durably saved")
+	}
+	if len(g.users) != 0 {
+		t.Errorf("expected zero live users after failed first-account persist, got %d", len(g.users))
+	}
+}
+
+func TestSetPassword_PersistFailureLeavesHashUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	g := newAuthGate("", "", filepath.Join(dir, "auth.json"))
+	if err := g.createUser("alice", "originalpassword", RoleEditor); err != nil {
+		t.Fatalf("seed createUser: %v", err)
+	}
+
+	unwritableDir(t, dir)
+
+	if err := g.setPassword("alice", "newpassword123"); err == nil {
+		t.Fatal("expected error when persistence fails")
+	}
+	if _, ok := g.authenticate("alice", "originalpassword"); !ok {
+		t.Error("original password stopped working after a failed setPassword")
+	}
+	if _, ok := g.authenticate("alice", "newpassword123"); ok {
+		t.Error("new password works despite the change never being persisted")
+	}
+}
+
+func TestSetRole_PersistFailureLeavesRoleUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	g := newAuthGate("", "", filepath.Join(dir, "auth.json"))
+	if err := g.createUser("alice", "alicepassword", RoleViewer); err != nil {
+		t.Fatalf("seed createUser: %v", err)
+	}
+
+	unwritableDir(t, dir)
+
+	if err := g.setRole("alice", RoleAdmin); err == nil {
+		t.Fatal("expected error when persistence fails")
+	}
+	g.credMu.RLock()
+	role := g.users["alice"].Role
+	g.credMu.RUnlock()
+	if role != RoleViewer {
+		t.Errorf("role = %q after failed setRole, want unchanged %q", role, RoleViewer)
+	}
+}
+
+func TestDeleteUser_PersistFailureLeavesUserPresent(t *testing.T) {
+	dir := t.TempDir()
+	g := newAuthGate("", "", filepath.Join(dir, "auth.json"))
+	if err := g.createUser("admin", "adminpassword", RoleAdmin); err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+	if err := g.createUser("alice", "alicepassword", RoleViewer); err != nil {
+		t.Fatalf("seed alice: %v", err)
+	}
+
+	unwritableDir(t, dir)
+
+	if err := g.deleteUser("alice"); err == nil {
+		t.Fatal("expected error when persistence fails")
+	}
+	g.credMu.RLock()
+	_, stillPresent := g.users["alice"]
+	g.credMu.RUnlock()
+	if !stillPresent {
+		t.Error("alice removed from live state despite failed persistence")
+	}
+}

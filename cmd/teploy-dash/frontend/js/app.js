@@ -1351,6 +1351,7 @@ document.addEventListener('alpine:init', () => {
       interval: '60000',
       timeout: '10000',
       expected_status: '', // blank = any 2xx/3xx is healthy; a value = exact match
+      allow_internal: false, // opt-in: allow this monitor to reach loopback/private/link-local/cloud-metadata targets
     },
 
     async init() {
@@ -1401,6 +1402,7 @@ document.addEventListener('alpine:init', () => {
           timeout: parseInt(this.newMonitor.timeout) * 1000000,
           enabled: true,
           expected_status: parseInt(this.newMonitor.expected_status) || 0,
+          allow_internal: !!this.newMonitor.allow_internal,
         };
         await rawFetch.post('/api/monitors', body);
         const wasEdit = !!this.editingId;
@@ -1467,6 +1469,7 @@ document.addEventListener('alpine:init', () => {
         interval: String(m.interval / 1000000),
         timeout: String(m.timeout / 1000000),
         expected_status: m.expected_status || '',
+        allow_internal: !!m.allow_internal,
       };
       this.showCreateDialog = true;
     },
@@ -1474,7 +1477,7 @@ document.addEventListener('alpine:init', () => {
     resetForm() {
       this.newMonitor = {
         name: '', type: 'http', method: 'GET', target: '',
-        interval: '60000', timeout: '10000', expected_status: '',
+        interval: '60000', timeout: '10000', expected_status: '', allow_internal: false,
       };
     },
 

@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -259,8 +258,9 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 	}
 	req.Header.Set("User-Agent", "teploy-dash/1.0")
 
+	client := httpClientFor(r.client, m.AllowInternal)
 	start := time.Now()
-	resp, err := r.client.Do(req)
+	resp, err := client.Do(req)
 	result.ResponseTime = time.Since(start)
 
 	if err != nil {
@@ -305,8 +305,12 @@ func (r *Runner) checkTCP(m store.Monitor) store.CheckResult {
 		timeout = 10 * time.Second
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	dial := policyDialContext(m.AllowInternal)
+
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", m.Target, timeout)
+	conn, err := dial(ctx, "tcp", m.Target)
 	result.ResponseTime = time.Since(start)
 
 	if err != nil {

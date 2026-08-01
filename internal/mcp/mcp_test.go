@@ -276,3 +276,73 @@ func TestMissingArgs(t *testing.T) {
 		t.Fatalf("error should name the missing arg: %s", text)
 	}
 }
+
+// ── DASH-012: JSON-RPC envelope strictness ──────────────────────────────
+
+func rawPost(t *testing.T, url, token, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("POST", url, strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestRejectsMissingOrWrongJSONRPCVersion(t *testing.T) {
+	srv, full, _, _ := testServer(t)
+	defer srv.Close()
+
+	cases := []string{
+		`{"id":1,"method":"ping"}`,                 // missing jsonrpc
+		`{"jsonrpc":"1.0","id":1,"method":"ping"}`, // wrong version
+		`{"jsonrpc":"2","id":1,"method":"ping"}`,   // near-miss version
+	}
+	for _, body := range cases {
+		resp := rawPost(t, srv.URL, full, body)
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("body %q: status = %d, want 200 (JSON-RPC errors are 200 with an error envelope)", body, resp.StatusCode)
+		}
+		var out rpcResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("body %q: invalid JSON response: %v", body, err)
+		}
+		if out.Error == nil || out.Error.Code != -32600 {
+			t.Errorf("body %q: error = %+v, want code -32600", body, out.Error)
+		}
+	}
+}
+
+func TestRejectsTrailingJSONValue(t *testing.T) {
+	srv, full, _, _ := testServer(t)
+	defer srv.Close()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"ping"}{"jsonrpc":"2.0","id":2,"method":"ping"}`
+	resp := rawPost(t, srv.URL, full, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out rpcResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32700 {
+		t.Errorf("error = %+v, want code -32700 (parse error)", out.Error)
+	}
+}
+
+// A valid single request with jsonrpc 2.0 still works normally.
+func TestValidRequestStillWorks(t *testing.T) {
+	srv, full, _, _ := testServer(t)
+	defer srv.Close()
+
+	out := rpc(t, srv.URL, full, "ping", nil)
+	if out["error"] != nil {
+		t.Errorf("valid ping request errored: %v", out["error"])
+	}
+}
