@@ -575,6 +575,8 @@ document.addEventListener('alpine:init', () => {
     driftLoading: false,
     stats: [],
     statsLoading: false,
+    health: null,
+    healthLoading: false,
 
     async init() {
       await Promise.all([this.loadStatus(), this.loadAccessories()]);
@@ -613,6 +615,27 @@ document.addEventListener('alpine:init', () => {
         this.drift = { unavailable: true, error: e.message };
       }
       this.driftLoading = false;
+    },
+
+    // On-demand only — deliberately NOT in init(). Unlike drift and stats,
+    // which read recorded state, this actively probes the app and can sit
+    // there for the CLI's full health timeout, so it runs when asked rather
+    // than on every page load.
+    //
+    // An unhealthy verdict arrives as a non-2xx with a JSON body; that is an
+    // answer, not a transport failure, so it renders as a result rather than
+    // an error banner.
+    async loadHealth() {
+      this.healthLoading = true;
+      try {
+        this.health = await api.get(`${this.appPath()}/health`);
+      } catch (e) {
+        // The backend returns an unhealthy VERDICT as a normal payload, so
+        // anything landing here is a transport/CLI failure — an older bundled
+        // CLI with no `health --app`, or an unreachable server.
+        this.health = { healthy: false, error: e.message };
+      }
+      this.healthLoading = false;
     },
 
     appPath() {

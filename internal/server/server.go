@@ -1149,7 +1149,16 @@ func (s *Server) cliAppRun(serverName, appName string, parts ...string) (*cli.Re
 	if u := s.serverUser(serverName); u != "" {
 		args = append(args, "--user", u)
 	}
-	return cli.RunChecked(args...)
+	// Route through the injected runner (defaults to the real CLI) rather than
+	// calling cli.RunChecked directly, so every app-scoped endpoint is
+	// testable — which is what Config.CLIRunner exists for. cli.CheckExit
+	// keeps RunChecked's rule that a non-zero exit is an error, so behavior is
+	// unchanged.
+	result, err := s.runCLI(context.Background(), args...)
+	if err != nil {
+		return result, err
+	}
+	return result, cli.CheckExit(result, args)
 }
 
 // ── App Actions ──────────────────────────────────────────────────────────
@@ -1306,6 +1315,31 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := s.cliAppRun(serverName, appName, "stats", "--json")
 		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeRawJSON(w, result.Stdout)
+
+	// On-demand health probe against the running app. Read-only and quick, so
+	// it answers inline like drift and stats. Note this actively probes the
+	// app (an HTTP request per attempt, up to the CLI's health timeout) rather
+	// than reading recorded state, so it is deliberately NOT part of the app
+	// detail page's initial load — it runs when asked for.
+	case action == "health" && r.Method == "GET":
+		if !cli.IsInstalled() {
+			writeError(w, "teploy CLI not installed")
+			return
+		}
+		result, err := s.cliAppRun(serverName, appName, "health", "--json")
+		if err != nil {
+			// A failing health check exits non-zero AND prints its JSON verdict.
+			// That is an answer, not a transport failure — surface the verdict
+			// rather than an error banner, or an unhealthy app looks like a
+			// broken dashboard.
+			if result != nil && strings.TrimSpace(result.Stdout) != "" {
+				writeRawJSON(w, result.Stdout)
+				return
+			}
 			writeError(w, err.Error())
 			return
 		}

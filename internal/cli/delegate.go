@@ -238,6 +238,13 @@ func RunChecked(args ...string) (*Result, error) {
 	return result, checkExit(result, args)
 }
 
+// CheckExit is checkExit for callers that ran the CLI through an injected
+// runner (Config.CLIRunner) rather than RunChecked, so they can apply the same
+// non-zero-exit-is-an-error rule without giving up testability.
+func CheckExit(result *Result, args []string) error {
+	return checkExit(result, args)
+}
+
 // checkExit converts a non-zero CLI exit into an error, preferring stderr, then
 // stdout, then a generic message. Split out for testability.
 func checkExit(result *Result, args []string) error {

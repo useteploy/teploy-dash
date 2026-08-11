@@ -492,6 +492,43 @@
                 </div>
               </template>
 
+              <!-- On-demand health probe. Not auto-loaded: it actively hits the
+                   app and can take the CLI's full health timeout. -->
+              <div style="margin-bottom: 24px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                  <h3 style="font-size: 15px;">Health</h3>
+                  <button class="btn btn-sm" style="margin-left:auto;" @click="loadHealth()" :disabled="healthLoading"
+                          x-text="healthLoading ? 'Checking…' : (health ? 'Re-check' : 'Run check')"></button>
+                </div>
+                <template x-if="health">
+                  <div class="table-wrap">
+                    <table>
+                      <tbody>
+                        <tr>
+                          <td style="width:120px;">Status</td>
+                          <td>
+                            <span class="badge" :class="health.healthy ? 'green' : 'red'"
+                                  x-text="health.healthy ? 'Healthy' : 'Unhealthy'"></span>
+                          </td>
+                        </tr>
+                        <tr x-show="health.port">
+                          <td>Port</td>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="health.port"></td>
+                        </tr>
+                        <tr x-show="health.error">
+                          <td>Error</td>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="health.error"></td>
+                        </tr>
+                        <tr x-show="health.observed_at">
+                          <td>Checked</td>
+                          <td class="card-meta" style="margin:0;" x-text="new Date(health.observed_at).toLocaleString()"></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+              </div>
+
               <!-- Resource usage per container -->
               <template x-if="liveStats.length > 0">
                 <div style="margin-bottom: 24px;">
