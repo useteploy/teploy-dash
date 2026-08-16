@@ -63,7 +63,7 @@
         <template x-if="!linkGlyph(item)">
           <img class="nav-link-favicon" :src="faviconUrl(item.url)" alt=""
                :style="item._faviconFailed ? 'display:none' : ''"
-               @error="item._faviconFailed = true">
+               @error="faviconError(item, $el)">
         </template>
         <span class="nav-link-letters" :style="`background:${item.color || '#3b82f6'};${item._faviconFailed && !linkGlyph(item) ? '' : 'display:none'}`"
               x-text="iconLetters(item.name)"></span>
@@ -174,7 +174,7 @@
                          :class="{ 'dark-icon': item.dark_icon }"
                          :src="faviconUrl(item.url)"
                          :style="item._faviconFailed ? 'display:none' : ''"
-                         @error="item._faviconFailed = true">
+                         @error="faviconError(item, $el)">
                   </template>
                   <div class="homepage-card-icon"
                        :style="`background:${item.color || '#3b82f6'};${item._faviconFailed && !linkGlyph(item) ? '' : 'display:none'}`"
@@ -1925,7 +1925,7 @@
                           <template x-if="!linkGlyph(item)">
                             <img class="nav-link-favicon" :src="faviconUrl(item.url)" alt=""
                                  :style="item._faviconFailed ? 'display:none' : ''"
-                                 @error="item._faviconFailed = true">
+                                 @error="faviconError(item, $el)">
                           </template>
                           <span class="nav-link-letters"
                                 :style="`background:${item.color || '#3b82f6'};${item._faviconFailed && !linkGlyph(item) ? '' : 'display:none'}`"

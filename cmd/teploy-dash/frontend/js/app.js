@@ -266,14 +266,42 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    faviconUrl(url) {
-      try { return new URL(url).origin + '/favicon.ico'; } catch { return ''; }
+    faviconUrl(url) { return faviconCandidates(url)[0] || ''; },
+
+    // Advance to the next candidate path before giving up on an icon. See
+    // faviconCandidates.
+    faviconError(item, el) {
+      const list = faviconCandidates(item.url);
+      const next = list[(list.indexOf(el.getAttribute('src')) + 1)] || '';
+      if (next) { el.setAttribute('src', next); return; }
+      item._faviconFailed = true;
     },
 
     iconLetters(name) {
       return name.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
     },
   }));
+
+  // Where a pinned app's icon might live.
+  //
+  // This used to be one hardcoded `origin + '/favicon.ico'`, in three copies.
+  // That path is the 1999 convention and plenty of current software does not
+  // serve it - teploy-arcade declares `<link rel="icon" type="image/svg+xml">`
+  // and serves only `/favicon.svg`, which is correct and modern, and pinning it
+  // here produced coloured initials instead of its icon.
+  //
+  // The bug survived because dash serves both paths for itself (server.go), so
+  // the one app anybody tested this against could not fail.
+  //
+  // Ordered, not guessed: SVG first because an app that has one is saying so
+  // deliberately, then the legacy path, then PNG. Reading <link rel="icon"> out
+  // of the app's HTML would be more correct still and is not possible from
+  // here - it is cross-origin, and these are arbitrary third-party apps.
+  function faviconCandidates(url) {
+    let origin;
+    try { origin = new URL(url).origin; } catch { return []; }
+    return [origin + '/favicon.svg', origin + '/favicon.ico', origin + '/favicon.png'];
+  }
 
   // ── Theme Store ──
   Alpine.store('theme', {
@@ -1555,8 +1583,15 @@ document.addEventListener('alpine:init', () => {
       this.loading = false;
     },
 
-    faviconUrl(url) {
-      try { return new URL(url).origin + '/favicon.ico'; } catch { return ''; }
+    faviconUrl(url) { return faviconCandidates(url)[0] || ''; },
+
+    // Advance to the next candidate path before giving up on an icon. See
+    // faviconCandidates.
+    faviconError(item, el) {
+      const list = faviconCandidates(item.url);
+      const next = list[(list.indexOf(el.getAttribute('src')) + 1)] || '';
+      if (next) { el.setAttribute('src', next); return; }
+      item._faviconFailed = true;
     },
 
     iconLetters(name) {
@@ -1668,8 +1703,15 @@ document.addEventListener('alpine:init', () => {
 
     canEdit() { return this.role === null || this.role === 'admin' || this.role === 'editor'; },
 
-    faviconUrl(url) {
-      try { return new URL(url).origin + '/favicon.ico'; } catch { return ''; }
+    faviconUrl(url) { return faviconCandidates(url)[0] || ''; },
+
+    // Advance to the next candidate path before giving up on an icon. See
+    // faviconCandidates.
+    faviconError(item, el) {
+      const list = faviconCandidates(item.url);
+      const next = list[(list.indexOf(el.getAttribute('src')) + 1)] || '';
+      if (next) { el.setAttribute('src', next); return; }
+      item._faviconFailed = true;
     },
 
     iconLetters(name) {
