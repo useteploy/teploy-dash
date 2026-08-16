@@ -418,6 +418,7 @@
             <button class="tab" :class="{ active: tab === 'env' }" @click="switchTab('env')">Environment</button>
             <button class="tab" :class="{ active: tab === 'logs' }" @click="switchTab('logs')">Logs</button>
             <button class="tab" :class="{ active: tab === 'deploys' }" @click="switchTab('deploys')">Deploys</button>
+            <button class="tab" :class="{ active: tab === 'kv' }" @click="switchTab('kv')">KV</button>
           </div>
 
           <!-- General Tab -->
@@ -604,17 +605,24 @@
                         </tr>
                       </thead>
                       <tbody>
-                        <template x-for="a in accessories" :key="a.ID">
+                        <!-- Lowercase keys, deliberately: /api/apps/{server}/{app}/accessories
+                             passes the CLI's JSON straight through (writeRawJSON in
+                             server.go), and the CLI tags that struct id/name/image/state
+                             (teploy-cli/internal/cli/accessory.go). This read Go-cased
+                             a.ID / a.Name / a.State until 2026-08-16, so every field was
+                             undefined: blank rows and a status dot permanently on
+                             "stopped". Correct on both ends, unwired in between. -->
+                        <template x-for="a in accessories" :key="a.id">
                           <tr>
-                            <td style="font-family: var(--mono); font-size: 12px;" x-text="a.Name"></td>
-                            <td x-text="a.Image"></td>
+                            <td style="font-family: var(--mono); font-size: 12px;" x-text="a.name"></td>
+                            <td x-text="a.image"></td>
                             <td>
-                              <span class="status-dot" :class="a.State === 'running' ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
-                              <span x-text="a.State"></span>
+                              <span class="status-dot" :class="a.state === 'running' ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
+                              <span x-text="a.state"></span>
                             </td>
                             <td>
-                              <button class="btn btn-sm" @click="doAction('accessories/' + accessoryName(a.Name) + '/start')">Start</button>
-                              <button class="btn btn-sm" @click="doAction('accessories/' + accessoryName(a.Name) + '/stop')">Stop</button>
+                              <button class="btn btn-sm" @click="doAction('accessories/' + accessoryName(a.name) + '/start')">Start</button>
+                              <button class="btn btn-sm" @click="doAction('accessories/' + accessoryName(a.name) + '/stop')">Stop</button>
                             </td>
                           </tr>
                         </template>
@@ -730,6 +738,90 @@
 
               <template x-if="!deployLog || deployLog.length === 0">
                 <div class="empty-state"><p>No deploy history yet.</p></div>
+              </template>
+            </div>
+          </template>
+
+          <!-- KV Tab: the shared Nucleus KV store, read through the CLI.
+               Values are NOT prefetched with the key list. `teploy kv get`
+               opens a fresh SSH connection per invocation, so resolving every
+               key on tab open would cost one handshake per key. Listing then
+               revealing on demand is both the cheap path and the honest one —
+               dash holds no values of its own, it asks the CLI each time.
+               Note the store is one global keyspace: prefixes are convention,
+               not isolation. -->
+          <template x-if="tab === 'kv'">
+            <div>
+              <div class="form-row" style="margin-bottom: 16px;">
+                <div class="form-group">
+                  <label class="form-label">Pattern</label>
+                  <input class="form-input" placeholder="*" x-model="kvPattern" @keydown.enter="loadKv()">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Accessory</label>
+                  <input class="form-input" placeholder="nucleus" x-model="kvAccessory" @keydown.enter="loadKv()">
+                </div>
+                <button class="btn" @click="loadKv()" :disabled="kvLoading" x-text="kvLoading ? 'Loading…' : 'Refresh'"></button>
+              </div>
+
+              <div class="form-row" style="margin-bottom: 16px;" x-show="canEdit()">
+                <div class="form-group">
+                  <input class="form-input" placeholder="key" x-model="newKvKey">
+                </div>
+                <div class="form-group">
+                  <input class="form-input" placeholder="value" x-model="newKvValue">
+                </div>
+                <div class="form-group" style="max-width: 140px;">
+                  <input class="form-input" type="number" min="0" placeholder="TTL (s)" x-model="newKvTtl">
+                </div>
+                <button class="btn btn-primary" @click="setKv()" :disabled="kvSaving">Add</button>
+              </div>
+
+              <template x-if="kvError">
+                <div class="empty-state"><p x-text="kvError"></p></div>
+              </template>
+
+              <template x-if="!kvError && kvKeys.length > 0">
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Key</th>
+                        <th>Value</th>
+                        <th style="width: 160px;"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="k in kvKeys" :key="k">
+                        <tr>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="k"></td>
+                          <td style="font-family: var(--mono); font-size: 12px;"
+                              x-text="k in kvValues ? (kvValues[k] === null ? '(not set)' : kvValues[k]) : '--------'"></td>
+                          <td>
+                            <!-- Keys the store holds but this panel cannot drive: the
+                                 CLI takes the key as argv, so a flag-shaped or
+                                 otherwise unsafe key is rejected server-side. Showing
+                                 live buttons made them fail with a generic toast. -->
+                            <template x-if="kvReadonly.has(k)">
+                              <span class="muted" style="font-size: 12px;"
+                                    title="This key cannot be read or removed from the dashboard. Use the teploy CLI.">read-only</span>
+                            </template>
+                            <template x-if="!kvReadonly.has(k)">
+                              <span>
+                                <button class="btn btn-sm" @click="revealKv(k)" x-text="k in kvValues ? 'Refresh' : 'Reveal'"></button>
+                                <button class="btn btn-sm btn-danger" x-show="canEdit()" @click="delKv(k)">Remove</button>
+                              </span>
+                            </template>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <template x-if="!kvError && kvKeys.length === 0 && !kvLoading">
+                <div class="empty-state"><p>No keys match this pattern.</p></div>
               </template>
             </div>
           </template>

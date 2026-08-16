@@ -1180,7 +1180,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	if len(parts) >= 3 {
 		action = parts[2]
 	}
-	if action == "env" || strings.HasPrefix(action, "env/") {
+	// env values and kv values are both secret-shaped payloads; keep them out
+	// of any intermediary cache.
+	if action == "env" || strings.HasPrefix(action, "env/") ||
+		action == "kv" || strings.HasPrefix(action, "kv/") {
 		noStore(w)
 	}
 
@@ -1344,6 +1347,22 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeRawJSON(w, result.Stdout)
+
+	// The shared Nucleus KV store. Like drift and stats these answer inline —
+	// one SSH round trip each against an already-running accessory container,
+	// not a change to deploy state. Handlers live in kv.go; see the file
+	// header for why nothing here is cached.
+	case action == "kv" && r.Method == "GET":
+		s.handleKVList(w, r, serverName, appName)
+
+	case action == "kv/value" && r.Method == "GET":
+		s.handleKVGet(w, r, serverName, appName)
+
+	case action == "kv" && r.Method == "POST":
+		s.handleKVSet(w, r, serverName, appName)
+
+	case action == "kv" && r.Method == "DELETE":
+		s.handleKVDelete(w, r, serverName, appName)
 
 	case action == "accessories" && r.Method == "GET":
 		if !cli.IsInstalled() {

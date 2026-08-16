@@ -39,6 +39,14 @@ func TestRequiredRole(t *testing.T) {
 		{"POST", "/api/deploy", RoleEditor},
 		{"POST", "/api/apps/prod/web/rollback", RoleEditor},
 		{"DELETE", "/api/apps/prod/web/env/FOO", RoleEditor},
+		// kv: reads are viewer, writes are editor. No kv-specific code produces
+		// this — requiredRole already fails closed on any unclassified mutating
+		// route. These rows pin the contract so an adminOnlyPrefixes edit or a
+		// new special case can't move it silently.
+		{"GET", "/api/apps/prod/web/kv", RoleViewer},
+		{"GET", "/api/apps/prod/web/kv/value", RoleViewer},
+		{"POST", "/api/apps/prod/web/kv", RoleEditor},
+		{"DELETE", "/api/apps/prod/web/kv", RoleEditor},
 		{"GET", "/api/users", RoleAdmin},
 		{"POST", "/api/users", RoleAdmin},
 		{"DELETE", "/api/users/jane", RoleAdmin},

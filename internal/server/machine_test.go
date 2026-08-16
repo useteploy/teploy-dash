@@ -222,6 +222,12 @@ func TestLegacyLifecycleActionEnqueuesOperation(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
+	var envelope struct {
+		Data operation.Operation `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case command := <-commands:
 		want := []string{"restart", "--host", "192.0.2.10", "--app", "blog", "--user", "deploy"}
@@ -231,6 +237,25 @@ func TestLegacyLifecycleActionEnqueuesOperation(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("lifecycle operation did not execute")
 	}
+	// Wait for the operation to reach a terminal status before returning.
+	// Manager.execute writes the closing status event AFTER the executor
+	// returns, so without this the test's t.TempDir cleanup races that write
+	// and fails with "operations/events: directory not empty" — ~3 runs in 15
+	// on this test alone, and it reproduces on a pristine tree. Manager has no
+	// Close, so polling to terminal is the available join point; it is the
+	// same wait operations_test.go:144-154 already does.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := s.operations.Get(envelope.Data.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.Status.Terminal() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("operation did not finish")
 }
 
 func TestCapabilitiesProbesAndCachesCLIContract(t *testing.T) {

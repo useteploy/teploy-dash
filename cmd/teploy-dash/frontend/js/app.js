@@ -605,6 +605,26 @@ document.addEventListener('alpine:init', () => {
     statsLoading: false,
     health: null,
     healthLoading: false,
+    // KV panel. kvValues holds only what the operator explicitly revealed,
+    // in component memory — never localStorage/sessionStorage, and never as a
+    // substitute for asking the CLI again.
+    kvKeys: [],
+    kvReadonly: new Set(),
+    kvValues: {},
+    kvPattern: '*',
+    kvAccessory: 'nucleus',
+    kvLoading: false,
+    kvSaving: false,
+    kvError: '',
+    newKvKey: '',
+    newKvValue: '',
+    newKvTtl: '',
+    // role is null until /api/auth/me answers, and stays null when auth is
+    // disabled (that endpoint 401s with --no-auth). Both mean "don't hide
+    // anything" — the server is the enforcement point; this only avoids
+    // showing a viewer buttons that would 403.
+    role: null,
+    roleLoaded: false,
 
     async init() {
       await Promise.all([this.loadStatus(), this.loadAccessories()]);
@@ -705,12 +725,102 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // ── KV ──
+    //
+    // Every method here is a fresh CLI invocation. Nothing about the store is
+    // held between views, and a write is followed by a re-list rather than a
+    // local edit — dash renders the CLI's answer, it does not keep its own.
+
+    canEdit() { return this.role === null || this.role === 'admin' || this.role === 'editor'; },
+
+    async loadRole() {
+      // A 401 here means auth is off, not that the user is a viewer.
+      this.role = await api.get('/api/auth/me').then(u => u.role).catch(() => null);
+      this.roleLoaded = true;
+    },
+
+    kvQuery(extra) {
+      const params = new URLSearchParams(extra || {});
+      if (this.kvAccessory) params.set('accessory', this.kvAccessory);
+      const q = params.toString();
+      return q ? `?${q}` : '';
+    },
+
+    async loadKv() {
+      this.kvLoading = true;
+      this.kvError = '';
+      try {
+        const res = await api.get(`${this.appPath()}/kv${this.kvQuery({ pattern: this.kvPattern || '*' })}`);
+        this.kvKeys = (res && res.keys) || [];
+        // Keys the store holds but this panel cannot operate on (see the
+        // Readonly field in kv.go). Rendering them with live buttons meant
+        // Reveal and Remove answered "invalid kv key" as a generic toast.
+        this.kvReadonly = new Set((res && res.readonly) || []);
+        // Drop revealed values that are no longer in the listing so a stale
+        // value can never outlive its key.
+        const live = {};
+        for (const k of this.kvKeys) if (k in this.kvValues) live[k] = this.kvValues[k];
+        this.kvValues = live;
+      } catch (e) {
+        this.kvKeys = [];
+        this.kvValues = {};
+        this.kvReadonly = new Set();
+        this.kvError = e.message;
+      }
+      this.kvLoading = false;
+    },
+
+    async revealKv(key) {
+      try {
+        const res = await api.get(`${this.appPath()}/kv/value${this.kvQuery({ key })}`);
+        // An unset key is an answer, not a failure — render it as one.
+        this.kvValues[key] = res && res.exists ? res.value : null;
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    async setKv() {
+      if (!this.newKvKey) return;
+      this.kvSaving = true;
+      try {
+        const body = { key: this.newKvKey, value: this.newKvValue, accessory: this.kvAccessory || 'nucleus' };
+        const ttl = parseInt(this.newKvTtl, 10);
+        if (!isNaN(ttl) && ttl > 0) body.ttl = ttl;
+        await api.post(`${this.appPath()}/kv`, body);
+        showToast('Key set', 'success');
+        this.newKvKey = '';
+        this.newKvValue = '';
+        this.newKvTtl = '';
+        await this.loadKv();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.kvSaving = false;
+    },
+
+    async delKv(key) {
+      if (!confirm(`Delete ${key}?\n\nThis KV store is shared — anything else using this accessory loses the key too.`)) return;
+      try {
+        await api.del(`${this.appPath()}/kv${this.kvQuery({ key })}`);
+        showToast('Key removed', 'success');
+        await this.loadKv();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
     async switchTab(t) {
       this.tab = t;
       if (t === 'env') await this.loadEnv();
       if (t === 'deploys') await this.loadLog();
       if (t === 'general') await this.loadAccessories();
       if (t === 'logs') this.$nextTick(() => this.$dispatch('start-logs'));
+      // Lazy: an SSH round trip per open, never part of init().
+      if (t === 'kv') {
+        if (!this.roleLoaded) await this.loadRole();
+        await this.loadKv();
+      }
     },
 
     async doAction(action) {

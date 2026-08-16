@@ -105,6 +105,12 @@ teploy-dash --no-auth                                   # local dev only
 - Umbrel-style template catalog: install pre-defined apps with one click.
 - WebSocket log tailing per app (with SSE fallback for clients that
   don't speak WS).
+- **KV** tab: browse, read, set and delete keys in an app's shared Nucleus
+  KV store, via `teploy kv`. Values are fetched one at a time when you ask
+  for them, never prefetched or cached — each read is a live CLI call.
+  Reading needs `viewer`, writing needs `editor`. The store is one global
+  keyspace with no server-enforced namespaces: key prefixes are convention,
+  so anything sharing that accessory sees the same keys.
 
 ### Uptime monitoring
 - HTTP, TCP, and ping checks with per-monitor interval and timeout.
@@ -282,6 +288,11 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / POST | `/api/apps/{server}/{app}/env` | List / set env vars. |
 | DELETE | `/api/apps/{server}/{app}/env/{key}` | Unset env var. |
 | GET | `/api/apps/{server}/{app}/log` | Recent CLI deploy log. |
+| GET | `/api/apps/{server}/{app}/drift` | Live containers vs the deployed version. |
+| GET | `/api/apps/{server}/{app}/stats` | Per-container CPU / memory / IO. |
+| GET | `/api/apps/{server}/{app}/health` | On-demand health probe against the running app. |
+| GET / POST / DELETE | `/api/apps/{server}/{app}/kv` | List keys (`?pattern=`) / set (`{key,value,ttl}`) / delete (`?key=`) in the shared Nucleus KV store. `?accessory=` defaults to `nucleus`. |
+| GET | `/api/apps/{server}/{app}/kv/value` | Read one value (`?key=`). Returns `exists:false` for an unset key. |
 | GET | `/api/apps/{server}/{app}/accessories` | List accessories (DBs, queues, etc). |
 | GET | `/ws/logs/{server}/{app}` | WebSocket log stream (SSE fallback). |
 | GET / POST / DELETE | `/api/config/servers` `/api/config/servers/{name}` | Manage servers via CLI. |
