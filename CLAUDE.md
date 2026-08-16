@@ -2,6 +2,14 @@
 
 Self-hosted dashboard for the Teploy CLI plus uptime monitoring. One static Go binary, embedded SPA. See README.md for user-facing docs.
 
+## Open work is tracked outside this repo
+
+Maintainer note: everything currently open across the Teploy products lives in
+the umbrella queue at `../_internal/NEXT_SESSION.md` (private, not part of this
+repo). Read it before planning work here. The two planning docs in
+`_internal/` are a current audit (`PARITY_AUDIT_2026-07-24.md`) and a
+partly-superseded plan (`PARITY-PLAN.md`) — verify either against source.
+
 ## Quick Reference
 
 | Item | Details |
