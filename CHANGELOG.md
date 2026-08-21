@@ -4,6 +4,16 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-08-21
+
+### Added
+- **Browse the shared KV store.** List by pattern, reveal, set and remove.
+  Reads need viewer, writes need editor, and it answers inline the way drift
+  and stats do — nothing is cached. Keys the panel cannot safely drive
+  (flag-shaped values and the like) render read-only rather than offering
+  buttons that fail.
+- **On-demand health check in the app detail view**, so an operator can ask
+  rather than wait for the next deploy to tell them.
 ### Added
 - Settings → Links: manage shortcuts to the services you run alongside Teploy
   (Forgejo, Proxmox, TrueNAS, anything with a URL) and pin any of them to the
@@ -18,7 +28,29 @@ All notable changes to teploy-dash are recorded here.
   that reads as a smudge in a dark header. Links without a glyph can instead be
   flagged as having a dark favicon, which puts it on a light tile.
 
+### Fixed
+- **The Accessories table was blank.** Pre-existing, and a plain seam bug: the
+  frontend read Go-cased fields while the endpoint passed the CLI's lowercase
+  JSON straight through. A route-wiring test was added after finding five
+  validation tests that still passed with the dispatch arms deleted.
+- Bootstrap token handling, graceful shutdown, copy-on-write users, and a
+  dial-time SSRF policy.
+- A delegated command now reports how long it actually ran before timing out.
+- A pinned app's icon is found when it only ships an SVG.
+- No ghost SSO button, and no login form when already signed in; the fleet is
+  served stale-first. Siblings survive the fleet cache expiring.
+- The sign-in wordmark reads Teploy Dash.
+
 ### Changed
+- **The bundled CLI is pinned to v0.1.27.** v0.1.26 was the first release where
+  `bind:` and `ingress: host` deploys survive their own health check — the
+  path Dash itself is deployed on.
+- **The source-build Dockerfile now verifies the CLI download** against
+  `checksums.txt` before extracting, and resolves the architecture through
+  `TARGETARCH`. It previously piped a hardcoded amd64 URL straight into tar —
+  and since that is the file a source build uses, the image actually running in
+  production was the one not checking what it executed.
+  `Dockerfile.goreleaser` already did this.
 - The header right side is now icons only: the `self-hosted` label is gone (it
   said nothing an operator didn't know), and the theme toggle is a sun/moon
   button instead of a "Light"/"Dark" word.

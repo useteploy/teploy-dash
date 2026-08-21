@@ -7,7 +7,7 @@ RUN apk add --no-cache ca-certificates tzdata wget
 # Teploy CLI - used by dash to delegate deploy/rollback actions. BuildKit sets
 # TARGETARCH from the goreleaser build platform (amd64 or arm64).
 ARG TARGETARCH
-ARG TEPLOY_VERSION=v0.1.26
+ARG TEPLOY_VERSION=v0.1.27
 RUN set -eux; \
     archive="teploy_linux_${TARGETARCH}.tar.gz"; \
     release_url="https://github.com/useteploy/teploy-cli/releases/download/${TEPLOY_VERSION}"; \
