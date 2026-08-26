@@ -116,15 +116,7 @@ func (d *Dispatcher) sendWebhook(event Event) {
 }
 
 func (d *Dispatcher) sendEmail(event Event) {
-	// Strip CR/LF from values that land in the Subject header so a monitor name
-	// can't inject additional SMTP headers (e.g. an unwanted Bcc).
-	subject := fmt.Sprintf("[teploy] %s is %s",
-		sanitizeHeader(event.MonitorName), sanitizeHeader(event.Status))
-	body := fmt.Sprintf("Monitor: %s\nStatus: %s\nMessage: %s\nTime: %s",
-		event.MonitorName, event.Status, event.Message, event.OccurredAt.Format(time.RFC3339))
-
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
-		d.config.EmailFrom, d.config.EmailTo, subject, body)
+	msg := buildEmailMessage(d.config.EmailFrom, d.config.EmailTo, event)
 
 	addr := fmt.Sprintf("%s:%d", d.config.SMTPHost, d.config.SMTPPort)
 	var auth smtp.Auth
@@ -135,6 +127,20 @@ func (d *Dispatcher) sendEmail(event Event) {
 	if err := sendMailTimeout(addr, d.config.SMTPHost, auth, d.config.EmailFrom, []string{d.config.EmailTo}, []byte(msg), 10*time.Second); err != nil {
 		log.Printf("[alert] Email failed: %v", err)
 	}
+}
+
+// buildEmailMessage constructs the raw RFC 5322 message for an alert email.
+// from and to are sanitized (CR/LF stripped) before being placed in headers so
+// a configured email_from/email_to can't inject additional SMTP headers
+// (e.g. an unwanted Bcc). Subject values are sanitized for the same reason.
+func buildEmailMessage(from, to string, event Event) string {
+	subject := fmt.Sprintf("[teploy] %s is %s",
+		sanitizeHeader(event.MonitorName), sanitizeHeader(event.Status))
+	body := fmt.Sprintf("Monitor: %s\nStatus: %s\nMessage: %s\nTime: %s",
+		event.MonitorName, event.Status, event.Message, event.OccurredAt.Format(time.RFC3339))
+
+	return fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
+		sanitizeHeader(from), sanitizeHeader(to), subject, body)
 }
 
 // sendMailTimeout is a deadline-bounded replacement for smtp.SendMail so a hung
