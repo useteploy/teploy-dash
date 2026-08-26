@@ -57,12 +57,14 @@ func (r *Runner) Start() {
 		return
 	}
 
+	started := 0
 	for _, m := range monitors {
 		if m.Enabled {
 			r.startMonitor(m)
+			started++
 		}
 	}
-	log.Printf("[monitor] Started %d monitors", len(monitors))
+	log.Printf("[monitor] Started %d monitors", started)
 }
 
 // SetAlerter configures the alert dispatcher for state-change notifications.

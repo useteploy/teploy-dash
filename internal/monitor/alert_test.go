@@ -10,9 +10,12 @@ import (
 
 // mockStore is a minimal in-memory Store for testing check persistence
 // doesn't affect the state transition logic we care about.
-type mockStore struct{ checks []store.CheckResult }
+type mockStore struct {
+	checks   []store.CheckResult
+	monitors []store.Monitor
+}
 
-func (m *mockStore) ListMonitors() ([]store.Monitor, error)       { return nil, nil }
+func (m *mockStore) ListMonitors() ([]store.Monitor, error)       { return m.monitors, nil }
 func (m *mockStore) GetMonitor(id string) (*store.Monitor, error) { return nil, nil }
 func (m *mockStore) SaveMonitor(store.Monitor) error              { return nil }
 func (m *mockStore) DeleteMonitor(string) error                   { return nil }
