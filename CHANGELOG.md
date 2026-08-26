@@ -2,7 +2,28 @@
 
 All notable changes to teploy-dash are recorded here.
 
-## [Unreleased]
+## [0.1.16] - 2026-08-26
+
+### Fixed
+- **The alert email sanitized its Subject but not its From/To.** `sanitizeHeader`
+  was applied to the monitor name and status, so a monitor name could not inject
+  SMTP headers — but `email_from` and `email_to` went into the message raw, so a
+  configured address containing CR/LF could append its own headers (an unwanted
+  `Bcc:`, for one). Message construction moved into `buildEmailMessage`, which
+  sanitizes all three, with a test that asserts an injected `Bcc` does not reach
+  the header block.
+- **The monitor starter logged how many monitors existed, not how many started.**
+  `Started %d monitors` printed `len(monitors)`, so monitors skipped for being
+  disabled or unparseable were still counted as running — the log said everything
+  was up while it was not. It now counts actual starts.
+- **The on-demand health endpoint could not be tested, and CI had been red for
+  ten days because of it.** The `action == "health"` branch called package-level
+  `cli.IsInstalled()` while the server already carries the injectable
+  `s.cliInstalled`, which defaults to exactly that function. Production behaviour
+  is unchanged; the difference is that a test can inject it again, so
+  `TestAppHealth_UnhealthyVerdictIsAnAnswerNotAnError` no longer passes only on a
+  machine that happens to have the teploy binary on PATH. Four consecutive red CI
+  runs (2026-08-16 to 2026-08-26), including the run on the deployed tag.
 
 ## [0.1.15] - 2026-08-21
 
