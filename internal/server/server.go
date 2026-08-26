@@ -874,18 +874,34 @@ func sameOrigin(r *http.Request) bool {
 // could spoof it to evade the backoff. Only when the direct peer is a configured
 // trusted proxy (TEPLOY_DASH_TRUSTED_PROXY) is the forwarded client IP used, so
 // running behind Caddy doesn't collapse every client onto the proxy's IP.
+//
+// The chain is walked from the RIGHT, skipping addresses that are themselves
+// trusted proxies. Forward proxies append the address they received the request
+// from, so the rightmost non-trusted entry is the one the proxy actually
+// observed; anything to its left was supplied by the client and can be a
+// forgery. Reading the FIRST entry instead would let a brute-forcer prepend a
+// fresh IP to every request (and pin a lockout onto a victim's IP).
 func (g *authGate) clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if g.isTrustedProxy(host) {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
-				return first
-			}
-		}
+	if !g.isTrustedProxy(host) {
+		return host
 	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		if candidate == "" {
+			continue
+		}
+		if g.isTrustedProxy(candidate) {
+			continue // another trusted hop, not the client
+		}
+		return candidate
+	}
+	// Every entry was a trusted proxy (or the header was empty): the peer
+	// itself is the closest thing to a client address we can vouch for.
 	return host
 }
 

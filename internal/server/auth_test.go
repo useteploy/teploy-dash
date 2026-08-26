@@ -219,6 +219,24 @@ func TestAuthGate_TrustedProxyXFF(t *testing.T) {
 		t.Errorf("trusted proxy: expected forwarded client 203.0.113.9, got %q", got)
 	}
 
+	// A client may PREPEND a forged address; the proxy appends the address it
+	// actually saw. The rightmost non-trusted entry wins, so the forgery can
+	// neither mint fresh rate-limit keys nor pin a lockout on a victim.
+	spoofed := httptest.NewRequest("GET", "/", nil)
+	spoofed.RemoteAddr = "10.1.2.3:5000"
+	spoofed.Header.Set("X-Forwarded-For", "198.51.100.77, 203.0.113.9, 10.1.2.3")
+	if got := g.clientIP(spoofed); got != "203.0.113.9" {
+		t.Errorf("spoofed prefix: expected 203.0.113.9, got %q", got)
+	}
+
+	// A chain made only of trusted proxies leaves the peer as the answer.
+	allTrusted := httptest.NewRequest("GET", "/", nil)
+	allTrusted.RemoteAddr = "10.1.2.3:5000"
+	allTrusted.Header.Set("X-Forwarded-For", "10.9.9.9, 10.1.2.3")
+	if got := g.clientIP(allTrusted); got != "10.1.2.3" {
+		t.Errorf("all-trusted chain: expected 10.1.2.3, got %q", got)
+	}
+
 	untrusted := httptest.NewRequest("GET", "/", nil)
 	untrusted.RemoteAddr = "8.8.8.8:5000"
 	untrusted.Header.Set("X-Forwarded-For", "1.1.1.1")
