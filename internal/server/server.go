@@ -1329,7 +1329,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	// than reading recorded state, so it is deliberately NOT part of the app
 	// detail page's initial load — it runs when asked for.
 	case action == "health" && r.Method == "GET":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
