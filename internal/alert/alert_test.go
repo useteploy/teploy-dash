@@ -214,3 +214,38 @@ func TestSendWebhook_UnsignedWhenNoSecret(t *testing.T) {
 		t.Fatal("webhook was never delivered")
 	}
 }
+
+func TestBuildEmailMessage_SanitizesFromAndTo(t *testing.T) {
+	event := testEvent()
+	msg := buildEmailMessage("alerts@example.com\r\nBcc: attacker@evil.test", "ops@example.com", event)
+
+	headerPart := strings.SplitN(msg, "\r\n\r\n", 2)
+	if len(headerPart) != 2 {
+		t.Fatalf("message missing header/body separator: %q", msg)
+	}
+	headerLines := strings.Split(headerPart[0], "\r\n")
+	if len(headerLines) != 3 {
+		t.Fatalf("expected exactly 3 header lines, got %d: %v", len(headerLines), headerLines)
+	}
+	for _, line := range headerLines {
+		if strings.HasPrefix(line, "Bcc:") {
+			t.Fatalf("injected Bcc header line survived sanitization: %v", headerLines)
+		}
+	}
+	if !strings.HasPrefix(headerLines[0], "From: alerts@example.comBcc: attacker@evil.test") {
+		t.Errorf("unexpected From line: %q", headerLines[0])
+	}
+}
+
+func TestBuildEmailMessage_BenignInput(t *testing.T) {
+	event := testEvent()
+	got := buildEmailMessage("alerts@example.com", "ops@example.com", event)
+
+	subject := "[teploy] api is down"
+	body := "Monitor: api\nStatus: down\nMessage: connection refused\nTime: 2026-05-30T12:00:00Z"
+	want := "From: alerts@example.com\r\nTo: ops@example.com\r\nSubject: " + subject + "\r\n\r\n" + body
+
+	if got != want {
+		t.Errorf("benign input produced different message:\ngot:  %q\nwant: %q", got, want)
+	}
+}
