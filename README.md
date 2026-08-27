@@ -200,6 +200,10 @@ return 404.
 | `TEPLOY_DASH_TRUSTED_PROXY` | _(none)_ | Comma-separated proxy IPs/CIDRs. When set, the real client IP is read from `X-Forwarded-For` (for rate-limiting) and `X-Forwarded-Proto` is trusted for the secure-cookie flag. Set this when running behind Caddy/nginx. |
 | `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
 | `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
+| `TEPLOY_DASH_REQUIRE_NUCLEUS` | _(off)_ | `1`/`true` makes startup fail when `--nucleus-url` is set but unreachable, instead of falling back to the JSONL file store. |
+| `TEPLOY_SSH_KEY` | _(none)_ | Path to the SSH private key used for delegate actions; falls back to `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`. |
+| `TEPLOY_SSH_KNOWN_HOSTS` | `~/.ssh/known_hosts` | Known_hosts file used for host-key verification (trust-on-first-use). |
+| `TEPLOY_DASH_SSH_INSECURE` | _(off)_ | `1` accepts any host key (still recorded to known_hosts). Dangerous; local dev only. |
 
 ### Single sign-on (OIDC)
 
@@ -224,6 +228,8 @@ redirect URI with your provider.
 | `TEPLOY_DASH_OIDC_EDITOR_GROUP` | _(none)_ | Group whose members become `editor`. |
 | `TEPLOY_DASH_OIDC_VIEWER_GROUP` | _(none)_ | Group whose members become `viewer`. |
 | `TEPLOY_DASH_OIDC_DEFAULT_ROLE` | `viewer` | Role for an authenticated user matching no role claim or group (least privilege). |
+| `TEPLOY_DASH_OIDC_ALLOWED_EMAILS` | _(none)_ | Comma/space-separated email addresses allowed to sign in via SSO. When neither this nor `TEPLOY_DASH_OIDC_ALLOWED_DOMAINS` is set, every authenticated user is allowed. |
+| `TEPLOY_DASH_OIDC_ALLOWED_DOMAINS` | _(none)_ | Comma/space-separated email domains (e.g. `example.com`) allowed to sign in via SSO. |
 
 Role resolution order: a recognized `teploy_role` claim wins; otherwise groups
 are matched (admin > editor > viewer); otherwise the default role. SSO users are
