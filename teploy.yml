@@ -20,7 +20,8 @@
 
 app: dash
 domain: dash.example.com
-server: dash.example.com
+server: infra-home
+ingress: host
 
 port: 3456
 platform: linux/amd64
