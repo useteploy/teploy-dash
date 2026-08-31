@@ -50,6 +50,18 @@ teploy-dash (single Go binary)
 
 CLI writes state to `/deployments/{app}/state`. Dash reads those files (read-only) and shells out to the CLI for every action. Whether you deploy from terminal, UI button, or CI webhook — same state files. UI never writes deployment state itself.
 
+## Which Layer Owns a Defect
+
+Two repos sit below this one: **teploy-cli** (every action shells out to it) and
+**Nucleus** (pgx over pgwire). A wrong deploy is a CLI bug, a store that answers
+a correct query wrongly is a Nucleus bug, and neither gets patched by adding a
+shim here.
+
+When you can only work around one at this layer, log it so the real fix is not
+lost: Nucleus/Neutron findings go to `../_internal/UPSTREAM_BUGS.md`
+(append-only, template in the file), CLI ones to the umbrella queue. Never cut a
+Neutron/Nucleus release from a Teploy session.
+
 ## Project Structure
 
 ```
