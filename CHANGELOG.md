@@ -2,6 +2,19 @@
 
 All notable changes to teploy-dash are recorded here.
 
+## [Unreleased]
+
+### Changed
+- **The bundled teploy CLI is 0.1.33, up from 0.1.27.** Dash shells out to this
+  binary for deploy and rollback, so every app it deployed inherited the
+  stale-image defect: teploy skipped `docker pull` whenever the tag was already
+  in the server's local cache, so a floating tag could serve a build older than
+  the registry indefinitely. 0.1.33 pulls every tag and caches only
+  digest-pinned references. 0.1.31 had already fixed the other half, taking the
+  deploy version from the image rather than git HEAD — at 0.1.27 dash had
+  neither, which is the combination that let a container be named after a
+  commit its image did not contain.
+
 ## [0.1.16] - 2026-08-26
 
 ### Fixed
