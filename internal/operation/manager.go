@@ -188,7 +188,10 @@ func (m *Manager) execute(ctx context.Context, id string, command Command) {
 		m.finish(id, StatusCanceled, -1, "operation canceled")
 		return
 	}
-	m.setRunning(id)
+	if err := m.setRunning(id); err != nil {
+		m.finish(id, StatusFailed, -1, err.Error())
+		return
+	}
 	exitCode, err := m.executor(ctx, command, func(stream Stream, data string) {
 		eventType := EventStdout
 		if stream == StreamStderr {
@@ -211,20 +214,21 @@ func (m *Manager) execute(ctx context.Context, id string, command Command) {
 	m.finish(id, StatusSucceeded, exitCode, "")
 }
 
-func (m *Manager) setRunning(id string) {
+func (m *Manager) setRunning(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	op := m.operations[id]
 	if op == nil || op.Status != StatusQueued {
-		return
+		return nil
 	}
 	now := time.Now().UTC()
 	op.Status = StatusRunning
 	op.StartedAt = &now
 	if err := m.store.saveOperation(op); err != nil {
-		op.Error = err.Error()
+		return fmt.Errorf("persist running state: %w", err)
 	}
 	_ = m.appendEventLocked(id, EventStatus, string(StatusRunning))
+	return nil
 }
 
 func (m *Manager) finish(id string, status Status, exitCode int, message string) {

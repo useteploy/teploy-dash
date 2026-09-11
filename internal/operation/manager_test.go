@@ -188,6 +188,49 @@ func TestCancellation(t *testing.T) {
 	}
 }
 
+func TestSetRunningPersistFailureFailsBeforeExecution(t *testing.T) {
+	dir := t.TempDir()
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var runs atomic.Int32
+	executor := func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		runs.Add(1)
+		started <- struct{}{}
+		<-release
+		return 0, nil
+	}
+	manager := newTestManager(t, dir, 100, executor)
+	// Hold the per-target lock with the first operation so the second parks
+	// before its running transition, deterministically.
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	second, _, err := manager.Enqueue(deployRequest("web", "example/web:2"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force saveOperation to fail for the second operation: the atomic write
+	// cannot rename onto a directory.
+	record := filepath.Join(dir, "operations", "records", second.ID+".json")
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(record, 0700); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	failed := waitForStatus(t, manager, second.ID, StatusFailed)
+	if failed.ExitCode != nil {
+		t.Fatalf("failed operation recorded exit code %d, want none", *failed.ExitCode)
+	}
+	waitForStatus(t, manager, first.ID, StatusSucceeded)
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("executor ran %d times, want 1: the persisted-failure operation must not execute", got)
+	}
+}
+
 func TestStartupRecoveryMarksOrphansInterrupted(t *testing.T) {
 	dir := t.TempDir()
 	store, err := openFileStore(dir, 100)
