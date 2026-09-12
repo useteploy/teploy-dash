@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -150,6 +151,11 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		return nil, false, err
 	}
 	if err := m.appendEventLocked(id, EventStatus, string(StatusQueued)); err != nil {
+		// Roll back exactly like the saveOperation failure above: a queued
+		// record without its initial event has no worker, no cancel handle,
+		// and would strand the idempotency key against a retry.
+		delete(m.operations, id)
+		delete(m.idempotency, idempotencyKey)
 		m.mu.Unlock()
 		return nil, false, err
 	}
@@ -246,15 +252,25 @@ func (m *Manager) finish(id string, status Status, exitCode int, message string)
 		op.ExitCode = &exitCode
 	}
 	delete(m.cancels, id)
-	_ = m.store.saveOperation(op)
-	_ = m.appendEventLocked(id, EventStatus, string(status))
+	// The command's outcome is decided; these persistence results are not
+	// allowed to change it, but they are also not allowed to be silent: a
+	// failed terminal write means a restart recovers this operation as
+	// interrupted and the operator loses the record of what happened.
+	if err := m.store.saveOperation(op); err != nil {
+		log.Printf("[operation] terminal state persist failed for %s: %v", id, err)
+	}
+	if err := m.appendEventLocked(id, EventStatus, string(status)); err != nil {
+		log.Printf("[operation] terminal event persist failed for %s: %v", id, err)
+	}
 	m.closeSubscribersLocked(id)
 }
 
 func (m *Manager) emit(id string, eventType EventType, data string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_ = m.appendEventLocked(id, eventType, data)
+	if err := m.appendEventLocked(id, eventType, data); err != nil {
+		log.Printf("[operation] event persist failed for %s (%s): %v", id, eventType, err)
+	}
 }
 
 func (m *Manager) appendEventLocked(id string, eventType EventType, data string) error {

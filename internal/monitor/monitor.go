@@ -21,14 +21,20 @@ type Runner struct {
 	timers   map[string]*time.Ticker
 	stopChs  map[string]chan struct{}
 	lastStat map[string]string // last known status per monitor (for transition detection)
-	mu       sync.Mutex
+	// generations invalidates in-flight checks: every teardown (remove or
+	// reload) bumps the monitor's counter, and a check that started under an
+	// older generation must not save its result, mutate lastStat, or alert —
+	// it describes a configuration that no longer exists.
+	generations map[string]uint64
+	mu          sync.Mutex
 }
 
 // New creates a monitor runner.
 func New(st store.Store) *Runner {
 	return &Runner{
-		store:    st,
-		lastStat: make(map[string]string),
+		store:       st,
+		lastStat:    make(map[string]string),
+		generations: make(map[string]uint64),
 		client: &http.Client{
 			// No client-level Timeout: each check applies the monitor's own
 			// configured timeout via a per-request context (checkHTTP). A
@@ -175,6 +181,7 @@ func (r *Runner) stopMonitor(id string) {
 // teardownLocked stops and removes a monitor's ticker + goroutine. The caller
 // must hold r.mu (so startMonitor can reuse it without a non-reentrant relock).
 func (r *Runner) teardownLocked(id string) {
+	r.generations[id]++
 	if ch, ok := r.stopChs[id]; ok {
 		close(ch)
 		delete(r.stopChs, id)
@@ -196,6 +203,10 @@ func (r *Runner) Remove(id string) {
 }
 
 func (r *Runner) runCheck(m store.Monitor) {
+	r.mu.Lock()
+	generation := r.generations[m.ID]
+	r.mu.Unlock()
+
 	var result store.CheckResult
 	result.MonitorID = m.ID
 	result.CheckedAt = time.Now()
@@ -210,6 +221,18 @@ func (r *Runner) runCheck(m store.Monitor) {
 	default:
 		result.Status = "down"
 		result.Message = fmt.Sprintf("unknown monitor type: %s", m.Type)
+	}
+
+	// The check ran under the configuration captured above; if the monitor
+	// was removed or reloaded while it was in flight, the result is stale:
+	// saving it would resurrect lastStat for a deleted monitor or overwrite
+	// the new configuration's status, and a transition alert off it would
+	// be spurious.
+	r.mu.Lock()
+	stale := r.generations[m.ID] != generation
+	r.mu.Unlock()
+	if stale {
+		return
 	}
 
 	if err := r.store.SaveCheck(result); err != nil {
