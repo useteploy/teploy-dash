@@ -20,7 +20,18 @@ import (
 // webhookClient bounds webhook delivery. sendWebhook runs in its own goroutine
 // per alert; without a timeout a hanging endpoint would leak a goroutine on
 // every state transition.
-var webhookClient = &http.Client{Timeout: 10 * time.Second}
+//
+// Redirects are refused outright: Go's default redirect handling converts a
+// 301/302/303 POST into a bodyless GET, so a redirect to a friendly landing
+// page would consume the attempt (final 2xx) without ever delivering the
+// signed JSON — the alert is silently lost. Stopping at the first response
+// lets the >= 300 check below classify every redirect as non-delivery.
+var webhookClient = &http.Client{
+	Timeout: 10 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // Config holds alerting configuration.
 type Config struct {
@@ -110,7 +121,9 @@ func (d *Dispatcher) sendWebhook(event Event) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
+		// 3xx included: a redirect is a non-delivery, not a success —
+		// the receiver never saw the body (see webhookClient).
 		log.Printf("[alert] Webhook returned %d", resp.StatusCode)
 	}
 }

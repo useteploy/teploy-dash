@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 )
 
 // DASH-010: monitor targets can otherwise reach loopback, private-network,
@@ -89,26 +90,53 @@ func policyDialContext(allowInternal bool) func(ctx context.Context, network, ad
 		if err != nil {
 			return nil, err
 		}
-		// Dial the specific, already-validated address rather than passing
-		// the original hostname back to the dialer, which would re-resolve.
-		return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+		// Try each already-validated address within the check's total
+		// deadline: a dual-stack or multi-address service whose first
+		// returned address is unreachable still succeeds via a later one.
+		// Only filtered addresses are ever dialed — the policy is not
+		// weakened by the fallback.
+		var lastErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, lastErr
 	}
 }
 
 // httpClientFor returns an HTTP client whose Transport enforces the network
 // policy for this specific monitor (AllowInternal is a per-monitor choice, so
 // the client can't be a single shared instance).
-func httpClientFor(base *http.Client, allowInternal bool) *http.Client {
-	baseTransport, _ := base.Transport.(*http.Transport)
-	var transport *http.Transport
-	if baseTransport != nil {
-		transport = baseTransport.Clone()
-	} else {
-		transport = &http.Transport{}
+// policyTransports are shared, one per network-policy mode (the finite set:
+// internal-allowed or not). A fresh Transport per check left every check's
+// keep-alive sockets and read loops unclosed behind it; a shared transport
+// with an idle timeout lets connections recycle instead of accumulating
+// until the peer hangs up. Cross-policy reuse never happens — each mode
+// gets its own transport, so a connection dialed under one policy is never
+// reused by the other.
+var policyTransports = map[bool]*http.Transport{}
+
+func transportFor(allowInternal bool) *http.Transport {
+	if t, ok := policyTransports[allowInternal]; ok {
+		return t
 	}
-	transport.DialContext = policyDialContext(allowInternal)
+	t := &http.Transport{
+		IdleConnTimeout: 30 * time.Second,
+		DialContext:     policyDialContext(allowInternal),
+	}
+	policyTransports[allowInternal] = t
+	return t
+}
+
+func httpClientFor(base *http.Client, allowInternal bool) *http.Client {
 	return &http.Client{
-		Transport:     transport,
+		Transport:     transportFor(allowInternal),
 		CheckRedirect: base.CheckRedirect,
 	}
 }
