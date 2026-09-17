@@ -90,6 +90,9 @@ func main() {
 		}
 	} else {
 		fileStore = store.NewFileStore(*dataDir)
+		if err := fileStore.InitErr(); err != nil {
+			log.Fatalf("file store unavailable in %s: %v", *dataDir, err)
+		}
 		st = fileStore
 	}
 

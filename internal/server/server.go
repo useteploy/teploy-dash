@@ -212,6 +212,9 @@ func New(config Config) *Server {
 		// Restore-test runs go through the CLI delegate with --host <server>;
 		// non-root fleets also need --user, resolved the same way cliAppRun does.
 		s.restore.SetUserResolver(s.serverUser)
+		// The CLI treats --host as a raw address in app-scoped mode, so the
+		// alias must be resolved to the configured host first (A16).
+		s.restore.SetHostResolver(s.serverHost)
 	}
 	s.manifests, s.manifestInitErr = manifest.New(config.DataDir)
 	if s.manifestInitErr != nil {
@@ -1939,7 +1942,7 @@ func saveGroupsFile(data groupData) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0644)
+	return atomicFileWrite(path, raw, 0644)
 }
 
 func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
@@ -2019,7 +2022,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 			for i, g := range data.Groups {
 				if g.Name == groupName {
 					data.Groups[i].Name = body.Name
-					saveGroupsFile(data)
+					if err := saveGroupsFile(data); err != nil {
+						writeError(w, err.Error())
+						return
+					}
 					writeData(w, map[string]string{"status": "renamed"})
 					return
 				}
@@ -2051,7 +2057,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				data.Groups[i].Apps = filtered
-				saveGroupsFile(data)
+				if err := saveGroupsFile(data); err != nil {
+					writeError(w, err.Error())
+					return
+				}
 				writeData(w, map[string]string{"status": "unassigned"})
 				return
 			}
@@ -2082,7 +2091,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				data.Groups[i].Apps = append(data.Groups[i].Apps, body.App)
-				saveGroupsFile(data)
+				if err := saveGroupsFile(data); err != nil {
+					writeError(w, err.Error())
+					return
+				}
 				writeData(w, map[string]string{"status": "assigned"})
 				return
 			}
@@ -2112,7 +2124,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				data.Groups[i].Projects = append(data.Groups[i].Projects, projectEntry{Name: body.Name, Apps: []string{}})
-				saveGroupsFile(data)
+				if err := saveGroupsFile(data); err != nil {
+					writeError(w, err.Error())
+					return
+				}
 				writeData(w, map[string]string{"status": "created"})
 				return
 			}
@@ -2139,7 +2154,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 				for j, p := range g.Projects {
 					if p.Name == projectName {
 						data.Groups[i].Projects[j].Name = body.Name
-						saveGroupsFile(data)
+						if err := saveGroupsFile(data); err != nil {
+							writeError(w, err.Error())
+							return
+						}
 						writeData(w, map[string]string{"status": "renamed"})
 						return
 					}
@@ -2166,7 +2184,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				data.Groups[i].Projects = filtered
-				saveGroupsFile(data)
+				if err := saveGroupsFile(data); err != nil {
+					writeError(w, err.Error())
+					return
+				}
 				writeData(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -2194,7 +2215,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						data.Groups[i].Projects[j].Apps = filtered
-						saveGroupsFile(data)
+						if err := saveGroupsFile(data); err != nil {
+							writeError(w, err.Error())
+							return
+						}
 						writeData(w, map[string]string{"status": "unassigned"})
 						return
 					}
@@ -2230,9 +2254,12 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 									return
 								}
 							}
-							data.Groups[i].Projects[j].Apps = append(data.Groups[i].Projects[j].Apps, body.App)
-							saveGroupsFile(data)
-							writeData(w, map[string]string{"status": "assigned"})
+						data.Groups[i].Projects[j].Apps = append(data.Groups[i].Projects[j].Apps, body.App)
+						if err := saveGroupsFile(data); err != nil {
+							writeError(w, err.Error())
+							return
+						}
+						writeData(w, map[string]string{"status": "assigned"})
 							return
 						}
 					}
@@ -2400,10 +2427,43 @@ func loadNotificationsConfig() alert.Config {
 
 func saveNotificationsConfig(cfg alert.Config) error {
 	path := notificationsFilePath()
-	os.MkdirAll(filepath.Dir(path), 0755)
-	raw, _ := json.MarshalIndent(cfg, "", "  ")
-	// 0600: the file holds the SMTP password.
-	return os.WriteFile(path, raw, 0600)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	// 0600 + atomic: the file holds the SMTP password, and a partial write
+	// must never replace a complete config (A32).
+	return atomicFileWrite(path, raw, 0600)
+}
+
+// atomicFileWrite writes data to path via a same-directory temp file + rename
+// so a failed or partial write cannot replace the previous complete file.
+func atomicFileWrite(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
@@ -2983,7 +3043,7 @@ func (s *Server) saveHomepage(data homepageData) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0644)
+	return atomicFileWrite(path, raw, 0644)
 }
 
 func (s *Server) handleHomepage(w http.ResponseWriter, r *http.Request) {
@@ -3160,6 +3220,10 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		}
 		if t.IntervalHours < 1 {
 			t.IntervalHours = 24
+		}
+		if t.IntervalHours > 24*365 {
+			http.Error(w, "interval_hours must be between 1 and 8760", 400)
+			return
 		}
 		// Preserve the last result across config edits: the client only
 		// round-trips config fields, and an upsert that zeroed the result

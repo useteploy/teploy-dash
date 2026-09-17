@@ -91,6 +91,11 @@ type Store interface {
 	ListRestoreTests() ([]RestoreTest, error)
 	GetRestoreTest(id string) (*RestoreTest, error)
 	SaveRestoreTest(t RestoreTest) error
+	// SaveRestoreTestResult persists ONLY the last-result fields onto the
+	// stored configuration. A run completing after a config edit must not
+	// overwrite the edit, and a run completing after a delete must not
+	// resurrect the test (A15). A missing id is a no-op.
+	SaveRestoreTestResult(id string, result RestoreTest) error
 	DeleteRestoreTest(id string) error
 
 	// Check results

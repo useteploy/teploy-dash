@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,5 +183,125 @@ func TestFileStore_RestoreTestRoundTrip(t *testing.T) {
 	// Path-traversal guard, same rule as monitors.
 	if err := store.SaveRestoreTest(RestoreTest{ID: "../evil"}); err == nil {
 		t.Error("expected invalid-id rejection")
+	}
+}
+
+// A31: an oversized record in a history file must abort that file's cleanup
+// rewrite and PRESERVE the original, not silently replace it with a
+// truncated copy.
+func TestCleanup_OversizedRecordPreservesOriginal(t *testing.T) {
+	dir := t.TempDir()
+	s := NewFileStore(dir)
+	histDir := filepath.Join(dir, "history")
+	if err := os.MkdirAll(histDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(histDir, "m1.jsonl")
+
+	goodOld := `{"monitor_id":"m1","status":"up","checked_at":"2020-01-01T00:00:00Z"}` + "\n"
+	goodNew := `{"monitor_id":"m1","status":"up","checked_at":"2999-01-01T00:00:00Z"}` + "\n"
+	oversized := `{"monitor_id":"m1","status":"up","message":"` + strings.Repeat("x", 2*maxRecordBytes) + `"}` + "\n"
+	original := goodOld + oversized + goodNew
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Cleanup(); err == nil {
+		t.Fatal("expected Cleanup to report the unreadable history file")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != original {
+		t.Fatalf("oversized record rewrote the file:\n%d bytes before, %d after", len(original), len(after))
+	}
+
+	// Leftover temp files must not accumulate next to the preserved original.
+	entries, _ := os.ReadDir(histDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".cleanup-") {
+			t.Fatalf("cleanup left temp file behind: %s", e.Name())
+		}
+	}
+}
+
+// A31/A32: a healthy cleanup drops expired records and keeps fresh ones.
+func TestCleanup_DropsExpiredKeepsFresh(t *testing.T) {
+	s := NewFileStore(t.TempDir())
+	old := time.Now().AddDate(0, 0, -(RetentionDays + 1))
+	fresh := time.Now()
+	if err := s.SaveCheck(CheckResult{MonitorID: "m1", Status: "up", CheckedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCheck(CheckResult{MonitorID: "m1", Status: "up", CheckedAt: fresh}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	checks, err := s.GetChecks("m1", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("GetChecks: %v", err)
+	}
+	if len(checks) != 1 || !checks[0].CheckedAt.Equal(fresh) {
+		t.Fatalf("expected only the fresh check, got %d", len(checks))
+	}
+}
+
+// A32: a data directory that cannot be created surfaces through InitErr
+// instead of producing a silently broken store.
+func TestNewFileStore_UnwritableDirReportsInitErr(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-based failure does not trigger")
+	}
+	s := NewFileStore("/proc/definitely/not/writable")
+	if s.InitErr() == nil {
+		t.Fatal("expected InitErr for an unwritable data dir")
+	}
+}
+
+// A15: persisting a result must not resurrect a deleted test, and must not
+// overwrite configuration fields edited while the run was in flight.
+func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
+	s := NewFileStore(t.TempDir())
+	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A run started under the old config finishes after the operator edited
+	// the bucket.
+	run := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "old", LastOK: true, LastDetail: "ok", LastMetric: "checksum", LastRunAt: time.Now()}
+	if err := s.SaveRestoreTestResult("t1", run); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRestoreTest("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastOK != true || got.LastMetric != "checksum" {
+		t.Errorf("result fields not applied: %+v", got)
+	}
+
+	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "NEW", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveRestoreTestResult("t1", run); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetRestoreTest("t1")
+	if got.Bucket != "NEW" {
+		t.Errorf("config edit overwritten by late result: bucket=%q", got.Bucket)
+	}
+
+	// Deleted mid-run: no resurrect.
+	if err := s.DeleteRestoreTest("t1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveRestoreTestResult("t1", run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetRestoreTest("t1"); err == nil {
+		t.Error("deleted restore test resurrected by its own result")
 	}
 }

@@ -192,12 +192,21 @@ func (s *NucleusStore) SaveMonitor(m Monitor) error {
 func (s *NucleusStore) DeleteMonitor(id string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
-	_, err := s.pool.Exec(ctx, "DELETE FROM monitors WHERE id = $1", id)
+	// Both deletes commit or roll back together — separate statements could
+	// leave checks behind for a removed monitor (or remove checks for a
+	// monitor whose config row failed to delete) (A33).
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, "DELETE FROM checks WHERE monitor_id = $1", id)
-	return err
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "DELETE FROM monitors WHERE id = $1", id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM checks WHERE monitor_id = $1", id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *NucleusStore) ListRestoreTests() ([]RestoreTest, error) {
@@ -281,6 +290,27 @@ func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 	return err
 }
 
+// SaveRestoreTestResult applies only the last-result columns (A15): config
+// edits made while the run was in flight survive, and a deleted test stays
+// deleted (zero rows affected).
+func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
+	defer cancel()
+	var lastRunMs int64
+	if !result.LastRunAt.IsZero() {
+		lastRunMs = result.LastRunAt.UnixMilli()
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE restore_tests
+		 SET last_run_ms = $1, last_ok = $2, last_detail = $3,
+		     last_metric = $4, last_date = $5, last_duration_ms = $6
+		 WHERE id = $7`,
+		lastRunMs, result.LastOK, result.LastDetail, result.LastMetric,
+		result.LastDate, result.LastDurationMs, id,
+	)
+	return err
+}
+
 func (s *NucleusStore) DeleteRestoreTest(id string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
@@ -350,10 +380,13 @@ func (s *NucleusStore) GetStats(monitorID string, since time.Time) (*UptimeStats
 	var total, up, down int
 	var avgMs float64
 
+	// SUM over an empty set is NULL in PostgreSQL while COUNT is 0; scanning
+	// NULL into an ordinary int fails. COALESCE both aggregates to explicit
+	// zeros (A33).
 	err := s.pool.QueryRow(ctx,
 		`SELECT COUNT(*),
-		        SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END),
-		        SUM(CASE WHEN status != 'up' THEN 1 ELSE 0 END),
+		        COALESCE(SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN status != 'up' THEN 1 ELSE 0 END), 0),
 		        COALESCE(AVG(response_time_ms) FILTER (WHERE status = 'up'), 0)
 		 FROM checks WHERE monitor_id = $1 AND checked_at > $2`,
 		monitorID, since,
@@ -367,13 +400,15 @@ func (s *NucleusStore) GetStats(monitorID string, since time.Time) (*UptimeStats
 		uptimePct = float64(up) / float64(total) * 100
 	}
 
+	// Scale before converting: time.Duration(avgMs) truncates sub-millisecond
+	// precision to zero (A33).
 	return &UptimeStats{
 		MonitorID:     monitorID,
 		TotalChecks:   total,
 		UpChecks:      up,
 		DownChecks:    down,
 		UptimePercent: uptimePct,
-		AvgResponse:   time.Duration(avgMs) * time.Millisecond,
+		AvgResponse:   time.Duration(avgMs * float64(time.Millisecond)),
 	}, nil
 }
 

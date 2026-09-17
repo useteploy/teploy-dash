@@ -44,6 +44,11 @@ type Runner struct {
 	// userFor resolves the SSH user for a server name (from servers.yml via
 	// the dash server's cached list); nil/"" falls back to the CLI default.
 	userFor func(server string) string
+	// hostFor resolves a server ALIAS to its configured host/IP. The CLI's
+	// --host flag in app-scoped mode is a raw address, not a servers.yml key,
+	// so passing the alias fails with "no such host" whenever the two differ
+	// (A16). Nil falls back to the alias itself.
+	hostFor func(server string) string
 	runCLI  runCLIFunc
 	timers  map[string]*time.Ticker
 	stopChs map[string]chan struct{}
@@ -80,6 +85,13 @@ func (r *Runner) SetUserResolver(f func(server string) string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.userFor = f
+}
+
+// SetHostResolver installs the server-alias -> host/IP lookup (A16).
+func (r *Runner) SetHostResolver(f func(server string) string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hostFor = f
 }
 
 // Start loads all restore tests from the store and begins scheduling.
@@ -142,6 +154,11 @@ func (r *Runner) startTest(t store.RestoreTest) {
 	if interval < time.Hour {
 		interval = time.Hour
 	}
+	// Bound the conversion: an absurd interval_hours (e.g. 1e9) overflows
+	// time.Duration and produces a negative or tiny ticker period.
+	if interval > 365*24*time.Hour {
+		interval = 365 * 24 * time.Hour
+	}
 
 	ticker := time.NewTicker(interval)
 	stopCh := make(chan struct{})
@@ -197,6 +214,7 @@ func (r *Runner) teardownLocked(id string) {
 func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
 	r.mu.Lock()
 	userFor := r.userFor
+	hostFor := r.hostFor
 	runCLI := r.runCLI
 	r.mu.Unlock()
 
@@ -204,8 +222,14 @@ func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
 	if userFor != nil {
 		user = userFor(t.Server)
 	}
+	host := t.Server
+	if hostFor != nil {
+		if resolved := hostFor(t.Server); resolved != "" {
+			host = resolved
+		}
+	}
 
-	stdout, stderr, err := runCLI(t.Server, user, t.App, t.Accessory, t.Bucket, t.Region)
+	stdout, stderr, err := runCLI(host, user, t.App, t.Accessory, t.Bucket, t.Region)
 
 	t.LastRunAt = time.Now()
 	var res VerifyResult
@@ -230,7 +254,10 @@ func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
 		t.LastDurationMs = res.DurationMs
 	}
 
-	if err := r.store.SaveRestoreTest(t); err != nil {
+	// Persist ONLY the result fields (A15): a config edit saved while this
+	// long run was in flight must survive, and a deleted test must not be
+	// resurrected by its own completion.
+	if err := r.store.SaveRestoreTestResult(t.ID, t); err != nil {
 		log.Printf("[restoretest] Failed to save result for %s: %v", t.ID, err)
 	}
 

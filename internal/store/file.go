@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,19 +15,36 @@ import (
 // 7 days keeps files small and fast to scan. Use Nucleus for longer retention.
 const RetentionDays = 7
 
+// maxRecordBytes bounds one JSONL record while scanning history files. A
+// record larger than this stops the scanner; Cleanup and GetChecks treat that
+// as an error instead of silently rewriting a truncated file (A31).
+const maxRecordBytes = 1 << 20
+
 // FileStore implements Store using JSONL files. Fallback when Nucleus is not available.
 type FileStore struct {
 	dir string
-	mu  sync.RWMutex
+	// initErr records a directory-creation failure. The constructor keeps its
+	// signature (many callers), but the failure is not silent: InitErr lets
+	// main refuse to start, and every operation on an uninitialized store
+	// reports it (A32).
+	initErr error
+	mu      sync.RWMutex
 }
 
 // NewFileStore creates a file-based store in the given directory.
 func NewFileStore(dir string) *FileStore {
-	os.MkdirAll(filepath.Join(dir, "monitors"), 0755)
-	os.MkdirAll(filepath.Join(dir, "history"), 0755)
-	os.MkdirAll(filepath.Join(dir, "restore-tests"), 0755)
-	return &FileStore{dir: dir}
+	s := &FileStore{dir: dir}
+	for _, sub := range []string{"monitors", "history", "restore-tests"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0755); err != nil {
+			s.initErr = fmt.Errorf("create %s: %w", filepath.Join(dir, sub), err)
+			break
+		}
+	}
+	return s
 }
+
+// InitErr reports a store-construction failure (e.g. unwritable data dir).
+func (s *FileStore) InitErr() error { return s.initErr }
 
 func (s *FileStore) ListMonitors() ([]Monitor, error) {
 	s.mu.RLock()
@@ -86,7 +104,7 @@ func (s *FileStore) SaveMonitor(m Monitor) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.dir, "monitors", m.ID+".json"), data, 0644)
+	return atomicWrite(filepath.Join(s.dir, "monitors", m.ID+".json"), data, 0644)
 }
 
 func (s *FileStore) DeleteMonitor(id string) error {
@@ -96,8 +114,17 @@ func (s *FileStore) DeleteMonitor(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	os.Remove(filepath.Join(s.dir, "monitors", id+".json"))
-	os.Remove(filepath.Join(s.dir, "history", id+".jsonl"))
+	// An already-absent monitor is documented idempotent success; the history
+	// file is still removed so a re-created monitor doesn't inherit stale
+	// results. Every other remove error is returned (A32).
+	for _, path := range []string{
+		filepath.Join(s.dir, "monitors", id+".json"),
+		filepath.Join(s.dir, "history", id+".jsonl"),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -159,7 +186,7 @@ func (s *FileStore) SaveRestoreTest(t RestoreTest) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.dir, "restore-tests", t.ID+".json"), data, 0644)
+	return atomicWrite(filepath.Join(s.dir, "restore-tests", t.ID+".json"), data, 0644)
 }
 
 func (s *FileStore) DeleteRestoreTest(id string) error {
@@ -169,8 +196,45 @@ func (s *FileStore) DeleteRestoreTest(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	os.Remove(filepath.Join(s.dir, "restore-tests", id+".json"))
+	if err := os.Remove(filepath.Join(s.dir, "restore-tests", id+".json")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return nil
+}
+
+// SaveRestoreTestResult applies only the Last* fields of `result` onto the
+// stored configuration (A15): config edits made while the run was in flight
+// survive, and a deleted test stays deleted.
+func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) error {
+	if !ValidID(id) {
+		return fmt.Errorf("invalid restore test id %q", id)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := filepath.Join(s.dir, "restore-tests", id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // deleted mid-run: do not resurrect
+		}
+		return err
+	}
+	var stored RestoreTest
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return fmt.Errorf("reading stored restore test: %w", err)
+	}
+	stored.LastRunAt = result.LastRunAt
+	stored.LastOK = result.LastOK
+	stored.LastDetail = result.LastDetail
+	stored.LastMetric = result.LastMetric
+	stored.LastDate = result.LastDate
+	stored.LastDurationMs = result.LastDurationMs
+	out, err := json.MarshalIndent(stored, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, out, 0644)
 }
 
 func (s *FileStore) SaveCheck(result CheckResult) error {
@@ -215,6 +279,7 @@ func (s *FileStore) GetChecks(monitorID string, since time.Time, limit int) ([]C
 
 	var results []CheckResult
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64<<10), maxRecordBytes)
 	for scanner.Scan() {
 		var r CheckResult
 		if json.Unmarshal(scanner.Bytes(), &r) == nil {
@@ -222,6 +287,11 @@ func (s *FileStore) GetChecks(monitorID string, since time.Time, limit int) ([]C
 				results = append(results, r)
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		// A read failure (oversized or unreadable record) must surface, not
+		// silently return a truncated history as if it were complete (A31).
+		return nil, fmt.Errorf("reading history for %s: %w", monitorID, err)
 	}
 
 	// Return the most recent N, newest-first — matching the Nucleus store's
@@ -272,6 +342,12 @@ func (s *FileStore) GetStats(monitorID string, since time.Time) (*UptimeStats, e
 
 // Cleanup removes check history older than RetentionDays.
 // Should be called periodically (e.g. daily).
+//
+// The rewrite is checked end to end (A31): every scan, decode, write, sync,
+// and close error aborts THAT file's rewrite and preserves the original — the
+// previous version ignored all of them and renamed a possibly-truncated
+// temporary file over good history (an oversized record silently reduced a
+// 71KB file to 20 bytes in the audit's reproduction).
 func (s *FileStore) Cleanup() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -280,48 +356,114 @@ func (s *FileStore) Cleanup() error {
 
 	entries, err := os.ReadDir(filepath.Join(s.dir, "history"))
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 
+	var firstErr error
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) != ".jsonl" {
 			continue
 		}
 
 		path := filepath.Join(s.dir, "history", e.Name())
-		tmpPath := path + ".tmp"
 
-		inFile, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-
-		outFile, err := os.Create(tmpPath)
-		if err != nil {
-			inFile.Close()
-			continue
-		}
-
-		scanner := bufio.NewScanner(inFile)
-		kept := 0
-		for scanner.Scan() {
-			var r CheckResult
-			if json.Unmarshal(scanner.Bytes(), &r) == nil {
-				if r.CheckedAt.After(cutoff) {
-					outFile.Write(scanner.Bytes())
-					outFile.Write([]byte("\n"))
-					kept++
-				}
+		if err := rewriteHistoryFile(path, cutoff); err != nil {
+			// One bad file must not stop the others from being cleaned, but
+			// the failure is reported rather than swallowed.
+			if firstErr == nil {
+				firstErr = fmt.Errorf("cleanup %s: %w", path, err)
 			}
 		}
+	}
+	return firstErr
+}
 
-		inFile.Close()
-		outFile.Close()
-
-		os.Rename(tmpPath, path)
+// rewriteHistoryFile rewrites one history file without records older than
+// cutoff, preserving the original on any failure.
+func rewriteHistoryFile(path string, cutoff time.Time) error {
+	inFile, err := os.Open(path)
+	if err != nil {
+		return err
 	}
 
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".cleanup-*")
+	if err != nil {
+		inFile.Close()
+		return err
+	}
+	tmpName := tmp.Name()
+	committed := false
+	defer func() {
+		inFile.Close()
+		if !committed {
+			tmp.Close()
+			os.Remove(tmpName)
+		}
+	}()
+
+	scanner := bufio.NewScanner(inFile)
+	scanner.Buffer(make([]byte, 64<<10), maxRecordBytes)
+	encoder := json.NewEncoder(tmp)
+	for scanner.Scan() {
+		var r CheckResult
+		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+			// Corrupt record: keep it rather than delete data we don't
+			// understand — quarantine decisions belong to an operator.
+			if err := encoder.Encode(r); err != nil && err != io.EOF {
+				return err
+			}
+			continue
+		}
+		if !r.CheckedAt.Before(cutoff) {
+			if err := encoder.Encode(r); err != nil {
+				return err
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	committed = true
 	return nil
+}
+
+// atomicWrite writes data to path via a same-directory temp file + rename, so
+// a partial write can never replace a complete file (A32).
+func atomicWrite(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (s *FileStore) Close() error {
