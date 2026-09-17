@@ -56,6 +56,10 @@ func RunStream(ctx context.Context, args []string, timeout time.Duration, onEven
 	cmd := exec.CommandContext(ctx, "teploy", args...)
 	configureProcessGroup(cmd)
 	cmd.Cancel = func() error { return terminateProcessGroup(cmd) }
+	// WaitDelay: once the context is canceled, give the pipe readers a short
+	// grace period to drain, then force-close them so Wait cannot block
+	// forever on a child that ignores termination (os/exec contract).
+	cmd.WaitDelay = 3 * time.Second
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open teploy stdout: %w", err)
@@ -71,6 +75,8 @@ func RunStream(ctx context.Context, args []string, timeout time.Duration, onEven
 	var stdoutBuffer, stderrBuffer lockedBuffer
 	var wg sync.WaitGroup
 	var callbackMu sync.Mutex
+	var scanErr error
+	var scanErrMu sync.Mutex
 	scan := func(stream Stream, scanner *bufio.Scanner, output *lockedBuffer) {
 		defer wg.Done()
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -83,12 +89,25 @@ func RunStream(ctx context.Context, args []string, timeout time.Duration, onEven
 				callbackMu.Unlock()
 			}
 		}
+		// A scanner error (e.g. a line beyond the 1 MiB limit) must fail the
+		// command — otherwise the pipe stops being drained, the child can
+		// block on a full pipe, and the loss is invisible.
+		if err := scanner.Err(); err != nil {
+			scanErrMu.Lock()
+			if scanErr == nil {
+				scanErr = fmt.Errorf("reading teploy %s output: %w", stream, err)
+			}
+			scanErrMu.Unlock()
+		}
 	}
 	wg.Add(2)
 	go scan(StreamStdout, bufio.NewScanner(stdout), &stdoutBuffer)
 	go scan(StreamStderr, bufio.NewScanner(stderr), &stderrBuffer)
-	waitErr := cmd.Wait()
+	// The os/exec pipe contract requires the reads to FINISH before Wait is
+	// called; the previous Wait-then-Wait order could deadlock on a child
+	// producing output after exit or block on oversized lines (A22).
 	wg.Wait()
+	waitErr := cmd.Wait()
 
 	result := &Result{Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}
 	if exitErr, ok := waitErr.(*exec.ExitError); ok {
@@ -96,6 +115,9 @@ func RunStream(ctx context.Context, args []string, timeout time.Duration, onEven
 	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
+	}
+	if scanErr != nil {
+		return result, scanErr
 	}
 	if waitErr != nil {
 		if _, ok := waitErr.(*exec.ExitError); !ok {
@@ -262,6 +284,9 @@ func checkExit(result *Result, args []string) error {
 }
 
 // RunJSON executes a teploy CLI command with --json flag and parses output.
+// Non-JSON output on a zero exit is an error, not a passthrough string: the
+// caller expects a machine payload and silently returning the raw text made
+// "unknown/error" indistinguishable from a real answer (A30).
 func RunJSON(args ...string) (interface{}, error) {
 	args = append(args, "--json")
 	result, err := Run(args...)
@@ -274,8 +299,7 @@ func RunJSON(args ...string) (interface{}, error) {
 
 	var data interface{}
 	if err := json.Unmarshal([]byte(result.Stdout), &data); err != nil {
-		// Return raw stdout if not JSON
-		return result.Stdout, nil
+		return nil, fmt.Errorf("teploy %s returned non-JSON output: %w", strings.Join(args[:len(args)-1], " "), err)
 	}
 	return data, nil
 }

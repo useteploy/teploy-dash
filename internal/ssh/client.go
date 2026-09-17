@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -41,8 +42,10 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	if user == "" {
 		user = "root"
 	}
-	if !strings.Contains(host, ":") {
-		host = host + ":22"
+	// A bare IPv6 literal contains colons but no port; only treat the address
+	// as port-suffixed when it actually splits (A18).
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(host, "22")
 	}
 
 	signers, encryptedFound, err := loadSigners(keyPath)
@@ -52,9 +55,13 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 
 	var auth []ssh.AuthMethod
 	// ssh-agent is the correct way to use encrypted keys non-interactively in a
-	// daemon: when SSH_AUTH_SOCK is set, offer the agent's keys.
-	if m, ok := agentAuthMethod(); ok {
-		auth = append(auth, m)
+	// daemon: when SSH_AUTH_SOCK is set, offer the agent's keys. The agent
+	// connection is owned by this function and closed once the handshake is
+	// done — previously every attempt leaked the unix socket (A18).
+	agentMethod, agentConn, hasAgent := agentAuthMethod()
+	if hasAgent {
+		auth = append(auth, agentMethod)
+		defer agentConn.Close()
 	}
 	if len(signers) > 0 {
 		auth = append(auth, ssh.PublicKeys(signers...))
@@ -66,13 +73,18 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 		return nil, fmt.Errorf("no SSH keys found; set TEPLOY_SSH_KEY or place a key at ~/.ssh/id_ed25519")
 	}
 
+	callback, err := hostKeyCallback()
+	if err != nil {
+		return nil, err
+	}
 	cfg := &ssh.ClientConfig{
 		User: user,
 		Auth: auth,
-		// Verify host keys (trust-on-first-use) by default so a changed key on
-		// an untrusted network is detected, instead of the old accept-anything.
-		// Set TEPLOY_DASH_SSH_INSECURE=1 to fall back to accept-all (logged).
-		HostKeyCallback: hostKeyCallback(),
+		// Verify host keys (trust-on-first-use against a fresh file) by
+		// default so a changed key on an untrusted network is detected,
+		// instead of the old accept-anything. Set TEPLOY_DASH_SSH_INSECURE=1
+		// to fall back to accept-all (logged).
+		HostKeyCallback: callback,
 	}
 
 	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", host)
@@ -98,10 +110,16 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	return &Client{client: ssh.NewClient(c, chans, reqs), host: host}, nil
 }
 
-// hostKeyCallback returns a known_hosts-verifying callback (trust-on-first-use),
-// or accept-all when TEPLOY_DASH_SSH_INSECURE=1 is set. Mirrors the CLI's
-// behaviour so the two products are consistent.
-func hostKeyCallback() ssh.HostKeyCallback {
+// hostKeyCallback returns a known_hosts-verifying callback (trust-on-first-use
+// against a fresh file), or accept-all when TEPLOY_DASH_SSH_INSECURE=1 is set.
+// Mirrors the CLI's behaviour so the two products are consistent.
+//
+// Fail-closed policy (A17): an existing trust store that cannot be read or
+// parsed is an ERROR, never permission to trust new keys — the previous
+// version fell back to accept-new whenever knownhosts.New failed (malformed
+// file) or Stat failed for any reason, removing server authentication
+// exactly when the trust store was broken.
+func hostKeyCallback() (ssh.HostKeyCallback, error) {
 	path := os.Getenv("TEPLOY_SSH_KNOWN_HOSTS")
 	if path == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -115,53 +133,58 @@ func hostKeyCallback() ssh.HostKeyCallback {
 		// known_hosts and has no insecure mode, so without a recorded key it
 		// fails with "knownhosts: key is unknown/mismatch". Recording the key
 		// the dash already accepts lets the CLI reach the same servers.
-		return insecureRecordingCallback(path)
+		return insecureRecordingCallback(path), nil
 	}
 	if path == "" {
-		return acceptNewHostKeyCallback("") // can't resolve home; TOFU with no file
+		// Can't resolve home: no durable trust store. Fail closed rather
+		// than accept keys with nowhere to persist them.
+		return nil, fmt.Errorf("no usable known_hosts path (HOME unset and TEPLOY_SSH_KNOWN_HOSTS not set)")
 	}
 	if _, err := os.Stat(path); err != nil {
-		return acceptNewHostKeyCallback(path) // record on first connect
+		if errors.Is(err, fs.ErrNotExist) {
+			return acceptNewHostKeyCallback(path), nil // genuinely fresh: TOFU
+		}
+		return nil, fmt.Errorf("checking SSH trust store %s: %w", path, err)
 	}
 	cb, err := knownhosts.New(path)
 	if err != nil {
-		return acceptNewHostKeyCallback(path)
+		return nil, fmt.Errorf("load SSH trust store %s: %w", path, err)
 	}
-	return cb
+	return cb, nil
 }
 
 // acceptNewHostKeyCallback records an unknown host key on first connect and
 // errors on a genuine mismatch (same key type, different key = possible MITM).
+// An unknown key is only accepted when its trust record DURABLY persists —
+// a failed append is a connection error, not silent acceptance (A17).
 func acceptNewHostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
-	var existing ssh.HostKeyCallback
-	if knownHostsPath != "" {
-		existing, _ = knownhosts.New(knownHostsPath)
-	}
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		if existing != nil {
-			err := existing(hostname, remote, key)
-			if err == nil {
+		if existing, err := knownhosts.New(knownHostsPath); err == nil {
+			verifyErr := existing(hostname, remote, key)
+			if verifyErr == nil {
 				return nil
 			}
 			var keyErr *knownhosts.KeyError
-			if errors.As(err, &keyErr) && len(keyErr.Want) > 0 {
+			if errors.As(verifyErr, &keyErr) && len(keyErr.Want) > 0 {
 				for _, want := range keyErr.Want {
 					if want.Key.Type() == key.Type() {
-						return err // same type, different key = real mismatch
+						return verifyErr // same type, different key = real mismatch
 					}
 				}
 			}
 		}
-		if knownHostsPath == "" {
-			return nil // nowhere to persist; accept this session
-		}
 		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
-		f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+		if err := os.MkdirAll(filepath.Dir(knownHostsPath), 0700); err != nil {
+			return fmt.Errorf("recording new host key (mkdir): %w", err)
+		}
+		f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 		if err != nil {
-			return nil
+			return fmt.Errorf("recording new host key for %s: %w", hostname, err)
 		}
 		defer f.Close()
-		fmt.Fprintln(f, line)
+		if _, err := fmt.Fprintln(f, line); err != nil {
+			return fmt.Errorf("recording new host key for %s: %w", hostname, err)
+		}
 		return nil
 	}
 }
@@ -274,16 +297,18 @@ func loadSigners(keyPath string) (signers []ssh.Signer, encryptedFound bool, err
 }
 
 // agentAuthMethod returns an AuthMethod backed by ssh-agent when SSH_AUTH_SOCK
-// is set, which is how a daemon uses passphrase-protected keys non-interactively.
-func agentAuthMethod() (ssh.AuthMethod, bool) {
+// is set, plus the agent connection's owner so the caller can close it once
+// authentication is done — each Connect previously leaked the unix socket
+// (A18).
+func agentAuthMethod() (ssh.AuthMethod, io.Closer, bool) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
-		return nil, false
+		return nil, nil, false
 	}
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	ag := agent.NewClient(conn)
-	return ssh.PublicKeysCallback(ag.Signers), true
+	return ssh.PublicKeysCallback(ag.Signers), conn, true
 }
