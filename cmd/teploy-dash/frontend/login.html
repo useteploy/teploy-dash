@@ -134,7 +134,17 @@
 
     function safeNext() {
       const next = new URLSearchParams(location.search).get('next') || '/';
-      return next.startsWith('/') && !next.startsWith('//') ? next : '/';
+      // Backslashes and control characters are rejected before normalization:
+      // '/\\evil.example' passes a plain startsWith('/') guard but browsers
+      // normalize it to an external origin.
+      if (!next.startsWith('/') || next.startsWith('//') ||
+          /[\\\u0000-\u0020\u007f]/.test(next)) return '/';
+      try {
+        const resolved = new URL(next, location.origin);
+        return resolved.origin === location.origin
+          ? resolved.pathname + resolved.search + resolved.hash
+          : '/';
+      } catch { return '/'; }
     }
 
     // Surface an SSO failure bounced back via ?error=.

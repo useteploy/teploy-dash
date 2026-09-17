@@ -847,7 +847,7 @@
                 <span class="dot" :class="cliStatus?.installed ? 'green' : 'gray'"></span>
                 CLI <span x-text="cliStatus?.version || 'not installed'"></span>
               </span>
-              <button class="btn btn-primary" @click="showCreateDialog = true">Add Monitor</button>
+              <button class="btn btn-primary" @click="openCreate()">Add Monitor</button>
             </div>
           </div>
 
@@ -891,7 +891,7 @@
               </div>
               <h3>No monitors yet</h3>
               <p>Add your first uptime monitor to start tracking availability.</p>
-              <button class="btn btn-primary" @click="showCreateDialog = true">Add Monitor</button>
+              <button class="btn btn-primary" @click="openCreate()">Add Monitor</button>
             </div>
           </template>
         </div>
@@ -971,9 +971,9 @@
       </template>
 
       <!-- Create Monitor Dialog -->
-      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="showCreateDialog = false" x-cloak>
+      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="closeDialog()" x-cloak>
         <div class="dialog">
-          <h2>Add Monitor</h2>
+          <h2 x-text="editingId ? 'Edit Monitor' : 'Add Monitor'">Add Monitor</h2>
           <form @submit.prevent="createMonitor()">
             <div class="field">
               <label>Name</label>
@@ -984,13 +984,13 @@
               <select x-model="newMonitor.type">
                 <option value="http">HTTP</option>
                 <option value="tcp">TCP</option>
-                <option value="ping">Ping</option>
+                <option value="ping">TCP ping (reachability)</option>
               </select>
             </div>
             <div class="field">
               <label>Target</label>
               <input type="text" x-model="newMonitor.target"
-                :placeholder="newMonitor.type === 'http' ? 'https://example.com' : (newMonitor.type === 'tcp' ? 'example.com:5432' : 'example.com')" required>
+                :placeholder="newMonitor.type === 'http' ? 'https://example.com' : 'example.com:5432 (host:port)'" required>
             </div>
             <div class="field">
               <label><input type="checkbox" x-model="newMonitor.allow_internal"> Allow internal targets</label>
@@ -1034,10 +1034,10 @@
               </div>
             </div>
             <div class="dialog-actions">
-              <button type="button" class="btn" @click="showCreateDialog = false">Cancel</button>
+              <button type="button" class="btn" @click="closeDialog()">Cancel</button>
               <button type="submit" class="btn btn-primary" :disabled="creating">
-                <span x-show="!creating">Create</span>
-                <span x-show="creating">Creating...</span>
+                <span x-show="!creating" x-text="editingId ? 'Save' : 'Create'">Create</span>
+                <span x-show="creating" x-text="editingId ? 'Saving...' : 'Creating...'">Creating...</span>
               </button>
             </div>
           </form>
@@ -1161,10 +1161,10 @@
               </select>
             </div>
             <div class="dialog-actions">
-              <button type="button" class="btn" @click="showCreateDialog = false">Cancel</button>
+              <button type="button" class="btn" @click="closeDialog()">Cancel</button>
               <button type="submit" class="btn btn-primary" :disabled="creating">
-                <span x-show="!creating">Create</span>
-                <span x-show="creating">Creating...</span>
+                <span x-show="!creating" x-text="editingId ? 'Save' : 'Create'">Create</span>
+                <span x-show="creating" x-text="editingId ? 'Saving...' : 'Creating...'">Creating...</span>
               </button>
             </div>
           </form>

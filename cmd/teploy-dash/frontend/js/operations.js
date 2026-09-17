@@ -28,9 +28,12 @@ document.addEventListener('alpine:init', () => {
 
     async init() {
       await this.load();
-      // Light auto-refresh while any operation is still active.
+      // Poll while the page is visible — not only while the list already
+      // holds an active operation (an empty or terminal-only list never
+      // discovered work started elsewhere until a manual refresh).
       this._timer = setInterval(() => {
-        if (this.ops.some(o => o.status === 'queued' || o.status === 'running')) this.load();
+        if (document.visibilityState !== 'visible') return;
+        this.load();
       }, 3000);
     },
     destroy() {
@@ -80,14 +83,18 @@ document.addEventListener('alpine:init', () => {
     },
 
     // SSE: replays the full event history, then follows live. Status events
-    // refresh the header; stdout/stderr append to the log.
+    // refresh the header; stdout/stderr append to the log (bounded).
     stream(id) {
       this._es = new EventSource(`/api/operations/${id}/events`);
+      const maxLines = 5000;
       const append = (e, cls) => {
         const ev = JSON.parse(e.data);
         // Events are line-based with the newline stripped (bufio.Scanner);
         // re-add it so the pre-wrap log viewer renders one line per event.
         this.lines.push({ text: ev.data + '\n', cls });
+        if (this.lines.length > maxLines) {
+          this.lines = this.lines.slice(-Math.floor(maxLines / 2));
+        }
         this.$nextTick(() => {
           const el = this.$refs.opLog;
           if (el) el.scrollTop = el.scrollHeight;
@@ -99,9 +106,15 @@ document.addEventListener('alpine:init', () => {
         try { this.op = await api.get(`/api/operations/${id}`); } catch {}
         if (this.op && this.terminal()) this._es.close();
       });
-      this._es.onerror = () => {
-        // Terminal operations close the stream server-side; nothing to do.
-        if (this.op && this.terminal()) this._es.close();
+      this._es.onerror = async () => {
+        // Terminal operations close the stream server-side; anything else is
+        // a dropped connection — re-fetch the authoritative status instead of
+        // showing an indefinitely "running" operation.
+        if (this.op && this.terminal()) {
+          this._es.close();
+          return;
+        }
+        try { this.op = await api.get(`/api/operations/${id}`); } catch {}
       };
     },
 
@@ -112,7 +125,10 @@ document.addEventListener('alpine:init', () => {
       return ['queued', 'running'].includes(this.op?.status);
     },
     retryable() {
-      return ['failed', 'canceled', 'interrupted'].includes(this.op?.status);
+      // A secret-bearing operation cannot be replayed from the redacted
+      // request — the server would refuse it; don't offer the button.
+      return !this.op?.has_secrets &&
+        ['failed', 'canceled', 'interrupted'].includes(this.op?.status);
     },
 
     async cancel() {

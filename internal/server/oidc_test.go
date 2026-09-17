@@ -198,3 +198,47 @@ func TestNewOIDCAuthDefaults(t *testing.T) {
 		t.Fatalf("default label: got %q", o.label)
 	}
 }
+
+// A06: backslash and control-character redirect targets must be rejected —
+// browsers normalize '/\host/path' to an external origin despite the leading
+// single slash.
+func TestSanitizeNextRejectsBackslashExternalTargets(t *testing.T) {
+	for _, bad := range []string{
+		"/\\evil.example/path",
+		"//evil.example",
+		"https://evil.example",
+		"/%5cevil.example",
+		"/\n/evil",
+		"bad",
+	} {
+		if got := sanitizeNext(bad); got != "/" {
+			t.Errorf("sanitizeNext(%q) = %q, want /", bad, got)
+		}
+	}
+	if got := sanitizeNext("/apps/x?tab=logs#end"); got != "/apps/x?tab=logs#end" {
+		t.Errorf("legitimate path rewritten: %q", got)
+	}
+}
+
+// A08: an allowlist decision keyed on the email claim requires a verified
+// email; an unverified allowed-domain address must not pass.
+func TestOIDCAllowedRequiresVerifiedEmail(t *testing.T) {
+	o := &oidcAuth{
+		allowedEmails:  map[string]bool{"ops@example.com": true},
+		allowedDomains: []string{"example.com"},
+	}
+	if !o.allowed(map[string]any{"email": "ops@example.com", "email_verified": true}) {
+		t.Error("verified allowed email should pass")
+	}
+	if o.allowed(map[string]any{"email": "attacker@example.com", "email_verified": false}) {
+		t.Error("unverified allowed-domain email passed the allowlist")
+	}
+	if o.allowed(map[string]any{"email": "ops@example.com"}) {
+		t.Error("missing email_verified claim passed the allowlist")
+	}
+	// No allowlist configured: every IdP-authenticated identity passes.
+	open := &oidcAuth{}
+	if !open.allowed(map[string]any{"email": "anyone@anywhere"}) {
+		t.Error("open instance rejected an authenticated identity")
+	}
+}

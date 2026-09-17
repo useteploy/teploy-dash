@@ -171,13 +171,19 @@ func parseOIDCAllowlistSlice(raw string) []string {
 }
 
 // allowed reports whether the authenticated identity may sign in. With no
-// allowlist configured it always returns true.
+// allowlist configured it always returns true. When an allowlist IS
+// configured, the email claim is an authorization key — so it must be
+// VERIFIED by the IdP: a provider that lets users assert an unverified email
+// in an allowed domain would otherwise admit the wrong account (A08).
 func (o *oidcAuth) allowed(claims map[string]any) bool {
 	if len(o.allowedEmails) == 0 && len(o.allowedDomains) == 0 {
 		return true
 	}
 	email := strings.ToLower(claimString(claims["email"]))
 	if email == "" {
+		return false
+	}
+	if verified, ok := claims["email_verified"].(bool); !ok || !verified {
 		return false
 	}
 	if o.allowedEmails[email] {
@@ -212,7 +218,13 @@ func (o *oidcAuth) ensure(ctx context.Context) error {
 	if o.provider != nil {
 		return nil
 	}
-	p, err := oidc.NewProvider(ctx, o.issuer)
+	// Discovery holds initMu; bound it with its own deadline and HTTP client
+	// so an IdP that accepts connections but stalls the handshake cannot pin
+	// the mutex and block every subsequent login attempt (A09).
+	discoverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	discoverCtx = oidc.ClientContext(discoverCtx, &http.Client{Timeout: 10 * time.Second})
+	p, err := oidc.NewProvider(discoverCtx, o.issuer)
 	if err != nil {
 		return err
 	}
@@ -501,11 +513,23 @@ func (g *authGate) oidcFail(w http.ResponseWriter, r *http.Request, msg string) 
 }
 
 // sanitizeNext keeps post-login redirects on this origin (no open redirect).
+// Backslashes and control characters are rejected before any URL reasoning —
+// browsers normalize '/\host/path' to an external origin even though it
+// starts with a single slash (A06).
 func sanitizeNext(next string) string {
-	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
-		return next
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return "/"
 	}
-	return "/"
+	for _, r := range next {
+		if r <= 0x20 || r == 0x7f || r == '\\' {
+			return "/"
+		}
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Opaque != "" || strings.Contains(u.Path, "\\") {
+		return "/"
+	}
+	return next
 }
 
 func oidcRandToken() string {

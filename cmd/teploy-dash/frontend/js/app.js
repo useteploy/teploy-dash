@@ -40,70 +40,57 @@ async function trackedFetch(...args) {
 }
 
 // ── API Client ──
+// requestJSON is the single shared parser: it checks HTTP status (a plain-text
+// 401/500 used to surface as a JSON parse error), understands 204, rejects
+// non-JSON success payloads, and unwraps the {data: ...} envelope when asked
+// (raw endpoints like monitors answer directly).
+async function requestJSON(url, options = {}, unwrap = true) {
+  const {body, ...init} = options;
+  const headers = new Headers(init.headers || {});
+  headers.set('Accept', 'application/json');
+  if (body !== undefined) headers.set('Content-Type', 'application/json');
+  const response = await trackedFetch(url, {
+    ...init, headers, credentials: 'same-origin', cache: 'no-store',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    window.dispatchEvent(new CustomEvent('teploy:unauthorized'));
+  }
+  if (response.status === 204 || response.status === 205) return null;
+  const text = await response.text();
+  const media = response.headers.get('Content-Type') || '';
+  let payload;
+  if (media.includes('json') && text) {
+    try { payload = JSON.parse(text); }
+    catch { if (response.ok) throw new Error('Invalid JSON response'); }
+  }
+  if (!response.ok || payload?.error) {
+    const detail = typeof payload?.error === 'string' ? payload.error : payload?.error?.message;
+    const fallback = media.startsWith('text/plain') ? text.trim().slice(0, 512) : '';
+    const error = new Error(detail || fallback || `Request failed (HTTP ${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
+  if (payload === undefined) throw new Error('Expected a JSON response');
+  if (!unwrap) return payload;
+  if (payload === null || typeof payload !== 'object' || !Object.hasOwn(payload, 'data')) {
+    throw new Error('Unexpected API response shape');
+  }
+  return payload.data;
+}
+
 const api = {
-  async get(url) {
-    const res = await trackedFetch(url);
-    const json = await res.json();
-    if (json.error) throw new Error(json.error);
-    return json.data;
-  },
-  async post(url, body) {
-    const res = await trackedFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json();
-    if (json.error) throw new Error(json.error);
-    return json.data;
-  },
-  async put(url, body) {
-    const res = await trackedFetch(url, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json();
-    if (json.error) throw new Error(json.error);
-    return json.data;
-  },
-  async del(url) {
-    const res = await trackedFetch(url, { method: 'DELETE' });
-    const json = await res.json();
-    if (json.error) throw new Error(json.error);
-    return json.data;
-  },
+  get: (url, options = {}) => requestJSON(url, options, true),
+  post: (url, body, options = {}) => requestJSON(url, {...options, method: 'POST', body}, true),
+  put: (url, body, options = {}) => requestJSON(url, {...options, method: 'PUT', body}, true),
+  del: (url, options = {}) => requestJSON(url, {...options, method: 'DELETE'}, true),
 };
 
 // ── Raw fetch helper for monitors (they return data directly, not wrapped) ──
 const rawFetch = {
-  async get(url) {
-    const res = await trackedFetch(url);
-    return await this.parse(res);
-  },
-  async post(url, body) {
-    const res = await trackedFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    return await this.parse(res);
-  },
-  async del(url) {
-    const res = await trackedFetch(url, { method: 'DELETE' });
-    return await this.parse(res);
-  },
-  async parse(res) {
-    const text = await res.text();
-    let data = null;
-    if (text) {
-      try { data = JSON.parse(text); } catch { data = text; }
-    }
-    if (!res.ok) {
-      throw new Error(data?.error || (typeof data === 'string' ? data : '') || `Request failed (${res.status})`);
-    }
-    return data;
-  },
+  get: (url, options = {}) => requestJSON(url, options, false),
+  post: (url, body, options = {}) => requestJSON(url, {...options, method: 'POST', body}, false),
+  del: (url, options = {}) => requestJSON(url, {...options, method: 'DELETE'}, false),
 };
 
 // An enqueued operation, not a completed result. Mutating actions now return
@@ -195,11 +182,20 @@ document.addEventListener('alpine:init', () => {
       const params = {};
       let ok = true;
       for (let i = 0; i < want.length; i++) {
-        if (want[i].startsWith(':')) params[want[i].slice(1)] = decodeURIComponent(have[i] || '');
+        if (want[i].startsWith(':')) {
+          // A malformed percent-escape (e.g. /apps/prod/web%zz) used to throw
+          // out of decodeURIComponent and blank the whole app.
+          try { params[want[i].slice(1)] = decodeURIComponent(have[i] || ''); }
+          catch { return { page: 'homepage', params: {} }; }
+        }
         else if (want[i] !== have[i]) { ok = false; break; }
       }
       if (!ok) continue;
-      for (const [k, v] of new URLSearchParams(search)) params[k] = v;
+      // Path-derived identifiers are authoritative: a conflicting query
+      // parameter must not retarget the page onto another resource.
+      for (const [k, v] of new URLSearchParams(search)) {
+        if (!Object.hasOwn(params, k)) params[k] = v;
+      }
       return { page: route.page, params };
     }
     return { page: 'homepage', params: {} };
@@ -345,7 +341,9 @@ document.addEventListener('alpine:init', () => {
         const [apps, groups, servers] = await Promise.all([
           api.get('/api/apps').catch(() => []),
           api.get('/api/groups').catch(() => []),
-          api.get('/api/config/servers').catch(() => ({})),
+          // /api/servers is viewer-readable; /api/config/servers is admin-only
+          // and left a 403-catch producing an empty dropdown for editors.
+          api.get('/api/servers').catch(() => ({})),
         ]);
         this.apps = apps || [];
         this.groups = groups || [];
@@ -370,9 +368,12 @@ document.addEventListener('alpine:init', () => {
       this.deploying = true;
       try {
         const op = await api.post('/api/deploy', f);
-        // Auto-assign the app to this group
+        // Auto-assign the app to this group. A failure here is organizational
+        // metadata only — warn separately rather than swallowing it or
+        // pretending the deploy failed.
         if (groupName) {
-          await api.post(`/api/groups/${encodeURIComponent(groupName)}/apps`, { app: f.app }).catch(() => {});
+          await api.post(`/api/groups/${encodeURIComponent(groupName)}/apps`, { app: f.app })
+            .catch(e => showToast(`Deploy queued, but group assignment failed: ${e.message}`, 'error'));
         }
         this.deployingToGroup = null;
         this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
@@ -386,8 +387,9 @@ document.addEventListener('alpine:init', () => {
         await this.load();
       } catch (e) {
         showToast(e.message, 'error');
+      } finally {
+        this.deploying = false;
       }
-      this.deploying = false;
     },
 
     get filteredApps() {
@@ -501,7 +503,9 @@ document.addEventListener('alpine:init', () => {
         const [apps, groups, servers] = await Promise.all([
           api.get('/api/apps').catch(() => []),
           api.get('/api/groups').catch(() => []),
-          api.get('/api/config/servers').catch(() => ({})),
+          // /api/servers is viewer-readable; /api/config/servers is admin-only
+          // and left a 403-catch producing an empty dropdown for editors.
+          api.get('/api/servers').catch(() => ({})),
         ]);
         this.apps = apps || [];
         this.groups = groups || [];
@@ -570,9 +574,12 @@ document.addEventListener('alpine:init', () => {
       this.deploying = true;
       try {
         const op = await api.post('/api/deploy', f);
-        // Auto-assign to the group and project
-        await api.post(`/api/groups/${encodeURIComponent(this.groupName)}/apps`, { app: f.app }).catch(() => {});
-        await api.post(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}/apps`, { app: f.app }).catch(() => {});
+        // Auto-assign to the group and project; failures are metadata-only
+        // and warned separately.
+        const assign = (url) => api.post(url, { app: f.app })
+          .catch(e => showToast(`Deploy queued, but assignment failed: ${e.message}`, 'error'));
+        await assign(`/api/groups/${encodeURIComponent(this.groupName)}/apps`);
+        await assign(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}/apps`);
         this.deployingToProject = false;
         this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
         if (isOperation(op)) {
@@ -583,8 +590,9 @@ document.addEventListener('alpine:init', () => {
         await this.load();
       } catch (e) {
         showToast(e.message, 'error');
+      } finally {
+        this.deploying = false;
       }
-      this.deploying = false;
     },
   }));
 
@@ -607,10 +615,14 @@ document.addEventListener('alpine:init', () => {
     healthLoading: false,
     // KV panel. kvValues holds only what the operator explicitly revealed,
     // in component memory — never localStorage/sessionStorage, and never as a
-    // substitute for asking the CLI again.
+    // substitute for asking the CLI again. A reveal is point-in-time: every
+    // list refresh invalidates the revealed values (a value written since the
+    // reveal must not display as current), and late responses are dropped
+    // when the scope (app/accessory) changed mid-flight (A46).
     kvKeys: [],
     kvReadonly: new Set(),
     kvValues: {},
+    kvGeneration: 0,
     kvPattern: '*',
     kvAccessory: 'nucleus',
     kvLoading: false,
@@ -747,32 +759,38 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadKv() {
+      const generation = ++this.kvGeneration;
+      const scope = `${this.appPath()}\n${this.kvAccessory}`;
       this.kvLoading = true;
       this.kvError = '';
       try {
         const res = await api.get(`${this.appPath()}/kv${this.kvQuery({ pattern: this.kvPattern || '*' })}`);
+        if (generation !== this.kvGeneration || scope !== `${this.appPath()}\n${this.kvAccessory}`) return;
         this.kvKeys = (res && res.keys) || [];
         // Keys the store holds but this panel cannot operate on (see the
         // Readonly field in kv.go). Rendering them with live buttons meant
         // Reveal and Remove answered "invalid kv key" as a generic toast.
         this.kvReadonly = new Set((res && res.readonly) || []);
-        // Drop revealed values that are no longer in the listing so a stale
-        // value can never outlive its key.
-        const live = {};
-        for (const k of this.kvKeys) if (k in this.kvValues) live[k] = this.kvValues[k];
-        this.kvValues = live;
+        // A fresh listing invalidates every revealed value: presence of the
+        // key does not prove the revealed value is still current.
+        this.kvValues = {};
       } catch (e) {
+        if (generation !== this.kvGeneration) return;
         this.kvKeys = [];
         this.kvValues = {};
         this.kvReadonly = new Set();
         this.kvError = e.message;
       }
-      this.kvLoading = false;
+      if (generation === this.kvGeneration) this.kvLoading = false;
     },
 
     async revealKv(key) {
+      const generation = this.kvGeneration;
+      const scope = `${this.appPath()}\n${this.kvAccessory}`;
       try {
         const res = await api.get(`${this.appPath()}/kv/value${this.kvQuery({ key })}`);
+        // Drop a response that raced a scope change or a newer listing.
+        if (generation !== this.kvGeneration || scope !== `${this.appPath()}\n${this.kvAccessory}`) return;
         // An unset key is an answer, not a failure — render it as one.
         this.kvValues[key] = res && res.exists ? res.value : null;
       } catch (e) {
@@ -1014,9 +1032,14 @@ document.addEventListener('alpine:init', () => {
         await this.loadTests();
         showToast('Restore test created', 'success');
       } catch (e) {
-        showToast('Failed to save restore test', 'error');
+        showToast(e.message || 'Failed to save restore test', 'error');
       }
       this.creating = false;
+    },
+
+    closeDialog() {
+      this.showCreateDialog = false;
+      this.resetForm();
     },
 
     async runNow(t) {
@@ -1455,7 +1478,9 @@ document.addEventListener('alpine:init', () => {
       try {
         const [tpls, servers] = await Promise.all([
           api.get('/api/templates').catch(() => []),
-          api.get('/api/config/servers').catch(() => ({})),
+          // /api/servers is viewer-readable; /api/config/servers is admin-only
+          // and left a 403-catch producing an empty dropdown for editors.
+          api.get('/api/servers').catch(() => ({})),
         ]);
         this.templates = tpls || [];
         this.serverList = Object.keys(servers || {});
@@ -1477,18 +1502,23 @@ document.addEventListener('alpine:init', () => {
       }
       this.installing = true;
       try {
-        await api.post('/api/templates/install', {
+        const op = await api.post('/api/templates/install', {
           template: this.selected.name,
           domain: this.installForm.domain,
           server: this.installForm.server,
           vars: this.installForm.vars,
         });
-        showToast(`Installed ${this.selected.name}`, 'success');
+        if (!isOperation(op)) throw new Error('Expected an operation response');
+        // A queued operation is not a completed installation — drop the
+        // (possibly secret) form vars and follow it live.
+        this.installForm = { domain: '', server: '', vars: {} };
         this.selected = null;
+        Alpine.store('router').navigate('operation-detail', { id: op.id });
       } catch (e) {
         showToast(e.message, 'error');
+      } finally {
+        this.installing = false;
       }
-      this.installing = false;
     },
   }));
 
@@ -1561,22 +1591,22 @@ document.addEventListener('alpine:init', () => {
           target: this.newMonitor.target,
           interval: parseInt(this.newMonitor.interval) * 1000000,
           timeout: parseInt(this.newMonitor.timeout) * 1000000,
-          enabled: true,
+          // Preserve the current enabled state on edit — saving an edit used
+          // to silently re-enable a disabled monitor (A44).
+          enabled: !!this.newMonitor.enabled,
           expected_status: parseInt(this.newMonitor.expected_status) || 0,
           allow_internal: !!this.newMonitor.allow_internal,
         };
         await rawFetch.post('/api/monitors', body);
         const wasEdit = !!this.editingId;
-        this.showCreateDialog = false;
-        this.editingId = null;
-        this.resetForm();
+        this.closeDialog();
         await this.loadMonitors();
         if (wasEdit && this.selectedMonitor?.monitor?.id === id) {
           await this.selectMonitor(id);
         }
         showToast(wasEdit ? 'Monitor updated' : 'Monitor created', 'success');
       } catch (e) {
-        showToast('Failed to save monitor', 'error');
+        showToast(e.message || 'Failed to save monitor', 'error');
       }
       this.creating = false;
     },
@@ -1619,8 +1649,25 @@ document.addEventListener('alpine:init', () => {
       this.testing = false;
     },
 
+    // Separate create/close transitions so a canceled edit can't leak its ID
+    // into a later "Add" (A44).
+    openCreate() {
+      this.editingId = null;
+      this.resetForm();
+      this.newMonitor.enabled = true;
+      this.showCreateDialog = true;
+    },
+
+    closeDialog() {
+      this.showCreateDialog = false;
+      this.editingId = null;
+      this.resetForm();
+    },
+
     startEdit(m) {
-      // Pre-fill the create dialog with existing values; creation is an upsert.
+      // Pre-fill the create dialog with existing values; creation is an
+      // upsert. Keep the monitor's enabled state so saving the edit doesn't
+      // re-enable it (A44).
       this.editingId = m.id;
       this.newMonitor = {
         name: m.name,
@@ -1631,6 +1678,7 @@ document.addEventListener('alpine:init', () => {
         timeout: String(m.timeout / 1000000),
         expected_status: m.expected_status || '',
         allow_internal: !!m.allow_internal,
+        enabled: !!m.enabled,
       };
       this.showCreateDialog = true;
     },
@@ -1639,6 +1687,7 @@ document.addEventListener('alpine:init', () => {
       this.newMonitor = {
         name: '', type: 'http', method: 'GET', target: '',
         interval: '60000', timeout: '10000', expected_status: '', allow_internal: false,
+        enabled: true,
       };
     },
 
@@ -1729,29 +1778,48 @@ document.addEventListener('alpine:init', () => {
       const name = this.form.name.trim();
       const url  = this.form.url.trim();
       if (!name || !url) { showToast('Name and URL are required', 'error'); return; }
+      // Build the candidate FIRST and persist it before publishing locally —
+      // the old path replaced the record with only the form's fields (dropping
+      // pinned/hidden/icon/dark_icon metadata) and closed the form even when
+      // the save had failed (A45).
+      const candidate = this.items.map(item => ({ ...item }));
       if (this.editingItem) {
-        const idx = this.items.findIndex(i => i.id === this.editingItem);
-        if (idx !== -1) {
-          this.items[idx] = { id: this.editingItem, name, url, description: this.form.description.trim(), color: this.form.color, _faviconFailed: false };
-        }
+        const idx = candidate.findIndex(item => item.id === this.editingItem);
+        if (idx < 0) { showToast('Shortcut no longer exists — reload', 'error'); return; }
+        candidate[idx] = { ...candidate[idx], name, url, description: this.form.description.trim(), color: this.form.color, _faviconFailed: false };
       } else {
-        this.items.push({ id: Math.random().toString(36).slice(2), name, url, description: this.form.description.trim(), color: this.form.color, _faviconFailed: false });
+        candidate.push({ id: Math.random().toString(36).slice(2), name, url, description: this.form.description.trim(), color: this.form.color, _faviconFailed: false });
       }
-      await this.persist();
-      this.showForm = false;
-      this.editingItem = null;
+      try {
+        await this.persistList(candidate);
+        this.items = candidate;
+        this.showForm = false;
+        this.editingItem = null;
+      } catch (e) {
+        showToast(e.message, 'error'); // form stays open, list unchanged
+      }
     },
 
     async remove(id) {
+      const before = this.items;
       this.items = this.items.filter(i => i.id !== id);
-      await this.persist();
+      try {
+        await this.persistList(this.items);
+      } catch (e) {
+        this.items = before; // deletion did not commit — undo the optimistic view
+      }
+    },
+
+    // persistList is the single writer; persist() kept for the drag path.
+    async persistList(list) {
+      const clean = list.map(({ _faviconFailed, ...i }) => i);
+      await api.put('/api/homepage', clean);
+      window.dispatchEvent(new CustomEvent('teploy:links-changed'));
     },
 
     async persist() {
       try {
-        const clean = this.items.map(({ _faviconFailed, ...i }) => i);
-        await api.put('/api/homepage', clean);
-        window.dispatchEvent(new CustomEvent('teploy:links-changed'));
+        await this.persistList(this.items);
       } catch(e) {
         showToast(e.message, 'error');
       }
