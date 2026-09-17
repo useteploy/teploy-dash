@@ -153,17 +153,17 @@ func Tools(b Backend) []Tool {
 				"lines":  intProp("Number of log lines (default 100, max 500)"),
 			}),
 			ReadOnly: true,
-		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
-			server, app, err := serverApp(args)
-			if err != nil {
-				return "", err
-			}
-			lines, err := intArg(args, "lines", 100, 1, 500)
-			if err != nil {
-				return "", err
-			}
-			return b.AppLogs(ctx, server, app, lines)
-		},
+			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+				server, app, err := serverApp(args)
+				if err != nil {
+					return "", err
+				}
+				lines, err := intArg(args, "lines", 100, 1, 500)
+				if err != nil {
+					return "", err
+				}
+				return b.AppLogs(ctx, server, app, lines)
+			},
 		},
 		{
 			Name:        "teploy_list_servers",

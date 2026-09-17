@@ -2272,12 +2272,12 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 									return
 								}
 							}
-						data.Groups[i].Projects[j].Apps = append(data.Groups[i].Projects[j].Apps, body.App)
-						if err := saveGroupsFile(data); err != nil {
-							writeError(w, err.Error())
-							return
-						}
-						writeData(w, map[string]string{"status": "assigned"})
+							data.Groups[i].Projects[j].Apps = append(data.Groups[i].Projects[j].Apps, body.App)
+							if err := saveGroupsFile(data); err != nil {
+								writeError(w, err.Error())
+								return
+							}
+							writeData(w, map[string]string{"status": "assigned"})
 							return
 						}
 					}
@@ -2522,14 +2522,14 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		// Never return secrets to the client; expose only whether one is
 		// configured.
 		writeData(w, map[string]any{
-			"webhook_url":         cfg.WebhookURL,
-			"webhook_secret_set":  cfg.WebhookSecret != "",
-			"smtp_host":           cfg.SMTPHost,
-			"smtp_port":           cfg.SMTPPort,
-			"smtp_user":           cfg.SMTPUser,
-			"smtp_pass_set":       cfg.SMTPPass != "",
-			"email_to":            cfg.EmailTo,
-			"email_from":          cfg.EmailFrom,
+			"webhook_url":        cfg.WebhookURL,
+			"webhook_secret_set": cfg.WebhookSecret != "",
+			"smtp_host":          cfg.SMTPHost,
+			"smtp_port":          cfg.SMTPPort,
+			"smtp_user":          cfg.SMTPUser,
+			"smtp_pass_set":      cfg.SMTPPass != "",
+			"email_to":           cfg.EmailTo,
+			"email_from":         cfg.EmailFrom,
 		})
 	case "POST":
 		// Patch DTO (A34): the GET response contains read-only view flags
