@@ -13,8 +13,12 @@ permissions:
 # //go:embed at build time, so goreleaser doesn't need a Node toolchain.
 
 jobs:
+  # Run the exact CI a PR runs before cutting a release (audit A50).
+  validate:
+    uses: ./.github/workflows/ci.yml
   goreleaser:
     if: startsWith(github.ref, 'refs/tags/v')
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
