@@ -12,6 +12,7 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/mcp"
+	"github.com/useteploy/teploy-dash/internal/operation"
 	"github.com/useteploy/teploy-dash/internal/remote"
 )
 
@@ -21,10 +22,10 @@ import (
 //
 // Sync-safety invariant: every method of mcpBackend either READS through the
 // dashboard's existing state paths (fleet collection over server state files,
-// monitor store) or MUTATES through the existing teploy-CLI delegate / SSH
-// ops — the identical calls the UI buttons make. MCP stores nothing about
-// deployments, so a fourth client (terminal, UI, webhooks, MCP) joins the
-// same single source of truth instead of adding a second one.
+// monitor store) or MUTATES through the operation service — the identical
+// journal, validation, queue, cancellation, and idempotency the UI's buttons
+// use (A19). MCP stores nothing about deployments, so a fourth client
+// (terminal, UI, webhooks, MCP) joins the same single source of truth.
 
 // mcpBackend adapts Server to the mcp.Backend interface.
 type mcpBackend struct{ s *Server }
@@ -35,6 +36,35 @@ func jsonText(v interface{}) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// resolveServer requires a REGISTERED server name and returns its connection
+// details. Passing an alias where the CLI expects a raw --host (or an unknown
+// name) produced wrong-target or confusing failures (A19).
+func (b mcpBackend) resolveServer(name string) (remote.ServerConn, error) {
+	srv, ok := b.s.lookupServer(name)
+	if !ok {
+		return remote.ServerConn{}, fmt.Errorf("server not found: %s (see teploy_list_servers)", name)
+	}
+	return srv, nil
+}
+
+// enqueueMutation routes an MCP mutation through the operation service so it
+// shares the UI's validation, journal, queue, cancellation, and idempotency
+// instead of calling the CLI directly (A19).
+func (b mcpBackend) enqueueMutation(req operation.Request) (string, error) {
+	if b.s.operations == nil {
+		return "", fmt.Errorf("operation service unavailable")
+	}
+	op, _, err := b.s.operations.Enqueue(req, "")
+	if err != nil {
+		return "", err
+	}
+	out, err := jsonText(op)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 func (b mcpBackend) ListApps(ctx context.Context) (string, error) {
@@ -66,7 +96,11 @@ func (b mcpBackend) AppLogs(ctx context.Context, server, app string, lines int) 
 	if !cli.IsInstalled() {
 		return "", fmt.Errorf("teploy CLI not installed on the dash host")
 	}
-	result, err := cli.Logs(server, b.s.serverUser(server), app, lines)
+	srv, err := b.resolveServer(server)
+	if err != nil {
+		return "", err
+	}
+	result, err := cli.Logs(srv.Host, srv.User, app, lines)
 	if err != nil {
 		return "", err
 	}
@@ -124,7 +158,11 @@ func (b mcpBackend) ListEnvKeys(ctx context.Context, server, app string) (string
 	if !cli.IsInstalled() {
 		return "", fmt.Errorf("teploy CLI not installed on the dash host")
 	}
-	raw, err := cli.EnvList(server, b.s.serverUser(server), app)
+	srv, err := b.resolveServer(server)
+	if err != nil {
+		return "", err
+	}
+	raw, err := cli.EnvList(srv.Host, srv.User, app)
 	if err != nil {
 		return "", err
 	}
@@ -164,57 +202,38 @@ func envKeysOnly(raw interface{}) []string {
 }
 
 func (b mcpBackend) Deploy(ctx context.Context, server, app, image, domain string, port int) (string, error) {
-	if !cli.IsInstalled() {
-		return "", fmt.Errorf("teploy CLI not installed on the dash host")
-	}
-	result, err := cli.Deploy(server, b.s.serverUser(server), app, image, domain, port)
-	if err != nil {
-		return "", err
-	}
-	b.s.fleet.set(nil)
-	return result.Stdout, nil
+	// Route through the operation service exactly like the UI's deploy form:
+	// validated target, journaled, queued, cancelable (A19). The returned
+	// payload is the queued operation, not a completed deploy.
+	return b.enqueueMutation(operation.Request{
+		Kind: operation.KindDeploy, Mode: "ad-hoc",
+		Server: server, App: app, Image: image, Domain: domain, Port: port,
+	})
 }
 
 func (b mcpBackend) Rollback(ctx context.Context, server, app string) (string, error) {
-	if !cli.IsInstalled() {
-		return "", fmt.Errorf("teploy CLI not installed on the dash host")
-	}
-	result, err := cli.Rollback(server, b.s.serverUser(server), app)
-	if err != nil {
-		return "", err
-	}
-	b.s.fleet.set(nil)
-	return result.Stdout, nil
+	return b.enqueueMutation(operation.Request{
+		Kind: operation.KindRollback, Server: server, App: app,
+	})
 }
 
 func (b mcpBackend) AppAction(ctx context.Context, server, app, action string) (string, error) {
 	switch action {
-	// Container lifecycle goes over direct SSH — the same path the UI
-	// buttons use for these three.
 	case "stop", "start", "restart":
-		srv, ok := b.s.lookupServer(server)
-		if !ok {
-			return "", fmt.Errorf("server not found: %s", server)
-		}
-		var err error
-		switch action {
-		case "stop":
-			err = remote.StopApp(ctx, srv, app)
-		case "start":
-			err = remote.StartApp(ctx, srv, app)
-		case "restart":
-			err = remote.RestartApp(ctx, srv, app)
-		}
-		if err != nil {
-			return "", err
-		}
-		b.s.fleet.set(nil)
-		return fmt.Sprintf("%s: ok", action), nil
+		// Container lifecycle goes through the operation service — the same
+		// path the UI buttons use (A19). The old direct-SSH mutations had no
+		// journal, validation, or cancellation.
+		return b.enqueueMutation(operation.Request{
+			Kind: operation.KindAppLifecycle, Server: server, App: app, Action: action,
+		})
 	default:
 		// Everything else (lock, unlock, maintenance on/off) delegates to
 		// the CLI, exactly like the UI.
 		if !cli.IsInstalled() {
 			return "", fmt.Errorf("teploy CLI not installed on the dash host")
+		}
+		if _, err := b.resolveServer(server); err != nil {
+			return "", err
 		}
 		result, err := b.s.cliAppRun(server, app, strings.Fields(action)...)
 		if err != nil {
@@ -234,7 +253,11 @@ func (b mcpBackend) SetEnv(ctx context.Context, server, app, key, value string) 
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")
 	}
-	if _, err := cli.EnvSet(server, b.s.serverUser(server), app, key, value); err != nil {
+	srv, err := b.resolveServer(server)
+	if err != nil {
+		return "", err
+	}
+	if _, err := cli.EnvSet(srv.Host, srv.User, app, key, value); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("set %s (applies on next deploy/restart)", key), nil
@@ -247,7 +270,11 @@ func (b mcpBackend) UnsetEnv(ctx context.Context, server, app, key string) (stri
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")
 	}
-	if _, err := cli.EnvUnset(server, b.s.serverUser(server), app, key); err != nil {
+	srv, err := b.resolveServer(server)
+	if err != nil {
+		return "", err
+	}
+	if _, err := cli.EnvUnset(srv.Host, srv.User, app, key); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("unset %s", key), nil

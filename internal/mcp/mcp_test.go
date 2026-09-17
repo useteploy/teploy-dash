@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -344,5 +345,130 @@ func TestValidRequestStillWorks(t *testing.T) {
 	out := rpc(t, srv.URL, full, "ping", nil)
 	if out["error"] != nil {
 		t.Errorf("valid ping request errored: %v", out["error"])
+	}
+}
+
+// A21: a browser cross-origin request is rejected per the MCP Streamable HTTP
+// transport security requirement; same-origin and no-origin clients pass.
+func TestCrossOriginRejected(t *testing.T) {
+	srv, full, _, _ := testServer(t)
+	defer srv.Close()
+
+	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+	req, _ := http.NewRequest("POST", srv.URL, body)
+	req.Header.Set("Authorization", "Bearer "+full)
+	req.Header.Set("Origin", "https://evil.example")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin: expected 403, got %d", resp.StatusCode)
+	}
+
+	body.Reset(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+	req2, _ := http.NewRequest("POST", srv.URL, body)
+	req2.Header.Set("Authorization", "Bearer "+full)
+	req2.Header.Set("Origin", srv.URL)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("same-origin: expected 200, got %d", resp2.StatusCode)
+	}
+}
+
+// A21: fractional or out-of-range integer arguments are rejected rather than
+// silently truncated (JSON numbers arrive as float64).
+func TestFractionalAndOutOfRangeIntegerArgs(t *testing.T) {
+	srv, full, _, b := testServer(t)
+	defer srv.Close()
+
+	cases := []map[string]interface{}{
+		{"server": "prod", "app": "web", "image": "example/web:1", "port": 80.5},
+		{"server": "prod", "app": "web", "image": "example/web:1", "port": 70000},
+		{"server": "prod", "app": "web", "lines": 10.25},
+	}
+	for _, params := range cases {
+		method := "teploy_deploy"
+		if _, ok := params["lines"]; ok {
+			method = "teploy_app_logs"
+		}
+		out := rpcToolCall(t, srv.URL, full, method, params)
+		if !out["isError"].(bool) {
+			t.Fatalf("%v accepted: %+v", params, out)
+		}
+	}
+	if len(b.calls) != 0 {
+		t.Fatalf("backend reached with invalid integer args: %v", b.calls)
+	}
+}
+
+// rpcToolCall issues a tools/call and returns the raw result map.
+func rpcToolCall(t *testing.T, url, token, name string, args map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+		"params": map[string]interface{}{"name": name, "arguments": args},
+	})
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		Result map[string]interface{} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Result
+}
+
+// A20: a failed revocation must NOT take effect in memory — the process keeps
+// rejecting what a restart would accept.
+func TestDeleteFailureKeepsInMemoryRemovalDeferred(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-based failure does not trigger")
+	}
+	dir := t.TempDir()
+	store, err := NewTokenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, _, err := store.Create("keep", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0700) })
+
+	// Find the created id via List.
+	id := ""
+	for _, tok := range store.List() {
+		if tok.Name == "keep" {
+			id = tok.ID
+		}
+	}
+	if err := store.Delete(id); err == nil {
+		t.Fatal("expected delete to fail on an unwritable store")
+	}
+	// The token must STILL verify in-process? No — the point of A20 is the
+	// opposite direction: the OLD code removed it from memory while the disk
+	// kept it, so a restart resurrected it. The fixed order persists first,
+	// so on failure the token REMAINS VALID in memory too — consistent with
+	// what a restart would load.
+	if _, ok := store.Verify(plaintext); !ok {
+		t.Fatal("failed revocation removed the token from memory while it remains on disk")
 	}
 }

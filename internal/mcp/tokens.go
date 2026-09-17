@@ -42,8 +42,9 @@ type Token struct {
 type TokenStore struct {
 	path string
 
-	mu     sync.Mutex
-	tokens []Token
+	mu            sync.Mutex
+	tokens        []Token
+	lastUsedFlush time.Time
 }
 
 // NewTokenStore loads (or lazily creates) the token file.
@@ -89,11 +90,11 @@ func (s *TokenStore) Create(name string, readOnly bool) (string, Token, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tokens = append(s.tokens, t)
-	if err := s.saveLocked(); err != nil {
-		s.tokens = s.tokens[:len(s.tokens)-1]
+	candidate := append(append([]Token(nil), s.tokens...), t)
+	if err := s.saveLocked(candidate); err != nil {
 		return "", Token{}, err
 	}
+	s.tokens = candidate
 	return plaintext, t, nil
 }
 
@@ -108,22 +109,38 @@ func (s *TokenStore) List() []Token {
 	return out
 }
 
-// Delete revokes a token by id.
+// Delete revokes a token by id. The candidate slice is persisted BEFORE the
+// live state changes (A20): the old order removed the token first and saved
+// second, so a failed save left the process denying a token that a restart
+// would happily accept again.
 func (s *TokenStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, t := range s.tokens {
 		if t.ID == id {
-			s.tokens = append(s.tokens[:i], s.tokens[i+1:]...)
-			return s.saveLocked()
+			candidate := make([]Token, 0, len(s.tokens)-1)
+			candidate = append(candidate, s.tokens[:i]...)
+			candidate = append(candidate, s.tokens[i+1:]...)
+			if err := s.saveLocked(candidate); err != nil {
+				return err
+			}
+			s.tokens = candidate
+			return nil
 		}
 	}
 	return fmt.Errorf("token not found")
 }
 
+// lastUsedFlushInterval bounds how often Verify persists usage telemetry.
+// Writing the whole token file on every successful MCP request turned
+// authentication traffic into disk traffic under the store mutex (A20);
+// LastUsed is best-effort, so it is flushed at most this often.
+const lastUsedFlushInterval = time.Minute
+
 // Verify checks a presented plaintext token. Brute force is not a practical
 // concern (256-bit secrets, constant-time compare), so there is no lockout.
-// A hit updates LastUsed (best-effort persist).
+// A hit updates LastUsed in memory and flushes it to disk at most once per
+// minute.
 func (s *TokenStore) Verify(plaintext string) (Token, bool) {
 	h := hashToken(plaintext)
 	s.mu.Lock()
@@ -131,15 +148,18 @@ func (s *TokenStore) Verify(plaintext string) (Token, bool) {
 	for i := range s.tokens {
 		if subtle.ConstantTimeCompare([]byte(s.tokens[i].Hash), []byte(h)) == 1 {
 			s.tokens[i].LastUsed = time.Now().UTC()
-			_ = s.saveLocked()
+			if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
+				s.lastUsedFlush = time.Now().UTC()
+				_ = s.saveLocked(s.tokens)
+			}
 			return s.tokens[i], true
 		}
 	}
 	return Token{}, false
 }
 
-func (s *TokenStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.tokens, "", "  ")
+func (s *TokenStore) saveLocked(tokens []Token) error {
+	data, err := json.MarshalIndent(tokens, "", "  ")
 	if err != nil {
 		return err
 	}

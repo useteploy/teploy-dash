@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -60,6 +61,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "method not allowed — MCP endpoint accepts POST only", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Origin validation per the MCP Streamable HTTP transport spec: a browser
+	// that sends an Origin must be same-origin (DNS-rebinding and cross-site
+	// protection). Non-browser clients typically omit the header and pass.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host != r.Host {
+			http.Error(w, "cross-origin MCP requests are not permitted", http.StatusForbidden)
+			return
+		}
 	}
 
 	tok, ok := h.authenticate(r)

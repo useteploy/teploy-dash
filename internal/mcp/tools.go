@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"math"
 )
 
 // Tool is one MCP tool. InputSchema is a JSON-Schema object; Run receives the
@@ -65,6 +66,21 @@ func strArg(args map[string]interface{}, key string) (string, error) {
 		return "", fmt.Errorf("missing required argument: %s", key)
 	}
 	return v, nil
+}
+
+// intArg decodes an optional numeric argument. JSON numbers arrive as float64;
+// fractional or out-of-range values are rejected instead of silently
+// truncated (A21). def is returned when the argument is absent.
+func intArg(args map[string]interface{}, key string, def, min, max int) (int, error) {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return def, nil
+	}
+	n, ok := v.(float64)
+	if !ok || n != math.Trunc(n) || n < float64(min) || n > float64(max) {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", key, min, max)
+	}
+	return int(n), nil
 }
 
 func serverApp(args map[string]interface{}) (string, string, error) {
@@ -137,20 +153,17 @@ func Tools(b Backend) []Tool {
 				"lines":  intProp("Number of log lines (default 100, max 500)"),
 			}),
 			ReadOnly: true,
-			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
-				server, app, err := serverApp(args)
-				if err != nil {
-					return "", err
-				}
-				lines := 100
-				if n, ok := args["lines"].(float64); ok && n > 0 {
-					lines = int(n)
-				}
-				if lines > 500 {
-					lines = 500
-				}
-				return b.AppLogs(ctx, server, app, lines)
-			},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			server, app, err := serverApp(args)
+			if err != nil {
+				return "", err
+			}
+			lines, err := intArg(args, "lines", 100, 1, 500)
+			if err != nil {
+				return "", err
+			}
+			return b.AppLogs(ctx, server, app, lines)
+		},
 		},
 		{
 			Name:        "teploy_list_servers",
@@ -187,7 +200,7 @@ func Tools(b Backend) []Tool {
 		// ── Actions (all delegate to the teploy CLI — same path as the UI) ──
 		{
 			Name:        "teploy_deploy",
-			Description: "Deploy an image as an app on a server (zero-downtime; health-checked with automatic rollback). Same ad-hoc deploy the dashboard performs.",
+			Description: "Queue an ad-hoc deploy of an image as an app on a server (zero-downtime; health-checked with automatic rollback). Queues the SAME validated operation the dashboard performs and returns the operation record (id, status, target) — follow it with teploy_get_app / the dashboard operation center; a queued operation is not a completed deploy.",
 			InputSchema: schema([]string{"server", "app", "image"}, map[string]interface{}{
 				"server": strProp("Server name"),
 				"app":    strProp("App name"),
@@ -206,16 +219,16 @@ func Tools(b Backend) []Tool {
 					return "", err
 				}
 				domain, _ := args["domain"].(string)
-				port := 0
-				if n, ok := args["port"].(float64); ok {
-					port = int(n)
+				port, err := intArg(args, "port", 0, 1, 65535)
+				if err != nil {
+					return "", err
 				}
 				return b.Deploy(ctx, server, app, image, domain, port)
 			},
 		},
 		{
 			Name:        "teploy_rollback",
-			Description: "Roll an app back to its previous version.",
+			Description: "Queue a rollback of an app to its previous version. Returns the queued operation record; the rollback runs through the same validated path as the dashboard.",
 			InputSchema: serverAppSchema,
 			Destructive: true,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
