@@ -3,7 +3,8 @@
 Self-hosted deployment dashboard for the [Teploy CLI](https://github.com/useteploy/teploy),
 plus uptime monitoring — in one Go binary.
 
-The CLI writes deployment state to `/deployments/{app}/state.json`. Dash
+The CLI writes deployment state to `/deployments/{app}/state` (a plain
+`key=value` text file). Dash
 reads those files (read-only) and shells out to `teploy` for actions
 (deploy, rollback, env edits, logs). Same source of truth whether you
 deploy from the terminal, the UI, or a webhook — no SSH-vs-UI desync.
@@ -24,12 +25,25 @@ brew install useteploy/tap/teploy-dash
 
 ### Docker (GHCR, multi-arch)
 
+Anonymous image volumes are NOT reused when the container is replaced, so
+dashboard data (users, monitors, MCP tokens) and the CLI's `~/.teploy`
+configuration need named volumes to survive upgrades. The generated password
+below is printed to the container log once — copy it out, or use first-run
+setup (`/setup` with the bootstrap token from the log) instead:
+
 ```bash
-docker run -d -p 3456:3456 \
+docker run -d -p 127.0.0.1:3456:3456 \
   -e TEPLOY_DASH_PASSWORD=$(openssl rand -base64 24) \
-  -v /deployments:/deployments \
+  -v deployments:/deployments \
+  -v dash-data:/var/teploy-dash \
+  -v teploy-config:/root/.teploy \
   ghcr.io/useteploy/teploy-dash:latest
 ```
+
+For remote (non-localhost) access, put TLS in front (e.g. Caddy) rather than
+exposing the container directly; a dedicated SSH identity plus a pre-provisioned
+known_hosts (`-v ./known_hosts:/root/.ssh/known_hosts:ro`) is preferable to
+mounting a personal SSH directory.
 
 ### Install script
 
@@ -326,7 +340,7 @@ teploy-dash (Go, ~17MB)  --- session-cookie auth middleware
    |                         60s fleet cache
    |                         WebSocket log streamer
    |
-   +--> reads CLI state files at /deployments/{app}/state.json
+   +--> reads CLI state files at /deployments/{app}/state (key=value)
    +--> shells out to `teploy` for actions (deploy, rollback, env, ...)
    +--> SSH to fleet servers for stop / start / restart
    +--> uptime checks --(pgwire)--> Nucleus

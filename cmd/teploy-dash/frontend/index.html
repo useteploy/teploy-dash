@@ -1715,6 +1715,10 @@
             <label class="form-label">Webhook URL</label>
             <input class="form-input" x-model="notifications.webhook_url" placeholder="https://hooks.slack.com/services/...">
           </div>
+          <div class="form-group">
+            <label class="form-label">Webhook Signing Secret <span x-show="notifications.webhook_secret_set" style="opacity:0.6;font-weight:400">(set — type to replace)</span></label>
+            <input class="form-input" type="password" x-model="webhookSecretDraft" placeholder="optional — signs deliveries so receivers can verify origin">
+          </div>
 
           <h3 class="section-title" style="font-size: 14px; margin-top: 24px;">Email (SMTP)</h3>
           <div class="form-row">
@@ -1733,8 +1737,8 @@
               <input class="form-input" x-model="notifications.smtp_user" placeholder="alerts@example.com">
             </div>
             <div class="form-group">
-              <label class="form-label">SMTP Password</label>
-              <input class="form-input" type="password" x-model="notifications.smtp_pass" placeholder="••••••••">
+              <label class="form-label">SMTP Password <span x-show="notifications.smtp_pass_set" style="opacity:0.6;font-weight:400">(set — type to replace)</span></label>
+              <input class="form-input" type="password" x-model="smtpPasswordDraft" placeholder="••••••••">
             </div>
           </div>
           <div class="form-row">

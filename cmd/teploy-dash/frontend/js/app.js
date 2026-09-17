@@ -1186,6 +1186,10 @@ document.addEventListener('alpine:init', () => {
     newGroupName: '',
     // Change password form
     pw: { current: '', next: '', confirm: '', saving: false, error: '' },
+    // Secret drafts for notifications (A34): typed only when replacing;
+    // blank means "keep the stored secret".
+    smtpPasswordDraft: '',
+    webhookSecretDraft: '',
     // MCP tokens
     mcpTokens: [],
     newMcpToken: { name: '', readOnly: 'false' },
@@ -1403,8 +1407,28 @@ document.addEventListener('alpine:init', () => {
     },
 
     async saveNotifications() {
+      // Patch semantics (A34): send only editable fields. Secrets are sent
+      // only when the operator typed a new one (the GET never reveals them);
+      // absent means preserve, present-but-empty means clear deliberately.
+      const n = this.notifications || {};
+      const body = {
+        webhook_url: n.webhook_url || '',
+        smtp_host: n.smtp_host || '',
+        smtp_port: Number(n.smtp_port) || 0,
+        smtp_user: n.smtp_user || '',
+        email_to: n.email_to || '',
+        email_from: n.email_from || '',
+      };
+      if (this.smtpPasswordDraft !== undefined && this.smtpPasswordDraft !== null && this.smtpPasswordDraft !== '') {
+        body.smtp_pass = this.smtpPasswordDraft;
+      }
+      if (this.webhookSecretDraft !== undefined && this.webhookSecretDraft !== null && this.webhookSecretDraft !== '') {
+        body.webhook_secret = this.webhookSecretDraft;
+      }
       try {
-        await api.post('/api/notifications', this.notifications);
+        await api.post('/api/notifications', body);
+        this.smtpPasswordDraft = '';
+        this.webhookSecretDraft = '';
         showToast('Notifications saved', 'success');
       } catch (e) {
         showToast(e.message, 'error');

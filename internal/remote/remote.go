@@ -347,46 +347,6 @@ func fmtGiB(mb int) string {
 	return fmt.Sprintf("%.1fG", float64(mb)/1024)
 }
 
-// StopApp stops all containers for an app on a server.
-// Deprecated: mutations must go through the CLI operation manager. Retained
-// temporarily for source compatibility; read fallbacks do not call it.
-func StopApp(ctx context.Context, srv ServerConn, appName string) error {
-	return runDockerOp(ctx, srv, appName, "stop")
-}
-
-// StartApp starts all stopped containers for an app on a server.
-// Deprecated: mutations must go through the CLI operation manager.
-func StartApp(ctx context.Context, srv ServerConn, appName string) error {
-	return runDockerOp(ctx, srv, appName, "start")
-}
-
-// RestartApp restarts all containers for an app on a server.
-// Deprecated: mutations must go through the CLI operation manager.
-func RestartApp(ctx context.Context, srv ServerConn, appName string) error {
-	return runDockerOp(ctx, srv, appName, "restart")
-}
-
-func runDockerOp(ctx context.Context, srv ServerConn, appName, op string) error {
-	c, err := uissh.Connect(ctx, srv.Host, srv.User, srv.KeyPath)
-	if err != nil {
-		return fmt.Errorf("connecting to %s: %w", srv.Name, err)
-	}
-	defer c.Close()
-
-	// Find containers whose names start with the app name.
-	ids, err := c.Run(ctx, fmt.Sprintf(
-		"docker ps -aq --filter %s 2>/dev/null",
-		shellQuote("name="+appName+"-"),
-	))
-	if err != nil || strings.TrimSpace(ids) == "" {
-		return fmt.Errorf("no containers found for app %q on %s", appName, srv.Name)
-	}
-
-	idList := strings.Join(strings.Fields(strings.TrimSpace(ids)), " ")
-	_, err = c.Run(ctx, fmt.Sprintf("docker %s %s", op, idList))
-	return err
-}
-
 // StreamLogs streams docker logs for an app to w until ctx is cancelled.
 func StreamLogs(ctx context.Context, srv ServerConn, appName, process string, lines int, w io.Writer) error {
 	c, err := uissh.Connect(ctx, srv.Host, srv.User, srv.KeyPath)
