@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -139,12 +141,21 @@ type legacyCredFile struct {
 	PasswordHash string `json:"password_hash"`
 }
 
-// loadUsers populates the in-memory user map. It prefers users.json; failing
-// that, it migrates a legacy single-user auth.json into an admin account and
-// writes users.json so subsequent loads are canonical. Returns an error when no
-// usable credentials exist (the caller decides whether that means setup mode).
+// errNoUsers reports that no credential store exists at all (fresh install):
+// the only condition under which setup mode or the legacy migration may run.
+// Any other load failure is an authentication outage, not a new install.
+var errNoUsers = errors.New("no credential store found")
+
+// loadUsers populates the in-memory user map. It prefers users.json. Only when
+// that file is genuinely ABSENT may a legacy single-user auth.json be migrated
+// into an admin account (and users.json written so subsequent loads are
+// canonical). An unreadable or corrupt users.json is returned as an error so
+// the caller can fail closed — previously any read failure fell through to the
+// legacy file, which could reactivate obsolete credentials.
 func (g *authGate) loadUsers() error {
-	if data, err := os.ReadFile(g.usersFile); err == nil {
+	data, err := os.ReadFile(g.usersFile)
+	switch {
+	case err == nil:
 		var f usersFileFormat
 		if err := json.Unmarshal(data, &f); err != nil {
 			return fmt.Errorf("parsing %s: %w", g.usersFile, err)
@@ -154,6 +165,12 @@ func (g *authGate) loadUsers() error {
 		g.users = make(map[string]*dashUser, len(f.Users))
 		for i := range f.Users {
 			u := f.Users[i]
+			if u.Username == "" {
+				return fmt.Errorf("parsing %s: entry %d has an empty username", g.usersFile, i)
+			}
+			if _, dup := g.users[u.Username]; dup {
+				return fmt.Errorf("parsing %s: duplicate username %q", g.usersFile, u.Username)
+			}
 			u.Role = normalizeRole(u.Role)
 			g.users[u.Username] = &u
 		}
@@ -162,15 +179,22 @@ func (g *authGate) loadUsers() error {
 			return fmt.Errorf("no users configured in %s", g.usersFile)
 		}
 		return nil
+	case errors.Is(err, fs.ErrNotExist):
+		// Absent — the only case allowed to try the legacy migration.
+	default:
+		return fmt.Errorf("reading %s: %w", g.usersFile, err)
 	}
 
 	// No users.json — try migrating a legacy single-user auth.json.
-	data, err := os.ReadFile(g.legacyFile)
+	legacyData, err := os.ReadFile(g.legacyFile)
 	if err != nil {
-		return err
+		if errors.Is(err, fs.ErrNotExist) {
+			return errNoUsers
+		}
+		return fmt.Errorf("reading legacy %s: %w", g.legacyFile, err)
 	}
 	var creds legacyCredFile
-	if err := json.Unmarshal(data, &creds); err != nil {
+	if err := json.Unmarshal(legacyData, &creds); err != nil {
 		return fmt.Errorf("parsing legacy %s: %w", g.legacyFile, err)
 	}
 	if creds.PasswordHash == "" {
@@ -245,9 +269,20 @@ func cloneUsersLocked(users map[string]*dashUser) map[string]*dashUser {
 
 // authenticate verifies username+password. It always performs a bcrypt compare
 // (against a dummy hash for unknown users) so response time doesn't reveal
-// which usernames exist. The env-var bootstrap credential is honored as an
-// implicit admin when no matching stored user exists.
+// which usernames exist. A blank username resolves to the configured
+// environment user BEFORE the stored-account lookup, so a stored account
+// shadowing the env name always wins: once the operator has changed the stored
+// password or role, the old environment password can no longer sign in as that
+// account (A01).
 func (g *authGate) authenticate(username, password string) (*dashUser, bool) {
+	envUser := g.user
+	if envUser == "" {
+		envUser = "admin"
+	}
+	if username == "" {
+		username = envUser
+	}
+
 	g.credMu.RLock()
 	u := g.users[username]
 	g.credMu.RUnlock()
@@ -259,18 +294,11 @@ func (g *authGate) authenticate(username, password string) (*dashUser, bool) {
 		return nil, false
 	}
 
-	// Env-var bootstrap: a single implicit admin, used before any user file
-	// exists (e.g. TEPLOY_DASH_PASSWORD in Docker). Empty submitted username
-	// resolves to the configured env user (or "admin").
-	if g.pass != "" {
-		envUser := g.user
-		if envUser == "" {
-			envUser = "admin"
-		}
-		if username == "" || username == envUser {
-			if subtle.ConstantTimeCompare([]byte(password), []byte(g.pass)) == 1 {
-				return &dashUser{Username: envUser, Role: RoleAdmin}, true
-			}
+	// Env-var bootstrap: a single implicit admin, used only when no stored
+	// account shadows the name (e.g. TEPLOY_DASH_PASSWORD in Docker).
+	if g.pass != "" && username == envUser {
+		if subtle.ConstantTimeCompare([]byte(password), []byte(g.pass)) == 1 {
+			return &dashUser{Username: envUser, Role: RoleAdmin}, true
 		}
 	}
 
@@ -310,10 +338,10 @@ func (g *authGate) createUser(username, password, role string) error {
 	return nil
 }
 
-// setPassword replaces a user's password. If the username isn't in the store
-// yet but matches the caller's authenticated session (e.g. an env-bootstrap
-// admin changing their password), it is created as an admin so the change
-// persists.
+// setPassword replaces an EXISTING user's password. An unknown username is an
+// error — the old behavior synthesized a missing account as an admin, which
+// turned an ordinary admin reset against a typo'd name into accidental admin
+// creation (A03). Env-bootstrap migration has its own method below.
 func (g *authGate) setPassword(username, password string) error {
 	if len(password) < 8 {
 		return fmt.Errorf("password must be at least 8 characters")
@@ -327,14 +355,56 @@ func (g *authGate) setPassword(username, password string) error {
 	}
 	g.credMu.Lock()
 	defer g.credMu.Unlock()
-	candidate := cloneUsersLocked(g.users)
-	u := candidate[username]
+	u := g.users[username]
 	if u == nil {
-		// Persist the previously-env-only admin.
-		u = &dashUser{Username: username, Role: RoleAdmin}
-		candidate[username] = u
+		return fmt.Errorf("user not found")
 	}
-	u.PasswordHash = string(hash)
+	candidate := cloneUsersLocked(g.users)
+	candidate[username].PasswordHash = string(hash)
+	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+		return err
+	}
+	g.users = candidate
+	return nil
+}
+
+// setPasswordMigratingEnv persists the environment-bootstrap admin's first
+// password change as a real stored account. It refuses to create anything
+// unless the named identity IS the canonical env user and the env credential
+// is configured — the caller has already verified the current password through
+// authenticate, which for a shadow-free name means the env password.
+func (g *authGate) setPasswordMigratingEnv(username, password string) error {
+	envUser := g.user
+	if envUser == "" {
+		envUser = "admin"
+	}
+	if g.pass == "" || username != envUser {
+		return fmt.Errorf("user not found")
+	}
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
+	if len(password) > maxPasswordBytes {
+		return fmt.Errorf("password must be at most %d bytes", maxPasswordBytes)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		return err
+	}
+	g.credMu.Lock()
+	defer g.credMu.Unlock()
+	if u := g.users[username]; u != nil {
+		// A stored account appeared between authenticate and now — plain reset.
+		candidate := cloneUsersLocked(g.users)
+		candidate[username].PasswordHash = string(hash)
+		if err := saveUsersFile(g.usersFile, candidate); err != nil {
+			return err
+		}
+		g.users = candidate
+		return nil
+	}
+	candidate := cloneUsersLocked(g.users)
+	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: RoleAdmin}
 	if err := saveUsersFile(g.usersFile, candidate); err != nil {
 		return err
 	}
@@ -537,7 +607,11 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.gate.setPassword(username, body.Password); err != nil {
-			writeError(w, err.Error())
+			if strings.Contains(err.Error(), "user not found") {
+				writeErrorStatus(w, err.Error(), http.StatusNotFound)
+			} else {
+				writeError(w, err.Error())
+			}
 			return
 		}
 		s.gate.deleteUserSessions(username)

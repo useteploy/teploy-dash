@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -215,6 +217,126 @@ func TestEnvBootstrapAdmin(t *testing.T) {
 	}
 	if _, ok := g.authenticate("admin", "wrong"); ok {
 		t.Error("wrong env password authenticated")
+	}
+}
+
+// A01: once a stored account shadows the env username, the stored account is
+// authoritative. The old environment password must no longer sign in — with a
+// blank username OR the explicit name — and the stored role wins.
+func TestEnvBootstrapShadowedByStoredAccount(t *testing.T) {
+	dir := t.TempDir()
+	g := newAuthGate("admin", "bootpass", filepath.Join(dir, "auth.json"))
+	if err := g.createUser("admin", "storedpass1", RoleEditor); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := g.authenticate("", "bootpass"); ok {
+		t.Error("blank-username login with the old env password succeeded despite a stored account")
+	}
+	if _, ok := g.authenticate("admin", "bootpass"); ok {
+		t.Error("named login with the old env password succeeded despite a stored account")
+	}
+	u, ok := g.authenticate("", "storedpass1")
+	if !ok || u.Role != RoleEditor {
+		t.Fatalf("blank-username login with the stored password = %+v, %v; want editor, true", u, ok)
+	}
+}
+
+// A03: an admin password reset against a nonexistent username must fail and
+// create nothing (setPassword used to synthesize an admin account).
+func TestSetPasswordUnknownUserCreatesNothing(t *testing.T) {
+	g := newTestGate(t)
+	if err := g.setPassword("ghost", "whatever123"); err == nil {
+		t.Fatal("expected error resetting an unknown user")
+	}
+	if _, ok := g.authenticate("ghost", "whatever123"); ok {
+		t.Error("unknown user authenticates after a failed reset")
+	}
+	if len(g.listUsers()) != 0 {
+		t.Error("an account was created by a failed password reset")
+	}
+}
+
+// A04: an unreadable/corrupt users.json must NOT fall back to legacy
+// auth.json credentials, and the gate must refuse requests instead of
+// opening setup mode.
+func TestCorruptUsersFileFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	hash, _ := bcrypt.GenerateFromPassword([]byte("legacypass"), bcrypt.DefaultCost)
+	blob, _ := json.Marshal(map[string]string{"username": "operator", "password_hash": string(hash)})
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), blob, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "users.json"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	g := newAuthGate("", "", filepath.Join(dir, "auth.json"))
+	if g.initErr == nil {
+		t.Fatal("expected initErr for a corrupt users.json")
+	}
+	if g.setupRequired {
+		t.Error("corrupt users.json must not open setup mode")
+	}
+	if _, ok := g.authenticate("operator", "legacypass"); ok {
+		t.Error("legacy credential reactivated by a corrupt users.json")
+	}
+
+	mux := http.NewServeMux()
+	reached := false
+	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) { reached = true })
+	h := g.wrap(mux)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/apps", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("gate should 503 during a credential outage, got %d", w.Code)
+	}
+	if reached {
+		t.Error("request reached the handler during a credential outage")
+	}
+}
+
+// A03: two concurrent setup requests holding the valid bootstrap token can
+// create only one initial account.
+func TestSetupRaceCreatesSingleAccount(t *testing.T) {
+	dir := t.TempDir()
+	g := newAuthGate("", "", filepath.Join(dir, "auth.json"))
+	token := g.bootstrapToken
+
+	do := func(username string) int {
+		b, _ := json.Marshal(map[string]string{
+			"bootstrap_token": token,
+			"username":        username,
+			"password":        "adminpassword", "confirm_password": "adminpassword",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/setup", bytes.NewReader(b))
+		w := httptest.NewRecorder()
+		g.handleSetup(w, req)
+		return w.Code
+	}
+
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	for _, name := range []string{"alice", "bob"} {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			codes <- do(name)
+		}(name)
+	}
+	wg.Wait()
+	close(codes)
+	okCount := 0
+	for c := range codes {
+		if c == http.StatusOK {
+			okCount++
+		}
+	}
+	if okCount != 1 {
+		t.Fatalf("expected exactly one setup to succeed, got %d", okCount)
+	}
+	if n := len(g.listUsers()); n != 1 {
+		t.Errorf("expected 1 account after racing setups, got %d", n)
 	}
 }
 

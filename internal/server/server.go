@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -331,11 +332,27 @@ func (s *Server) httpServer(addr string) *http.Server {
 
 func (s *Server) handler() http.Handler {
 	handler := http.Handler(s.mux)
+	handler = baselineHeaders(handler)
 	handler = limitMutationBodies(handler)
 	if s.gate != nil {
 		handler = s.gate.wrap(handler)
 	}
 	return handler
+}
+
+// baselineHeaders sets the conservative response hardening baseline: nosniff,
+// no framing, no referrer leakage, and a CSP that blocks framing/object/base
+// abuse without constraining the bundled Alpine/inline-script frontend (a
+// stricter script-src needs an Alpine configuration change first — A10).
+func baselineHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'self'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func limitMutationBodies(next http.Handler) http.Handler {
@@ -383,6 +400,16 @@ type authGate struct {
 	// abandoned setup doesn't stay claimable indefinitely.
 	bootstrapToken       string
 	bootstrapTokenExpiry time.Time
+	// setupMu serializes first-run setup: the setup-required check and the
+	// account creation must be one critical section, or two holders of the
+	// bootstrap token could race past the check and each create a different
+	// initial admin (A03).
+	setupMu sync.Mutex
+	// initErr is set when the credential store exists but cannot be loaded
+	// (unreadable/corrupt users.json, corrupt legacy auth.json). The gate then
+	// refuses every request except /api/health — an authentication outage is
+	// not setup mode and must not fall back to older credentials (A04).
+	initErr error
 }
 
 // bootstrapTokenTTL bounds how long a printed setup token remains valid.
@@ -422,17 +449,26 @@ func newAuthGate(user, pass, credFile string) *authGate {
 		fails:          make(map[string]*failInfo),
 		sessions:       make(map[string]*sessionInfo),
 	}
-	// Load stored users (migrating a legacy single-user auth.json if present).
-	// If none exist and no env-var password is set, enter setup mode so the
-	// operator can create the first account.
-	if err := g.loadUsers(); err != nil && pass == "" {
-		g.setupRequired = true
-		g.bootstrapToken = generateBootstrapToken()
-		g.bootstrapTokenExpiry = time.Now().Add(bootstrapTokenTTL)
-		log.Printf("=====================================================================")
-		log.Printf("First-run setup required. Bootstrap token (valid %s): %s", bootstrapTokenTTL, g.bootstrapToken)
-		log.Printf("Enter this token on the /setup page to create the initial admin account.")
-		log.Printf("=====================================================================")
+	// Load stored users. Only a genuinely fresh install (no users.json and no
+	// legacy auth.json anywhere) with no env-var password enters setup mode.
+	// A load failure on an EXISTING store is an authentication outage: the
+	// gate keeps serving 503s (see wrap) rather than silently falling back to
+	// legacy credentials or an open setup flow (A04).
+	if err := g.loadUsers(); err != nil {
+		if errors.Is(err, errNoUsers) && pass == "" {
+			g.setupRequired = true
+			g.bootstrapToken = generateBootstrapToken()
+			g.bootstrapTokenExpiry = time.Now().Add(bootstrapTokenTTL)
+			log.Printf("=====================================================================")
+			log.Printf("First-run setup required. Bootstrap token (valid %s): %s", bootstrapTokenTTL, g.bootstrapToken)
+			log.Printf("Enter this token on the /setup page to create the initial admin account.")
+			log.Printf("=====================================================================")
+		} else if !errors.Is(err, errNoUsers) {
+			g.initErr = err
+			log.Printf("auth: credential store unavailable — refusing logins: %v", err)
+		}
+		// errNoUsers with an env password set is the plain env-bootstrap
+		// mode: no stored users, the env credential is the admin. Not an error.
 	}
 	return g
 }
@@ -540,6 +576,14 @@ func parseTrustedProxies(s string) []*net.IPNet {
 
 func (g *authGate) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Credential-store outage: refuse everything except the liveness
+		// probe. Serving logins against a stale/legacy fallback or opening
+		// setup mode would be worse than a clear 503.
+		if g.initErr != nil && r.URL.Path != "/api/health" {
+			jsonError(w, "authentication store unavailable — check server logs", http.StatusServiceUnavailable)
+			return
+		}
+
 		// Setup mode: no credentials configured yet. Only let through the
 		// setup page and its API endpoint.
 		g.credMu.RLock()
@@ -565,12 +609,21 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// status page (its handlers 404 when the feature is disabled), and
 		// the MCP endpoint — it enforces its own bearer-token auth and is
 		// used by non-browser clients that have no session cookie.
+		//
+		// Login, logout, and setup are state-changing too (login-CSRF could
+		// sign the victim into an attacker-known account), so they get the
+		// same same-origin check as authenticated mutations (A05).
 		switch r.URL.Path {
 		case "/api/health", "/login", "/api/login", "/api/logout", "/api/login/methods",
+			"/api/setup",
 			"/status", "/api/status", "/api/mcp",
 			// The browser requests the tab icon before anyone has signed in; it
 			// is a static brand asset and discloses nothing.
 			"/favicon.svg", "/favicon.ico":
+			if isMutating(r.Method) && !sameOrigin(r) {
+				http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		case "/oidc/login", "/oidc/callback":
@@ -675,13 +728,18 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-// handleSetup creates the initial account. Only works in setup mode.
+// handleSetup creates the initial account. Only works in setup mode. The
+// setup-required check and the account creation run under setupMu as one
+// critical section so two concurrent bootstrap-token holders cannot both pass
+// the precondition and create different initial admins (A03).
 func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	g.setupMu.Lock()
+	defer g.setupMu.Unlock()
 	g.credMu.RLock()
 	inSetup := g.setupRequired
 	g.credMu.RUnlock()
@@ -703,6 +761,9 @@ func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "missing or invalid bootstrap token — check the server log", http.StatusUnauthorized)
 		return
 	}
+	// Canonicalize the username once and use that value for BOTH storage and
+	// the session, so a whitespace-padded name can't create two identities.
+	body.Username = strings.TrimSpace(body.Username)
 	if body.Username == "" {
 		body.Username = "admin"
 	}
@@ -749,7 +810,11 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "passwords do not match", http.StatusBadRequest)
 		return
 	}
-	if err := g.setPassword(session.user, body.NewPassword); err != nil {
+	// A session identity with no stored account is the env-bootstrap admin;
+	// their first password change persists the account (admin role). Everyone
+	// else must already exist — an unknown name is an error, not a silent
+	// account creation (A03).
+	if err := g.setPasswordMigratingEnv(session.user, body.NewPassword); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -833,7 +898,10 @@ func (g *authGate) recordFail(ip string) {
 		}
 	}
 	fi := g.fails[ip]
-	if fi == nil {
+	if fi == nil || now.After(fi.until) {
+		// A brand-new window — or one whose lockout already fully expired —
+		// starts clean, so a stale count can't re-lock an IP after a single
+		// later failure (A07).
 		fi = &failInfo{}
 		g.fails[ip] = fi
 	}
@@ -871,22 +939,43 @@ func sameOrigin(r *http.Request) bool {
 
 // clientIP returns the address used for per-IP rate-limiting. By default it's
 // the direct peer (RemoteAddr) — X-Forwarded-For is NOT trusted, since a client
-// could spoof it to evade the backoff. Only when the direct peer is a configured
-// trusted proxy (TEPLOY_DASH_TRUSTED_PROXY) is the forwarded client IP used, so
-// running behind Caddy doesn't collapse every client onto the proxy's IP.
+// could spoof it to evade the backoff. Only when the chain resolves through
+// configured trusted proxies (TEPLOY_DASH_TRUSTED_PROXY) is the forwarded
+// client IP used. The chain is walked RIGHT to LEFT: each hop is only followed
+// while the hop before it is itself a trusted proxy, so a client-supplied
+// spoofed entry appended by an honest proxy cannot become the identity (a
+// leftmost read would take the attacker's value, A07).
 func (g *authGate) clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if g.isTrustedProxy(host) {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
-				return first
-			}
-		}
+	current := net.ParseIP(host)
+	if current == nil || !g.isTrustedProxyIP(current) {
+		return host
 	}
-	return host
+	xff := r.Header.Get("X-Forwarded-For")
+	if strings.TrimSpace(xff) == "" {
+		return host
+	}
+	hops := strings.Split(xff, ",")
+	if len(hops) > 32 {
+		return host
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		next := net.ParseIP(hop)
+		if next == nil {
+			// Malformed entry: stop at the last valid address rather than
+			// trusting anything further left.
+			return current.String()
+		}
+		if !g.isTrustedProxyIP(next) {
+			return next.String()
+		}
+		current = next
+	}
+	return current.String()
 }
 
 func (g *authGate) isTrustedProxy(host string) bool {
@@ -894,6 +983,10 @@ func (g *authGate) isTrustedProxy(host string) bool {
 	if ip == nil {
 		return false
 	}
+	return g.isTrustedProxyIP(ip)
+}
+
+func (g *authGate) isTrustedProxyIP(ip net.IP) bool {
 	for _, n := range g.trustedProxies {
 		if n.Contains(ip) {
 			return true
