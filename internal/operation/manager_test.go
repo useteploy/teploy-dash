@@ -380,3 +380,116 @@ func TestReplayAfterSequence(t *testing.T) {
 		t.Fatalf("replay after %d = %+v; all=%+v", all[1].Sequence, replayed, all)
 	}
 }
+
+// A25: when the initial event write fails, enqueue is rejected AND no queued
+// record may exist on disk — a later restart must not execute a request the
+// caller saw rejected. (The record, not the event file, is the commit point.)
+func TestRejectedEnqueueNeverExecutesAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	var executed atomic.Int32
+	manager := newTestManager(t, dir, 100, func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
+		executed.Add(1)
+		return 0, nil
+	})
+
+	// Make the events directory unwritable: the initial event write (the
+	// FIRST durability step) fails, before any record is committed.
+	eventsDir := filepath.Join(dir, "operations", "events")
+	if err := os.Chmod(eventsDir, 0500); err != nil {
+		t.Skipf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(eventsDir, 0700) })
+
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:1"), ""); err == nil {
+		os.Chmod(eventsDir, 0700)
+		t.Fatal("expected enqueue to fail when the initial event cannot persist")
+	}
+
+	// No record file for the rejected operation.
+	records, err := os.ReadDir(filepath.Join(dir, "operations", "records"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("rejected enqueue left %d record(s) on disk", len(records))
+	}
+
+	os.Chmod(eventsDir, 0700)
+
+	// Restart: recovery must find nothing queued to run.
+	_ = newTestManager(t, dir, 100, func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
+		executed.Add(1)
+		return 0, nil
+	})
+	// Give any (wrongly) recovered worker a moment to fire.
+	time.Sleep(100 * time.Millisecond)
+	if executed.Load() != 0 {
+		t.Fatalf("rejected operation executed after restart (%d executions)", executed.Load())
+	}
+}
+
+// A26: an escaping-heavy log line must not expand past the event reader's
+// scanner limit — payloads are bounded and sanitized at ingestion, and a
+// restart can still read the history.
+func TestOversizedEscapingEventStaysLoadable(t *testing.T) {
+	dir := t.TempDir()
+	chatty := strings.Repeat("\x01", 200*1024) // raw control chars, ~6x JSON expansion
+	manager := newTestManager(t, dir, 1000, func(_ context.Context, command Command, emit func(Stream, string)) (int, error) {
+		emit(StreamStdout, chatty)
+		return 0, nil
+	})
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, op.ID, StatusSucceeded)
+
+	events, err := manager.EventsAfter(op.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type != EventStdout {
+			continue
+		}
+		if len(e.Data) > maxEventDataBytes+len(" [truncated]") {
+			t.Fatalf("stdout event data not bounded: %d bytes", len(e.Data))
+		}
+		if !strings.HasSuffix(e.Data, " [truncated]") {
+			t.Fatalf("oversized event missing truncation marker")
+		}
+	}
+
+	// The history file every line of which the reader's 1 MiB scanner must
+	// accept on restart.
+	if _, err := New(dir, Options{MaxEvents: 1000, Resolver: testResolver, Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		return 0, nil
+	}}); err != nil {
+		t.Fatalf("restart failed to load bounded event history: %v", err)
+	}
+}
+
+// A26: one corrupt event history must not disable the whole service.
+func TestCorruptEventHistoryIsolated(t *testing.T) {
+	dir := t.TempDir()
+	manager := newTestManager(t, dir, 100, func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		return 0, nil
+	})
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, op.ID, StatusSucceeded)
+
+	// Corrupt that operation's event file beyond the scanner limit.
+	eventPath := filepath.Join(dir, "operations", "events", op.ID+".jsonl")
+	if err := os.WriteFile(eventPath, []byte(`{"data":"`+strings.Repeat("x", 2<<20)+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := New(dir, Options{MaxEvents: 100, Resolver: testResolver, Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		return 0, nil
+	}}); err != nil {
+		t.Fatalf("corrupt history for one operation disabled the service: %v", err)
+	}
+}

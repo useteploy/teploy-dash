@@ -16,6 +16,23 @@ import (
 
 const defaultMaxEvents = 1000
 
+// maxEventDataBytes bounds one event's payload before it is persisted. JSON
+// escaping of control characters can expand a raw line ~6x in its encoded
+// form, and the event reader scans with a 1 MiB limit — an unbounded log
+// line could therefore make an operation's whole history unreadable on
+// restart (A26). 16 KiB of payload stays comfortably under the scanner limit
+// even fully escaped.
+const maxEventDataBytes = 16 << 10
+
+// boundedEventData sanitizes and truncates event data at ingestion.
+func boundedEventData(data string) string {
+	data = strings.ToValidUTF8(data, "\uFFFD")
+	if len(data) <= maxEventDataBytes {
+		return data
+	}
+	return data[:maxEventDataBytes] + " [truncated]"
+}
+
 type Options struct {
 	MaxEvents       int
 	Resolver        Resolver
@@ -75,7 +92,12 @@ func New(dataDir string, options Options) (*Manager, error) {
 		}
 		events, err := store.loadEvents(id)
 		if err != nil {
-			return nil, fmt.Errorf("load events for %s: %w", id, err)
+			// A corrupt/oversized history for ONE operation must not disable
+			// the whole operation service (A26). Drop that history loudly;
+			// the operation record itself is intact and recovery decides its
+			// fate below.
+			log.Printf("[operation] dropping unreadable event history for %s: %v", id, err)
+			events = nil
 		}
 		m.events[id] = events
 		if op.IdempotencyKey != "" {
@@ -140,24 +162,28 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		HasSecrets:     len(command.Secrets) > 0,
 		requestHash:    hash,
 	}
-	m.operations[id] = op
-	if idempotencyKey != "" {
-		m.idempotency[idempotencyKey] = id
+
+	// Durable admission (A25): the queued RECORD is the commit point. The
+	// initial event file is written first; if the record write then fails,
+	// the orphan event file is inert — recovery enumerates records, never
+	// event files. The reverse order left a queued record on disk after a
+	// rejected enqueue (event write failed, record already saved), which
+	// recovery would EXECUTE even though the caller saw an error. Nothing is
+	// published in memory (operations, idempotency, worker) until the record
+	// commit has happened.
+	initial := Event{Sequence: 1, OperationID: id, Type: EventStatus, Data: string(StatusQueued), CreatedAt: now}
+	if err := m.store.saveEvents(id, []Event{initial}); err != nil {
+		m.mu.Unlock()
+		return nil, false, fmt.Errorf("persist initial event: %w", err)
 	}
 	if err := m.store.saveOperation(op); err != nil {
-		delete(m.operations, id)
-		delete(m.idempotency, idempotencyKey)
 		m.mu.Unlock()
-		return nil, false, err
+		return nil, false, fmt.Errorf("persist operation record: %w", err)
 	}
-	if err := m.appendEventLocked(id, EventStatus, string(StatusQueued)); err != nil {
-		// Roll back exactly like the saveOperation failure above: a queued
-		// record without its initial event has no worker, no cancel handle,
-		// and would strand the idempotency key against a retry.
-		delete(m.operations, id)
-		delete(m.idempotency, idempotencyKey)
-		m.mu.Unlock()
-		return nil, false, err
+	m.operations[id] = op
+	m.events[id] = []Event{initial}
+	if idempotencyKey != "" {
+		m.idempotency[idempotencyKey] = id
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancels[id] = cancel
@@ -274,6 +300,7 @@ func (m *Manager) emit(id string, eventType EventType, data string) {
 }
 
 func (m *Manager) appendEventLocked(id string, eventType EventType, data string) error {
+	data = boundedEventData(data)
 	events := m.events[id]
 	var sequence uint64 = 1
 	if len(events) > 0 {
