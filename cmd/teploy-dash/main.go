@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -35,6 +37,13 @@ var (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("teploy-dash stopped: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	port := flag.Int("port", 3456, "HTTP server port")
 	host := flag.String("host", "0.0.0.0", "HTTP server host")
 	dataDir := flag.String("data", "/var/teploy-dash", "Data directory for monitor history")
@@ -72,6 +81,9 @@ func main() {
 	// backend is surfaced through /api/health rather than only a startup log
 	// line, so it stays visible after the log has scrolled away.
 	requireNucleus := os.Getenv("TEPLOY_DASH_REQUIRE_NUCLEUS") == "1" || os.Getenv("TEPLOY_DASH_REQUIRE_NUCLEUS") == "true"
+	if requireNucleus && *nucleusURL == "" {
+		return fmt.Errorf("Nucleus is required (TEPLOY_DASH_REQUIRE_NUCLEUS) but no --nucleus-url was configured")
+	}
 	var st store.Store
 	var fileStore *store.FileStore
 	var err error
@@ -80,9 +92,11 @@ func main() {
 		st, err = store.NewNucleusStore(*nucleusURL)
 		if err != nil {
 			if requireNucleus {
-				log.Fatalf("Nucleus required (TEPLOY_DASH_REQUIRE_NUCLEUS) but connection to %s failed: %v", *nucleusURL, err)
+				// Never log the URL: it can carry credentials in its DSN.
+				return fmt.Errorf("Nucleus required (TEPLOY_DASH_REQUIRE_NUCLEUS) but the connection failed: %w", err)
 			}
-			log.Printf("Warning: failed to connect to Nucleus (%s), falling back to file store: %v", *nucleusURL, err)
+			// Same redaction on the fallback path.
+			log.Printf("Warning: failed to connect to Nucleus, falling back to file store: %v", err)
 			fileStore = store.NewFileStore(*dataDir)
 			st = fileStore
 		} else {
@@ -168,7 +182,7 @@ func main() {
 	// Start server
 	serverErrCh := make(chan error, 1)
 	go func() {
-		addr := fmt.Sprintf("%s:%d", *host, *port)
+		addr := net.JoinHostPort(*host, strconv.Itoa(*port))
 		log.Printf("teploy-dash listening on http://%s", addr)
 		if err := srv.ListenAndServe(addr); err != nil {
 			serverErrCh <- err
@@ -184,7 +198,10 @@ func main() {
 	case <-quit:
 		log.Println("Shutting down...")
 	case err := <-serverErrCh:
-		log.Printf("Server error: %v", err)
+		// A failed listener (port in use, bad bind address) is a startup
+		// error and must exit non-zero, not just log and return 0 (A39).
+		cleanupCancel()
+		return fmt.Errorf("HTTP server failed: %w", err)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -208,4 +225,5 @@ func main() {
 	mon.Stop()
 	rst.Stop()
 	st.Close()
+	return nil
 }

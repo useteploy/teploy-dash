@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -65,10 +66,17 @@ func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
 		writeData(w, s.operations.List(status, r.URL.Query().Get("target"), limit))
 	case http.MethodPost:
 		var request operation.Request
+		// Same strict single-object policy as strictDecode: exactly one JSON
+		// value, no unknown fields (A29).
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&request); err != nil {
 			writeError(w, "invalid request body: "+err.Error())
+			return
+		}
+		var extra json.RawMessage
+		if err := decoder.Decode(&extra); err != io.EOF {
+			writeError(w, "request body must contain exactly one JSON object")
 			return
 		}
 		s.enqueueOperation(w, r, request)

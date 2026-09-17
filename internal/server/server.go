@@ -1349,7 +1349,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			Key   string `json:"key"`
 			Value string `json:"value"`
 		}
-		strictDecode(r, &body)
+		if err := strictDecode(r, &body); err != nil {
+			writeError(w, "invalid request body")
+			return
+		}
 		if !validEnvKey(body.Key) {
 			writeError(w, "invalid env var name")
 			return
@@ -1507,7 +1510,10 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			Purge    bool   `json:"purge"`
 			Redirect string `json:"redirect"`
 		}
-		strictDecode(r, &body)
+		if err := strictDecode(r, &body); err != nil {
+			writeError(w, "invalid request body")
+			return
+		}
 		s.enqueueOperation(w, r, operation.Request{
 			Kind: operation.KindRemove, Server: serverName, App: appName,
 			Purge: body.Purge, Redirect: body.Redirect,
@@ -1704,7 +1710,12 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := cli.Run("template", "list", "--json")
 	if err != nil {
-		writeData(w, []interface{}{})
+		// A CLI failure is a dependency failure, not an empty catalog (A30).
+		writeErrorStatus(w, "template list failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if result.ExitCode != 0 {
+		writeErrorStatus(w, "template list failed: "+strings.TrimSpace(result.Stderr), http.StatusBadGateway)
 		return
 	}
 	writeRawJSON(w, result.Stdout)
@@ -1750,7 +1761,11 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := cli.Run("server", "list", "--json")
 	if err != nil {
-		writeData(w, []interface{}{})
+		writeErrorStatus(w, "server list failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if result.ExitCode != 0 {
+		writeErrorStatus(w, "server list failed: "+strings.TrimSpace(result.Stderr), http.StatusBadGateway)
 		return
 	}
 	// The CLI returns a { name: {host, user} } map. Enrich each entry with an
@@ -1872,7 +1887,10 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Domain string `json:"domain"`
 		Port   int    `json:"port"`
 	}
-	strictDecode(r, &body)
+	if err := strictDecode(r, &body); err != nil {
+		writeError(w, "invalid request body")
+		return
+	}
 
 	s.enqueueOperation(w, r, operation.Request{
 		Kind: operation.KindDeploy, Server: body.Server, App: body.App,
@@ -2286,7 +2304,11 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := cli.ServerList()
 		if err != nil {
-			writeData(w, []interface{}{})
+			writeErrorStatus(w, "server list failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if result.ExitCode != 0 {
+			writeErrorStatus(w, "server list failed: "+strings.TrimSpace(result.Stderr), http.StatusBadGateway)
 			return
 		}
 		writeRawJSON(w, result.Stdout)
@@ -2297,7 +2319,10 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 			User string `json:"user"`
 			Role string `json:"role"`
 		}
-		strictDecode(r, &body)
+		if err := strictDecode(r, &body); err != nil {
+			writeError(w, "invalid request body")
+			return
+		}
 		result, err := cli.ServerAdd(body.Name, body.Host, body.User, body.Role)
 		if err != nil {
 			writeError(w, err.Error())
@@ -2328,6 +2353,23 @@ func (s *Server) lookupServerUserRole(name string) (user, role string) {
 		return srv.User, srv.Role
 	}
 	return "", ""
+}
+
+// serverNameExists reports whether a server name is already configured in the
+// CLI's servers.yml. Used to reject renames onto an existing entry —
+// ServerAdd is an upsert, so a rename to a taken name would silently
+// overwrite that server's configuration (A36).
+func (s *Server) serverNameExists(name string) bool {
+	result, err := cli.ServerList()
+	if err != nil {
+		return false
+	}
+	var raw map[string]json.RawMessage
+	if json.Unmarshal([]byte(result.Stdout), &raw) != nil {
+		return false
+	}
+	_, exists := raw[name]
+	return exists
 }
 
 func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request) {
@@ -2375,6 +2417,12 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		// as two processes for a same-name edit would drop tags/vpn_ip, because
 		// the re-add reads servers.yml after the remove already deleted them.
 		if newName != name {
+			// A rename onto an existing name would upsert-overwrite that
+			// server's whole configuration — reject it up front (A36).
+			if s.serverNameExists(newName) {
+				writeErrorStatus(w, "a server named "+newName+" already exists", http.StatusConflict)
+				return
+			}
 			// Capture the original host before removing so we can restore the
 			// server if the re-add under the new name fails (otherwise a failed
 			// rename silently loses the server config entirely).
@@ -2471,27 +2519,62 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		cfg := loadNotificationsConfig()
-		// Never return the SMTP password to the client; expose only whether one
-		// is configured.
+		// Never return secrets to the client; expose only whether one is
+		// configured.
 		writeData(w, map[string]any{
-			"webhook_url":   cfg.WebhookURL,
-			"smtp_host":     cfg.SMTPHost,
-			"smtp_port":     cfg.SMTPPort,
-			"smtp_user":     cfg.SMTPUser,
-			"smtp_pass_set": cfg.SMTPPass != "",
-			"email_to":      cfg.EmailTo,
-			"email_from":    cfg.EmailFrom,
+			"webhook_url":         cfg.WebhookURL,
+			"webhook_secret_set":  cfg.WebhookSecret != "",
+			"smtp_host":           cfg.SMTPHost,
+			"smtp_port":           cfg.SMTPPort,
+			"smtp_user":           cfg.SMTPUser,
+			"smtp_pass_set":       cfg.SMTPPass != "",
+			"email_to":            cfg.EmailTo,
+			"email_from":          cfg.EmailFrom,
 		})
 	case "POST":
-		var cfg alert.Config
-		if err := strictDecode(r, &cfg); err != nil {
+		// Patch DTO (A34): the GET response contains read-only view flags
+		// (smtp_pass_set, webhook_secret_set) that the old POST body could not
+		// round-trip — strict decoding rejected the UI's own save. Secret
+		// fields are pointers: absent = preserve the stored value; present =
+		// replace (empty string clears it deliberately).
+		var patch struct {
+			WebhookURL    *string `json:"webhook_url"`
+			WebhookSecret *string `json:"webhook_secret"`
+			SMTPHost      *string `json:"smtp_host"`
+			SMTPPort      *int    `json:"smtp_port"`
+			SMTPUser      *string `json:"smtp_user"`
+			SMTPPass      *string `json:"smtp_pass"`
+			EmailTo       *string `json:"email_to"`
+			EmailFrom     *string `json:"email_from"`
+		}
+		if err := strictDecode(r, &patch); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}
-		// Preserve the stored password when the client submits an empty value
-		// (the GET never reveals it, so the form can't round-trip it).
-		if cfg.SMTPPass == "" {
-			cfg.SMTPPass = loadNotificationsConfig().SMTPPass
+		cfg := loadNotificationsConfig()
+		if patch.WebhookURL != nil {
+			cfg.WebhookURL = strings.TrimSpace(*patch.WebhookURL)
+		}
+		if patch.WebhookSecret != nil {
+			cfg.WebhookSecret = strings.TrimSpace(*patch.WebhookSecret)
+		}
+		if patch.SMTPHost != nil {
+			cfg.SMTPHost = strings.TrimSpace(*patch.SMTPHost)
+		}
+		if patch.SMTPPort != nil {
+			cfg.SMTPPort = *patch.SMTPPort
+		}
+		if patch.SMTPUser != nil {
+			cfg.SMTPUser = *patch.SMTPUser
+		}
+		if patch.SMTPPass != nil {
+			cfg.SMTPPass = *patch.SMTPPass
+		}
+		if patch.EmailTo != nil {
+			cfg.EmailTo = *patch.EmailTo
+		}
+		if patch.EmailFrom != nil {
+			cfg.EmailFrom = *patch.EmailFrom
 		}
 		if err := saveNotificationsConfig(cfg); err != nil {
 			writeError(w, err.Error())
@@ -2516,7 +2599,11 @@ func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		result, err := cli.Run("registry", "list", "--json")
 		if err != nil {
-			writeData(w, []interface{}{})
+			writeErrorStatus(w, "registry list failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if result.ExitCode != 0 {
+			writeErrorStatus(w, "registry list failed: "+strings.TrimSpace(result.Stderr), http.StatusBadGateway)
 			return
 		}
 		writeRawJSON(w, result.Stdout)
@@ -2526,7 +2613,10 @@ func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 			Username string `json:"username"`
 			Password string `json:"password"`
 		}
-		strictDecode(r, &body)
+		if err := strictDecode(r, &body); err != nil {
+			writeError(w, "invalid request body")
+			return
+		}
 		// Pass the password over stdin (--token reads it there) instead of on
 		// the argv, where it would be visible in the host's process list.
 		result, err := cli.RunWithStdin(body.Password, "registry", "login", body.Server, "--username", body.Username, "--token")

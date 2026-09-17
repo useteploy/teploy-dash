@@ -26,6 +26,12 @@ type statusResponse struct {
 
 // handleStatusAPI serves the public status JSON. Returns 404 when the public
 // status page is disabled so the endpoint is indistinguishable from absent.
+//
+// Freshness policy (A38): a monitor's latest result only counts as its
+// current state when it was observed within roughly two check intervals plus
+// the timeout — anything older (or no result at all) is "unknown", and
+// unknown is never aggregated into "operational". Missing evidence is not
+// evidence of health.
 func (s *Server) handleStatusAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.config.PublicStatus {
 		http.NotFound(w, r)
@@ -38,9 +44,10 @@ func (s *Server) handleStatusAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	since := time.Now().Add(-24 * time.Hour)
+	now := time.Now()
+	since := now.Add(-24 * time.Hour)
 	out := make([]statusMonitor, 0, len(monitors))
-	upCount, downCount := 0, 0
+	upCount, downCount, unknownCount := 0, 0, 0
 
 	for _, m := range monitors {
 		if !m.Enabled {
@@ -48,16 +55,34 @@ func (s *Server) handleStatusAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 		status := "unknown"
+		// Effective schedule mirrors the runner's floors so hand-written
+		// zero-value configs get a sane freshness window.
+		interval := m.Interval
+		if interval < 10*time.Second {
+			interval = 10 * time.Second
+		}
+		timeout := m.Timeout
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		freshnessLimit := 2*interval + timeout
 		if checks, err := s.store.GetChecks(m.ID, since, 1); err == nil && len(checks) > 0 {
-			// GetChecks returns newest-first; [0] is the latest result.
-			switch checks[0].Status {
-			case "up":
+			latest := checks[0]
+			fresh := !latest.CheckedAt.After(now.Add(time.Minute)) &&
+				now.Sub(latest.CheckedAt) <= freshnessLimit
+			switch {
+			case !fresh:
+				// stale or implausibly future-dated — no current evidence
+			case latest.Status == "up":
 				status = "up"
 				upCount++
-			case "down", "timeout":
+			case latest.Status == "down", latest.Status == "timeout":
 				status = "down"
 				downCount++
 			}
+		}
+		if status == "unknown" {
+			unknownCount++
 		}
 
 		var uptime float64
@@ -68,17 +93,23 @@ func (s *Server) handleStatusAPI(w http.ResponseWriter, r *http.Request) {
 		out = append(out, statusMonitor{Name: m.Name, Status: status, UptimePercent: uptime})
 	}
 
-	overall := "operational"
+	overall := "unknown"
 	switch {
-	case len(out) > 0 && downCount > 0 && upCount == 0:
+	case len(out) == 0:
+		// nothing monitored — unknown, not a green all-clear
+	case downCount > 0 && downCount+unknownCount == len(out) && upCount == 0 && unknownCount == 0:
 		overall = "down"
 	case downCount > 0:
 		overall = "degraded"
+	case unknownCount > 0:
+		overall = "unknown"
+	default:
+		overall = "operational"
 	}
 
 	writeJSON(w, statusResponse{
 		Status:    overall,
-		UpdatedAt: time.Now().UTC(),
+		UpdatedAt: now.UTC(),
 		Monitors:  out,
 	})
 }
@@ -120,6 +151,7 @@ const statusPageHTML = `<!DOCTYPE html>
     background: var(--card); margin: 20px 0 24px; font-weight: 600; }
   .banner-operational { color: var(--up); }
   .banner-degraded, .banner-down { color: var(--down); }
+  .banner-unknown { color: var(--unknown); }
   .list { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--card); }
   .row { display: flex; align-items: center; justify-content: space-between;
     padding: 14px 20px; border-top: 1px solid var(--line); }
@@ -140,11 +172,11 @@ const statusPageHTML = `<!DOCTYPE html>
   <div class="foot" id="foot"></div>
 </div>
 <script>
-  var LABELS = { operational: "All systems operational", degraded: "Partial outage", down: "Major outage" };
+  var LABELS = { operational: "All systems operational", degraded: "Partial outage", down: "Major outage", unknown: "Status unknown" };
   function pct(n) { return (Math.round(n * 100) / 100).toFixed(2) + "%"; }
   function render(d) {
     var overall = document.getElementById("overall");
-    overall.className = "overall banner-" + d.status;
+    overall.className = "overall banner-" + (LABELS[d.status] ? d.status : "unknown");
     overall.innerHTML = "<span>" + (LABELS[d.status] || d.status) + "</span>";
     var list = document.getElementById("list");
     if (!d.monitors || d.monitors.length === 0) {
@@ -163,7 +195,19 @@ const statusPageHTML = `<!DOCTYPE html>
     });
   }
   function load() {
-    fetch("/api/status").then(function (r) { return r.json(); }).then(render).catch(function () {});
+    fetch("/api/status", { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) { throw new Error("status unavailable"); }
+        return r.json();
+      })
+      .then(render)
+      .catch(function () {
+        // A failed refresh must not leave the previous (possibly green)
+        // state standing as if it were current.
+        var banner = document.getElementById("overall");
+        banner.className = "overall banner-unknown";
+        banner.textContent = "Status unavailable — the last result is not current.";
+      });
   }
   load();
   setInterval(load, 30000);

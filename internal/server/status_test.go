@@ -111,3 +111,51 @@ func TestAppNamePatternMatchesCLIAppNames(t *testing.T) {
 		}
 	}
 }
+
+// A38: a stale result is not current evidence — the monitor reads unknown,
+// and an all-unknown (or empty) fleet is never "operational".
+func TestStatusAPI_StaleAndUnknownNeverOperational(t *testing.T) {
+	s := statusTestServer(t, true)
+	// Age the seeded checks beyond any freshness window by rewriting them
+	// with old timestamps.
+	old := time.Now().Add(-2 * time.Hour)
+	if err := s.store.SaveCheck(store.CheckResult{MonitorID: "web", Status: "up", CheckedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Freshness uses the newest check: GetChecks returns newest-first, and
+	// the stale write above is now the latest for "web" (the fresh one from
+	// the fixture is older in file order but newer in time — so also verify
+	// via the aggregate instead of exact per-monitor states).
+	w := httptest.NewRecorder()
+	s.handleStatusAPI(w, httptest.NewRequest("GET", "/api/status", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp statusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status == "operational" {
+		t.Error("stale-only evidence must not aggregate to operational")
+	}
+	for _, m := range resp.Monitors {
+		if m.Name == "Web" && m.Status != "unknown" {
+			t.Errorf("stale monitor Web = %q, want unknown", m.Status)
+		}
+	}
+}
+
+// A38: no monitors at all is "unknown", not a green all-clear.
+func TestStatusAPI_NoMonitorsIsUnknown(t *testing.T) {
+	s := &Server{config: Config{PublicStatus: true}, store: store.NewFileStore(t.TempDir())}
+	w := httptest.NewRecorder()
+	s.handleStatusAPI(w, httptest.NewRequest("GET", "/api/status", nil))
+	var resp statusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "unknown" {
+		t.Fatalf("empty fleet status = %q, want unknown", resp.Status)
+	}
+}
