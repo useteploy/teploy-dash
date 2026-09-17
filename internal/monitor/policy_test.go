@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/useteploy/teploy-dash/internal/store"
@@ -24,8 +25,12 @@ func TestIsBlockedAddr(t *testing.T) {
 		{"169.254.169.254", true}, // cloud metadata / link-local
 		{"fe80::1", true},         // IPv6 link-local
 		{"fc00::1", true},         // IPv6 unique-local (net.IP.IsPrivate covers this)
+		{"100.64.0.7", true},      // CGNAT shared address space (overlay networks)
+		{"100.127.255.255", true}, // CGNAT upper edge
+		{"224.0.0.1", true},       // multicast
 		{"8.8.8.8", false},
 		{"1.1.1.1", false},
+		{"100.128.0.1", false}, // just past the CGNAT range
 		{"93.184.216.34", false},
 	}
 	for _, c := range cases {
@@ -37,6 +42,26 @@ func TestIsBlockedAddr(t *testing.T) {
 			t.Errorf("isBlockedAddr(%s) = %v, want %v", c.ip, got, c.blocked)
 		}
 	}
+}
+
+// A11: both policy transports exist from the start, are never reallocated,
+// and concurrent lookups for both modes stay race-free (run under -race).
+func TestTransportFor_ConcurrentStableIdentity(t *testing.T) {
+	if transportFor(true) == transportFor(false) {
+		t.Fatal("internal and public policy modes must not share a transport")
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_ = transportFor(i%2 == 0)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
 }
 
 // DASH-010: an HTTP monitor targeting a loopback address must be rejected by

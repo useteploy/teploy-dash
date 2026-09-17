@@ -2496,6 +2496,72 @@ func (s *Server) handleRegistryAction(w http.ResponseWriter, r *http.Request) {
 
 // ── Monitor Routes ────────────────────────────────────────────────────────
 
+// Monitor input bounds (A14). Intervals live between one fast poll and one
+// slow daily sweep; timeouts must fit inside the interval and one dial.
+const (
+	monitorMinInterval = 5 * time.Second
+	monitorMaxInterval = 24 * time.Hour
+	monitorMaxTimeout  = time.Minute
+)
+
+// validateMonitor normalizes and bounds-checks a submitted monitor so bad
+// input fails at the API boundary instead of stretching the scheduler or the
+// dialer (A14). Zero values receive the documented defaults rather than an
+// error, which keeps hand-written configs and older stored monitors loadable.
+func validateMonitor(m *store.Monitor) error {
+	m.Name = strings.TrimSpace(m.Name)
+	m.Target = strings.TrimSpace(m.Target)
+	if m.Target == "" {
+		return fmt.Errorf("monitor target is required")
+	}
+	if len(m.Target) > 2048 {
+		return fmt.Errorf("monitor target is too long")
+	}
+	switch m.Type {
+	case "http", "tcp", "ping":
+	default:
+		return fmt.Errorf("monitor type must be http, tcp, or ping")
+	}
+	// A monitor should only ever issue a safe HTTP method — never a
+	// destructive verb against the monitored endpoint. Normalize to upper so
+	// the stored form matches what the check runner compares.
+	m.Method = strings.ToUpper(strings.TrimSpace(m.Method))
+	switch m.Method {
+	case "":
+		m.Method = ""
+	case "GET", "HEAD", "POST":
+	default:
+		return fmt.Errorf("monitor method must be GET, HEAD, or POST")
+	}
+	if m.Interval <= 0 {
+		m.Interval = 60 * time.Second
+	}
+	if m.Interval < monitorMinInterval || m.Interval > monitorMaxInterval {
+		return fmt.Errorf("interval must be between %s and %s", monitorMinInterval, monitorMaxInterval)
+	}
+	if m.Timeout <= 0 {
+		m.Timeout = 10 * time.Second
+	}
+	if m.Timeout < time.Second || m.Timeout > monitorMaxTimeout {
+		return fmt.Errorf("timeout must be between 1s and %s", monitorMaxTimeout)
+	}
+	if m.Timeout > m.Interval {
+		return fmt.Errorf("timeout must not exceed the interval")
+	}
+	if m.ExpectedStatus != 0 && (m.ExpectedStatus < 100 || m.ExpectedStatus > 599) {
+		return fmt.Errorf("expected status must be 0 (any 2xx/3xx) or 100-599")
+	}
+	// "ping" is a TCP-connect probe in this codebase, not ICMP — a bare
+	// hostname would dial port 0 and always fail, so require host:port up
+	// front for both TCP-like types.
+	if m.Type == "tcp" || m.Type == "ping" {
+		if _, _, err := net.SplitHostPort(m.Target); err != nil {
+			return fmt.Errorf("%s monitor target must be host:port (TCP reachability probe, not ICMP)", m.Type)
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeJSON(w, []interface{}{})
@@ -2533,28 +2599,31 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 		// Validate at the boundary. The ID becomes a filename in the file
 		// store, so a bad ID is a path-traversal / arbitrary-write vector —
 		// reject anything outside [A-Za-z0-9_-]. POST is also the edit path, so
-		// the ID must always be present. (Also validates type/target.)
-		if !store.ValidID(m.ID) {
+		// the ID must always be present. (Also validates type/target/bounds.)
+		if !store.ValidID(m.ID) || len(m.ID) > 64 {
 			http.Error(w, "invalid monitor id (use letters, digits, '_' or '-')", 400)
 			return
 		}
-		if strings.TrimSpace(m.Target) == "" {
-			http.Error(w, "monitor target is required", 400)
+		if err := validateMonitor(&m); err != nil {
+			http.Error(w, err.Error(), 400)
 			return
 		}
-		switch m.Type {
-		case "http", "tcp", "ping":
-		default:
-			http.Error(w, "monitor type must be http, tcp, or ping", 400)
-			return
-		}
-		// A monitor should only ever issue a safe HTTP method — never a
-		// destructive verb against the monitored endpoint.
-		switch strings.ToUpper(m.Method) {
-		case "", "GET", "HEAD", "POST":
-		default:
-			http.Error(w, "monitor method must be GET, HEAD, or POST", 400)
-			return
+		// A13: allowing a monitor to reach loopback/private/metadata networks
+		// is an explicit admin choice (the operator grants the dash host's
+		// network position to a probe). An editor may edit other fields of an
+		// internal monitor but cannot change the flag in either direction —
+		// enabling it requires admin, and this route is how both the create
+		// and edit paths arrive.
+		if m.AllowInternal {
+			if session, ok := currentUser(r); !ok || session.role != RoleAdmin {
+				http.Error(w, "internal-network monitoring requires an admin", http.StatusForbidden)
+				return
+			}
+		} else if prev, err := s.store.GetMonitor(m.ID); err == nil && prev != nil && prev.AllowInternal {
+			if session, ok := currentUser(r); !ok || session.role != RoleAdmin {
+				http.Error(w, "disabling internal-network monitoring requires an admin", http.StatusForbidden)
+				return
+			}
 		}
 		if err := s.store.SaveMonitor(m); err != nil {
 			http.Error(w, err.Error(), 500)

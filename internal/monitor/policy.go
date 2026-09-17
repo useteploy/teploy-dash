@@ -29,12 +29,29 @@ var cloudMetadataIPs = map[string]bool{
 	"100.100.100.200": true, // Alibaba Cloud
 }
 
+// sharedAddressSpace is the IPv4 carrier-grade NAT range (100.64.0.0/10),
+// used by several private overlays (Tailscale among them). It is not covered
+// by IsPrivate, so it is listed explicitly (A13).
+var sharedAddressSpace = mustParseCIDR("100.64.0.0/10")
+
+func mustParseCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic("monitor policy: invalid built-in CIDR " + s)
+	}
+	return n
+}
+
 // isBlockedAddr reports whether ip is loopback, unspecified, private,
-// link-local, or a known cloud metadata address — the set rejected by
-// default unless a monitor explicitly opts in via AllowInternal.
+// shared-address-space, multicast, link-local, or a known cloud metadata
+// address — the set rejected by default unless a monitor explicitly opts in
+// via AllowInternal.
 func isBlockedAddr(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	if sharedAddressSpace.Contains(ip) {
 		return true
 	}
 	if cloudMetadataIPs[ip.String()] {
@@ -114,24 +131,30 @@ func policyDialContext(allowInternal bool) func(ctx context.Context, network, ad
 // policy for this specific monitor (AllowInternal is a per-monitor choice, so
 // the client can't be a single shared instance).
 // policyTransports are shared, one per network-policy mode (the finite set:
-// internal-allowed or not). A fresh Transport per check left every check's
-// keep-alive sockets and read loops unclosed behind it; a shared transport
-// with an idle timeout lets connections recycle instead of accumulating
-// until the peer hangs up. Cross-policy reuse never happens — each mode
-// gets its own transport, so a connection dialed under one policy is never
-// reused by the other.
-var policyTransports = map[bool]*http.Transport{}
+// internal-allowed or not), built EAGERLY at package init and never mutated.
+// The previous lazy map write was unsynchronized: concurrent first checks —
+// or first use of the other policy mode — raced on an ordinary map, a
+// process-availability bug under the Go race detector (A11). A fresh
+// Transport per check also left keep-alive sockets unclosed behind it; the
+// shared transports with an idle timeout let connections recycle. Cross-policy
+// reuse never happens — each mode gets its own transport, so a connection
+// dialed under one policy is never reused by the other.
+var policyTransports = map[bool]*http.Transport{
+	false: newPolicyTransport(false),
+	true:  newPolicyTransport(true),
+}
+
+func newPolicyTransport(allowInternal bool) *http.Transport {
+	return &http.Transport{
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		DialContext:           policyDialContext(allowInternal),
+	}
+}
 
 func transportFor(allowInternal bool) *http.Transport {
-	if t, ok := policyTransports[allowInternal]; ok {
-		return t
-	}
-	t := &http.Transport{
-		IdleConnTimeout: 30 * time.Second,
-		DialContext:     policyDialContext(allowInternal),
-	}
-	policyTransports[allowInternal] = t
-	return t
+	return policyTransports[allowInternal]
 }
 
 func httpClientFor(base *http.Client, allowInternal bool) *http.Client {
