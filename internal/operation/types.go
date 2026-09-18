@@ -50,6 +50,12 @@ const (
 	EventStatus EventType = "status"
 	EventStdout EventType = "stdout"
 	EventStderr EventType = "stderr"
+	// EventGap marks history that is known to be missing — a torn journal
+	// tail after an unclean shutdown, a sequence hole, or events dropped by
+	// retention compaction. It is a replay marker: clients render it (or
+	// ignore it) like any other event, and its sequence occupies the first
+	// missing position so subsequent sequences stay strictly increasing.
+	EventGap EventType = "gap"
 )
 
 type Event struct {
@@ -100,7 +106,12 @@ type Operation struct {
 	// silently redirecting queued work at the new target (A14). Nil on
 	// records written before the field existed — those skip the check.
 	AdmittedServer *Server `json:"admitted_server,omitempty"`
-	requestHash    string
+	// AdmissionSeq is the store-wide monotonic sequence assigned when the
+	// operation was admitted. Per-target execution follows it in FIFO
+	// order (A12/A27 core); persisting it makes the admission order durable
+	// and gives listings a total order alongside CreatedAt.
+	AdmissionSeq uint64 `json:"admission_seq,omitempty"`
+	requestHash  string
 }
 
 type Metadata struct {

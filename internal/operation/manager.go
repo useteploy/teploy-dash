@@ -35,10 +35,38 @@ func boundedEventData(data string) string {
 }
 
 type Options struct {
-	MaxEvents       int
+	MaxEvents int
+	// MaxJournalBytes caps one operation's on-disk event journal before it
+	// is compacted to the retained suffix (0 = package default).
+	MaxJournalBytes int64
+	// MaxHistoryAge is the retention age for terminal operations: records
+	// and journals older than this are deleted (0 = package default; a
+	// negative value disables age retention).
+	MaxHistoryAge time.Duration
+	// MaxOperations bounds the total retained operation count by deleting
+	// the oldest terminal operations first (0 = package default; negative
+	// disables the count bound). Non-terminal operations are never deleted.
+	MaxOperations   int
 	Resolver        Resolver
 	ProjectResolver ProjectResolver
 	Executor        Executor
+}
+
+// job is one admitted operation waiting for or receiving execution on its
+// target's FIFO runner.
+type job struct {
+	id      string
+	command Command
+	ctx     context.Context
+}
+
+// targetRunner serializes one target's jobs in admission order (A12/A27
+// core): the queue is appended under the manager mutex when the operation is
+// admitted, and a single worker goroutine pops it front-first, so same-target
+// operations execute FIFO instead of racing for a semaphore.
+type targetRunner struct {
+	queue []job
+	busy  bool
 }
 
 type Manager struct {
@@ -48,24 +76,46 @@ type Manager struct {
 	events          map[string][]Event
 	idempotency     map[string]string
 	cancels         map[string]context.CancelFunc
-	targets         map[string]chan struct{}
+	targets         map[string]*targetRunner
 	subscribers     map[string]map[chan struct{}]struct{}
 	resolver        Resolver
 	projectResolver ProjectResolver
 	executor        Executor
 	maxEvents       int
+	maxHistoryAge   time.Duration
+	maxOperations   int
+	admissionSeq    uint64
+	retireMu        sync.Mutex
+	lastSweep       time.Time
 }
 
 func New(dataDir string, options Options) (*Manager, error) {
 	if options.MaxEvents <= 0 {
 		options.MaxEvents = defaultMaxEvents
 	}
+	if options.MaxJournalBytes <= 0 {
+		options.MaxJournalBytes = defaultMaxJournalBytes
+	}
+	if options.MaxHistoryAge == 0 {
+		options.MaxHistoryAge = defaultMaxHistoryAge
+	}
+	if options.MaxOperations == 0 {
+		options.MaxOperations = defaultMaxOperations
+	}
 	if options.Executor == nil {
 		return nil, fmt.Errorf("operation executor is required")
 	}
-	store, err := openFileStore(dataDir, options.MaxEvents)
+	store, err := openFileStore(dataDir, journalConfig{
+		MaxEvents:       options.MaxEvents,
+		MaxJournalBytes: options.MaxJournalBytes,
+	})
 	if err != nil {
 		return nil, err
+	}
+	// Retention runs before the load so expired history is never parsed
+	// into memory (useteploy__teploy-dash-04: bounded startup).
+	if removed := store.sweepRetention(time.Now().UTC(), options.MaxHistoryAge, options.MaxOperations); len(removed) > 0 {
+		log.Printf("[operation] retention removed %d terminal operation(s)", len(removed))
 	}
 	operations, err := store.loadOperations()
 	if err != nil {
@@ -77,12 +127,14 @@ func New(dataDir string, options Options) (*Manager, error) {
 		events:          make(map[string][]Event),
 		idempotency:     make(map[string]string),
 		cancels:         make(map[string]context.CancelFunc),
-		targets:         make(map[string]chan struct{}),
+		targets:         make(map[string]*targetRunner),
 		subscribers:     make(map[string]map[chan struct{}]struct{}),
 		resolver:        options.Resolver,
 		projectResolver: options.ProjectResolver,
 		executor:        options.Executor,
 		maxEvents:       options.MaxEvents,
+		maxHistoryAge:   options.MaxHistoryAge,
+		maxOperations:   options.MaxOperations,
 	}
 	for id, op := range operations {
 		if op.Metadata.Mode == "" {
@@ -90,6 +142,9 @@ func New(dataDir string, options Options) (*Manager, error) {
 			if op.Metadata.Mode == "" && op.Request.Kind == KindDeploy {
 				op.Metadata.Mode = "ad-hoc"
 			}
+		}
+		if op.AdmissionSeq > m.admissionSeq {
+			m.admissionSeq = op.AdmissionSeq
 		}
 		events, err := store.loadEvents(id)
 		if err != nil {
@@ -100,6 +155,11 @@ func New(dataDir string, options Options) (*Manager, error) {
 			log.Printf("[operation] dropping unreadable event history for %s: %v", id, err)
 			events = nil
 		}
+		// Bounded in-memory window: only the retained tail is kept; older
+		// history is served from the journal on demand (useteploy__teploy-dash-04).
+		if len(events) > m.maxEvents {
+			events = events[len(events)-m.maxEvents:]
+		}
 		m.events[id] = events
 		if op.IdempotencyKey != "" {
 			m.idempotency[op.IdempotencyKey] = id
@@ -108,6 +168,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 	if err := m.recover(); err != nil {
 		return nil, err
 	}
+	m.lastSweep = time.Now()
 	return m, nil
 }
 
@@ -151,6 +212,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	}
 	now := time.Now().UTC()
 	snapshot := admitted
+	m.admissionSeq++
 	op := &Operation{
 		ID:             id,
 		Request:        redactedRequest(req),
@@ -163,19 +225,20 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		CreatedAt:      now,
 		HasSecrets:     len(command.Secrets) > 0,
 		AdmittedServer: &snapshot,
+		AdmissionSeq:   m.admissionSeq,
 		requestHash:    hash,
 	}
 
 	// Durable admission (A25): the queued RECORD is the commit point. The
-	// initial event file is written first; if the record write then fails,
-	// the orphan event file is inert — recovery enumerates records, never
+	// initial event journal entry is written first; if the record write then
+	// fails, the orphan journal is inert — recovery enumerates records, never
 	// event files. The reverse order left a queued record on disk after a
 	// rejected enqueue (event write failed, record already saved), which
 	// recovery would EXECUTE even though the caller saw an error. Nothing is
-	// published in memory (operations, idempotency, worker) until the record
+	// published in memory (operations, idempotency, runner) until the record
 	// commit has happened.
 	initial := Event{Sequence: 1, OperationID: id, Type: EventStatus, Data: string(StatusQueued), CreatedAt: now}
-	if err := m.store.saveEvents(id, []Event{initial}); err != nil {
+	if err := m.store.appendEvent(id, initial); err != nil {
 		m.mu.Unlock()
 		return nil, false, fmt.Errorf("persist initial event: %w", err)
 	}
@@ -190,37 +253,58 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancels[id] = cancel
+	m.admitToTarget(target, job{id: id, command: command, ctx: ctx})
 	result := cloneOperation(op)
 	m.mu.Unlock()
 
-	go m.execute(ctx, id, command)
 	return result, false, nil
 }
 
-func (m *Manager) execute(ctx context.Context, id string, command Command) {
-	m.mu.Lock()
-	op := m.operations[id]
-	if op == nil {
+// admitToTarget appends the job to its target's FIFO queue and starts the
+// target worker if idle. Caller must hold m.mu; execution happens on the
+// worker goroutine.
+func (m *Manager) admitToTarget(target string, j job) {
+	runner := m.targets[target]
+	if runner == nil {
+		runner = &targetRunner{}
+		m.targets[target] = runner
+	}
+	runner.queue = append(runner.queue, j)
+	if !runner.busy {
+		runner.busy = true
+		go m.runTarget(target)
+	}
+}
+
+// runTarget executes its target's jobs in admission order, one at a time,
+// until the queue drains.
+func (m *Manager) runTarget(target string) {
+	for {
+		m.mu.Lock()
+		runner := m.targets[target]
+		if runner == nil || len(runner.queue) == 0 {
+			delete(m.targets, target)
+			m.mu.Unlock()
+			return
+		}
+		j := runner.queue[0]
+		runner.queue = runner.queue[1:]
 		m.mu.Unlock()
+		m.execute(j)
+	}
+}
+
+func (m *Manager) execute(j job) {
+	// A cancellation that landed while the job was queued behind another
+	// operation resolves here, before any execution side effect.
+	if j.ctx.Err() != nil {
+		m.finish(j.id, StatusCanceled, -1, "operation canceled")
 		return
 	}
-	targetLock := m.targets[op.Target]
-	if targetLock == nil {
-		targetLock = make(chan struct{}, 1)
-		m.targets[op.Target] = targetLock
-	}
+	m.mu.Lock()
+	op := m.operations[j.id]
 	m.mu.Unlock()
-
-	select {
-	case targetLock <- struct{}{}:
-		defer func() { <-targetLock }()
-	case <-ctx.Done():
-		m.finish(id, StatusCanceled, -1, "operation canceled")
-		return
-	}
-
-	if ctx.Err() != nil {
-		m.finish(id, StatusCanceled, -1, "operation canceled")
+	if op == nil {
 		return
 	}
 	// Target identity check (A14): the server alias must still resolve to
@@ -229,37 +313,37 @@ func (m *Manager) execute(ctx context.Context, id string, command Command) {
 	// not redirect queued work at whatever the name points to now. Records
 	// from before the field existed (or with no resolver) skip the check.
 	if mismatch := m.checkTarget(op); mismatch != "" {
-		m.finish(id, StatusFailed, -1, mismatch)
+		m.finish(j.id, StatusFailed, -1, mismatch)
 		return
 	}
-	if err := m.setRunning(id); err != nil {
+	if err := m.setRunning(j.id); err != nil {
 		if errors.Is(err, errCancelRequested) {
-			m.finish(id, StatusCanceled, -1, "operation canceled")
+			m.finish(j.id, StatusCanceled, -1, "operation canceled")
 		} else {
-			m.finish(id, StatusFailed, -1, err.Error())
+			m.finish(j.id, StatusFailed, -1, err.Error())
 		}
 		return
 	}
-	exitCode, err := m.executor(ctx, command, func(stream Stream, data string) {
+	exitCode, err := m.executor(j.ctx, j.command, func(stream Stream, data string) {
 		eventType := EventStdout
 		if stream == StreamStderr {
 			eventType = EventStderr
 		}
-		m.emit(id, eventType, Redact(data, command.Secrets))
+		m.emit(j.id, eventType, Redact(data, j.command.Secrets))
 	})
-	if ctx.Err() != nil {
-		m.finish(id, StatusCanceled, exitCode, "operation canceled")
+	if j.ctx.Err() != nil {
+		m.finish(j.id, StatusCanceled, exitCode, "operation canceled")
 		return
 	}
 	if err != nil || exitCode != 0 {
 		message := "operation failed"
 		if err != nil {
-			message = Redact(err.Error(), command.Secrets)
+			message = Redact(err.Error(), j.command.Secrets)
 		}
-		m.finish(id, StatusFailed, exitCode, message)
+		m.finish(j.id, StatusFailed, exitCode, message)
 		return
 	}
-	m.finish(id, StatusSucceeded, exitCode, "")
+	m.finish(j.id, StatusSucceeded, exitCode, "")
 }
 
 // checkTarget compares the operation's admitted server snapshot with the
@@ -287,7 +371,7 @@ func userOf(srv Server) string {
 }
 
 // errCancelRequested reports setRunning refusing to start an operation whose
-// cancellation was durably requested while it waited for the target lock.
+// cancellation was durably requested while it waited for its target turn.
 var errCancelRequested = errors.New("operation cancel requested")
 
 func (m *Manager) setRunning(id string) error {
@@ -315,9 +399,9 @@ func (m *Manager) setRunning(id string) error {
 
 func (m *Manager) finish(id string, status Status, exitCode int, message string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	op := m.operations[id]
 	if op == nil || op.Status.Terminal() {
+		m.mu.Unlock()
 		return
 	}
 	now := time.Now().UTC()
@@ -339,6 +423,15 @@ func (m *Manager) finish(id string, status Status, exitCode int, message string)
 		log.Printf("[operation] terminal event persist failed for %s: %v", id, err)
 	}
 	m.closeSubscribersLocked(id)
+	over := m.maxOperations > 0 && len(m.operations) > m.maxOperations
+	m.mu.Unlock()
+	// The journal handle is no longer needed; release it so long histories
+	// do not pin file descriptors. Retention runs asynchronously so a sweep
+	// never delays the next queued operation on this target.
+	m.store.CloseJournal(id)
+	if over {
+		go m.retire()
+	}
 }
 
 func (m *Manager) emit(id string, eventType EventType, data string) {
@@ -349,6 +442,9 @@ func (m *Manager) emit(id string, eventType EventType, data string) {
 	}
 }
 
+// appendEventLocked appends one event to the operation's journal (a single
+// append(2), no per-event rewrite or fsync — useteploy__teploy-dash-04), keeps
+// the bounded in-memory window, and wakes subscribers. Caller must hold m.mu.
 func (m *Manager) appendEventLocked(id string, eventType EventType, data string) error {
 	data = boundedEventData(data)
 	events := m.events[id]
@@ -356,12 +452,13 @@ func (m *Manager) appendEventLocked(id string, eventType EventType, data string)
 	if len(events) > 0 {
 		sequence = events[len(events)-1].Sequence + 1
 	}
-	events = append(events, Event{Sequence: sequence, OperationID: id, Type: eventType, Data: data, CreatedAt: time.Now().UTC()})
+	event := Event{Sequence: sequence, OperationID: id, Type: eventType, Data: data, CreatedAt: time.Now().UTC()}
+	if err := m.store.appendEvent(id, event); err != nil {
+		return err
+	}
+	events = append(events, event)
 	if len(events) > m.maxEvents {
 		events = events[len(events)-m.maxEvents:]
-	}
-	if err := m.store.saveEvents(id, events); err != nil {
-		return err
 	}
 	m.events[id] = events
 	for subscriber := range m.subscribers[id] {
@@ -396,11 +493,47 @@ func (m *Manager) List(status Status, target string, limit int) []*Operation {
 		}
 		operations = append(operations, cloneOperation(op))
 	}
-	sort.Slice(operations, func(i, j int) bool { return operations[i].CreatedAt.After(operations[j].CreatedAt) })
+	sort.Slice(operations, func(i, j int) bool {
+		if operations[i].CreatedAt.Equal(operations[j].CreatedAt) {
+			return operations[i].AdmissionSeq > operations[j].AdmissionSeq
+		}
+		return operations[i].CreatedAt.After(operations[j].CreatedAt)
+	})
 	if limit > 0 && len(operations) > limit {
 		operations = operations[:limit]
 	}
 	return operations
+}
+
+// replayFor returns the events after `sequence` for a client. The in-memory
+// window serves recent sequences; older ones fall back to the on-disk journal
+// so a reconnecting viewer still gets complete history while memory stays
+// bounded. When history older than the oldest retained event is requested, a
+// gap event marks the truncation instead of silently returning a shorter
+// stream. Caller must hold m.mu.
+func (m *Manager) replayLocked(id string, sequence uint64) []Event {
+	window := m.events[id]
+	first := firstSequence(window)
+	if len(window) == 0 || sequence >= first-1 {
+		return copyEvents(eventsAfter(window, sequence))
+	}
+	// Older than the window: read the journal.
+	loaded, err := m.store.loadEvents(id)
+	if err != nil || len(loaded) == 0 {
+		// Journal unavailable: serve the window with a truncation marker.
+		out := []Event{{
+			Sequence: first - 1, OperationID: id, Type: EventGap,
+			Data: fmt.Sprintf("events 1-%d unavailable (journal unreadable)", first-1),
+		}}
+		return append(out, copyEvents(eventsAfter(window, sequence))...)
+	}
+	if loadedFirst := firstSequence(loaded); loadedFirst > sequence+1 {
+		loaded = append([]Event{{
+			Sequence: loadedFirst - 1, OperationID: id, Type: EventGap,
+			Data: fmt.Sprintf("events %d-%d removed by retention", sequence+1, loadedFirst-1),
+		}}, loaded...)
+	}
+	return copyEvents(eventsAfter(loaded, sequence))
 }
 
 func (m *Manager) EventsAfter(id string, sequence uint64) ([]Event, error) {
@@ -409,7 +542,7 @@ func (m *Manager) EventsAfter(id string, sequence uint64) ([]Event, error) {
 	if m.operations[id] == nil {
 		return nil, ErrNotFound
 	}
-	return eventsAfter(m.events[id], sequence), nil
+	return m.replayLocked(id, sequence), nil
 }
 
 func (m *Manager) Subscribe(id string, sequence uint64) ([]Event, <-chan struct{}, bool, error) {
@@ -419,7 +552,7 @@ func (m *Manager) Subscribe(id string, sequence uint64) ([]Event, <-chan struct{
 	if op == nil {
 		return nil, nil, false, ErrNotFound
 	}
-	replay := eventsAfter(m.events[id], sequence)
+	replay := m.replayLocked(id, sequence)
 	if op.Status.Terminal() {
 		closed := make(chan struct{})
 		close(closed)
@@ -522,6 +655,7 @@ func (m *Manager) recover() error {
 			if err := m.appendEventLocked(id, EventStatus, string(StatusInterrupted)); err != nil {
 				return err
 			}
+			m.store.CloseJournal(id)
 		case StatusCancelRequested:
 			now := time.Now().UTC()
 			op.Status = StatusCanceled
@@ -533,9 +667,47 @@ func (m *Manager) recover() error {
 			if err := m.appendEventLocked(id, EventStatus, string(StatusCanceled)); err != nil {
 				return err
 			}
+			m.store.CloseJournal(id)
 		}
 	}
 	return nil
+}
+
+// retire applies retention caps (age + count) to in-memory and on-disk state.
+// Non-terminal operations are never removed. Live sweeps only fire when the
+// count bound is crossed or an hour has passed since the last one — the sweep
+// reads every record file, so it must not run per completion. Age retention
+// always applies at startup.
+func (m *Manager) retire() {
+	if !m.retireMu.TryLock() {
+		return
+	}
+	defer m.retireMu.Unlock()
+	m.mu.Lock()
+	over := m.maxOperations > 0 && len(m.operations) > m.maxOperations
+	m.mu.Unlock()
+	if !over && !time.Now().After(m.lastSweep.Add(time.Hour)) {
+		return
+	}
+	m.lastSweep = time.Now()
+	removed := m.store.sweepRetention(time.Now().UTC(), m.maxHistoryAge, m.maxOperations)
+	if len(removed) == 0 {
+		return
+	}
+	m.mu.Lock()
+	for _, id := range removed {
+		op := m.operations[id]
+		if op == nil || !op.Status.Terminal() {
+			continue
+		}
+		delete(m.operations, id)
+		delete(m.events, id)
+		if op.IdempotencyKey != "" {
+			delete(m.idempotency, op.IdempotencyKey)
+		}
+	}
+	m.mu.Unlock()
+	log.Printf("[operation] retention removed %d terminal operation(s)", len(removed))
 }
 
 func (m *Manager) closeSubscribersLocked(id string) {
@@ -553,6 +725,19 @@ func eventsAfter(events []Event, sequence uint64) []Event {
 		}
 	}
 	return result
+}
+
+func firstSequence(events []Event) uint64 {
+	if len(events) == 0 {
+		return 1
+	}
+	return events[0].Sequence
+}
+
+func copyEvents(events []Event) []Event {
+	out := make([]Event, len(events))
+	copy(out, events)
+	return out
 }
 
 func requestHash(req Request) (string, error) {

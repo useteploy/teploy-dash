@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -43,6 +44,21 @@ func main() {
 	}
 }
 
+// envInt64 reads a non-negative integer env var; unparsable or negative
+// values log a warning and fall back to def.
+func envInt64(name string, def int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || v < 0 {
+		log.Printf("Warning: ignoring invalid %s=%q", name, raw)
+		return def
+	}
+	return v
+}
+
 func run() error {
 	port := flag.Int("port", 3456, "HTTP server port")
 	host := flag.String("host", "0.0.0.0", "HTTP server host")
@@ -57,6 +73,12 @@ func run() error {
 	if v := os.Getenv("TEPLOY_DASH_PUBLIC_STATUS"); v == "1" || v == "true" {
 		*publicStatus = true
 	}
+
+	// Operation history retention (useteploy__teploy-dash-04). Defaults live
+	// in the operation package; these envs override for chatty installs.
+	opJournalBytes := envInt64("TEPLOY_DASH_OPERATION_JOURNAL_BYTES", 0)
+	opHistoryDays := envInt64("TEPLOY_DASH_OPERATION_HISTORY_DAYS", 0)
+	opMaxOperations := int(envInt64("TEPLOY_DASH_MAX_OPERATIONS", 0))
 
 	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
 	// nor a saved auth.json exist, the server starts in setup mode so the user
@@ -148,20 +170,23 @@ func run() error {
 
 	// Initialize HTTP server
 	srv := server.New(server.Config{
-		Host:           *host,
-		Port:           *port,
-		DeploymentsDir: *deploymentsDir,
-		DataDir:        *dataDir,
-		Monitor:        mon,
-		Restore:        rst,
-		Store:          st,
-		AuthUser:       authUser,
-		AuthPass:       authPass,
-		NoAuth:         *noAuth,
-		PublicStatus:   *publicStatus,
-		Frontend:       uiFS,
-		Version:        version,
-		Backend:        backend,
+		Host:                     *host,
+		Port:                     *port,
+		DeploymentsDir:           *deploymentsDir,
+		DataDir:                  *dataDir,
+		Monitor:                  mon,
+		Restore:                  rst,
+		Store:                    st,
+		AuthUser:                 authUser,
+		AuthPass:                 authPass,
+		NoAuth:                   *noAuth,
+		PublicStatus:             *publicStatus,
+		Frontend:                 uiFS,
+		Version:                  version,
+		Backend:                  backend,
+		OperationMaxJournalBytes: opJournalBytes,
+		OperationMaxHistoryAge:   time.Duration(opHistoryDays) * 24 * time.Hour,
+		OperationMaxOperations:   opMaxOperations,
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.

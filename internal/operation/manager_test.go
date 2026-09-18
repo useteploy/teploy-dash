@@ -73,24 +73,31 @@ func TestPersistenceAndMonotonicBoundedEvents(t *testing.T) {
 	if stored.Status != StatusSucceeded || stored.IdempotencyKey != "persist-key" {
 		t.Fatalf("unexpected persisted operation: %+v", stored)
 	}
+	// The retained WINDOW is bounded (5); the journal on disk may hold more
+	// until compaction — EventsAfter serves the window plus journal
+	// fallback, contiguous and monotonic either way.
 	events, err := reopened.EventsAfter(op.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 5 {
-		t.Fatalf("retained %d events, want 5", len(events))
+	if len(events) != 13 {
+		t.Fatalf("replayed %d events, want the full 13-event journal", len(events))
 	}
 	for i := 1; i < len(events); i++ {
 		if events[i].Sequence != events[i-1].Sequence+1 {
 			t.Fatalf("non-monotonic sequences: %+v", events)
 		}
 	}
-	lines, err := os.ReadFile(filepath.Join(dir, "operations", "events", op.ID+".jsonl"))
-	if err != nil {
-		t.Fatal(err)
+	window := func() []Event {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return append([]Event(nil), manager.events[op.ID]...)
+	}()
+	if len(window) != 5 {
+		t.Fatalf("in-memory window holds %d events, want 5", len(window))
 	}
-	if got := strings.Count(strings.TrimSpace(string(lines)), "\n") + 1; got != 5 {
-		t.Fatalf("event file contains %d lines, want 5", got)
+	if window[0].Sequence != events[len(events)-5].Sequence {
+		t.Fatalf("window does not match the journal tail: window[0]=%d journal tail starts at %d", window[0].Sequence, events[len(events)-5].Sequence)
 	}
 }
 
@@ -235,7 +242,7 @@ func TestSetRunningPersistFailureFailsBeforeExecution(t *testing.T) {
 
 func TestStartupRecoveryMarksOrphansInterrupted(t *testing.T) {
 	dir := t.TempDir()
-	store, err := openFileStore(dir, 100)
+	store, err := openFileStore(dir, journalConfig{MaxEvents: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +278,7 @@ func TestStartupRecoveryMarksOrphansInterrupted(t *testing.T) {
 // believes was admitted. Recovery marks it interrupted for an explicit retry.
 func TestStartupRecoveryNeverReplaysQueuedOperations(t *testing.T) {
 	dir := t.TempDir()
-	store, err := openFileStore(dir, 100)
+	store, err := openFileStore(dir, journalConfig{MaxEvents: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +313,7 @@ func TestStartupRecoveryNeverReplaysQueuedOperations(t *testing.T) {
 // resolves as canceled on restart, never as executable queued work.
 func TestStartupRecoveryResolvesCancelRequested(t *testing.T) {
 	dir := t.TempDir()
-	store, err := openFileStore(dir, 100)
+	store, err := openFileStore(dir, journalConfig{MaxEvents: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +551,7 @@ func TestCancelPersistsIntent(t *testing.T) {
 		t.Fatalf("cancel acknowledged with status %q, want cancel_requested", canceled.Status)
 	}
 	// The persisted record carries the intent.
-	store, err := openFileStore(dir, 100)
+	store, err := openFileStore(dir, journalConfig{MaxEvents: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
