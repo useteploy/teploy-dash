@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -98,6 +99,7 @@ func roleAllows(have, need string) bool {
 // payloads carry secrets (registry passwords, SMTP/webhook targets, tokens).
 var adminOnlyPrefixes = []string{
 	"/api/users",
+	"/api/sso",
 	"/api/mcp-tokens",
 	"/api/config/servers",
 	"/api/registries",
@@ -157,13 +159,34 @@ type dashUser struct {
 	AuthEpoch    uint64 `json:"auth_epoch,omitempty"`
 }
 
+// dashPrincipal is one external (SSO) identity, persisted in users.json
+// alongside local accounts (A02/A08 identity work, following teploy-observe's
+// unified principal store). Subject is the issuer-namespaced identity
+// (oidc:<sha256(issuer)[:16]>:<sub>) — display-name claims are recorded for
+// attribution but never key the identity. AuthEpoch is drawn from the same
+// store-wide monotonic counter as local accounts: sessions embed it at
+// issuance and every request revalidates it unconditionally, so a revoked or
+// deleted principal's sessions die on their next use. A missing row (e.g. a
+// session from an install upgraded from pre-principal dash) is equally dead.
+type dashPrincipal struct {
+	Subject    string `json:"subject"`
+	Username   string `json:"username"`
+	Email      string `json:"email,omitempty"`
+	Role       string `json:"role"`
+	AuthEpoch  uint64 `json:"auth_epoch"`
+	LastSignIn string `json:"last_sign_in,omitempty"`
+}
+
 // usersFileFormat is the on-disk shape of users.json. EpochCounter is the
 // store-wide monotonic source of AuthEpoch values; advancing it on deletion
 // (with no account to carry the number) guarantees a recreated username gets
 // an epoch strictly higher than any session the previous account issued.
+// OIDCPrincipals is additive: installs migrating from the pre-principal
+// format simply lack the field and load with an empty principal set.
 type usersFileFormat struct {
-	Users        []dashUser `json:"users"`
-	EpochCounter uint64     `json:"epoch_counter,omitempty"`
+	Users          []dashUser      `json:"users"`
+	EpochCounter   uint64          `json:"epoch_counter,omitempty"`
+	OIDCPrincipals []dashPrincipal `json:"oidc_principals,omitempty"`
 }
 
 // legacyCredFile is the pre-RBAC single-user auth.json shape, read once to
@@ -205,6 +228,18 @@ func (g *authGate) loadUsers() error {
 			}
 			u.Role = normalizeRole(u.Role)
 			g.users[u.Username] = &u
+		}
+		g.oidcPrincipals = make(map[string]*dashPrincipal, len(f.OIDCPrincipals))
+		for i := range f.OIDCPrincipals {
+			p := f.OIDCPrincipals[i]
+			if p.Subject == "" {
+				return fmt.Errorf("parsing %s: oidc principal %d has an empty subject", g.usersFile, i)
+			}
+			if _, dup := g.oidcPrincipals[p.Subject]; dup {
+				return fmt.Errorf("parsing %s: duplicate oidc principal %q", g.usersFile, p.Subject)
+			}
+			p.Role = normalizeRole(p.Role)
+			g.oidcPrincipals[p.Subject] = &p
 		}
 		g.epochCounter = f.EpochCounter
 		g.setupRequired = len(g.users) == 0
@@ -251,29 +286,33 @@ func (g *authGate) loadUsers() error {
 	return nil
 }
 
-// saveUsersLocked writes users.json atomically from the live map. The caller
-// must hold g.credMu (read or write). Only safe to call when the live map is
+// saveUsersLocked writes users.json atomically from the live maps. The caller
+// must hold g.credMu (read or write). Only safe to call when the live maps are
 // already the state that should be durable — see saveUsersFile for the
 // copy-on-write path every mutating handler below actually uses.
 func (g *authGate) saveUsersLocked() error {
-	return saveUsersFile(g.usersFile, g.users, g.epochCounter)
+	return saveUsersFile(g.usersFile, g.users, g.oidcPrincipals, g.epochCounter)
 }
 
-// saveUsersFile writes the given user map and epoch counter to path
-// atomically. Free-standing (doesn't touch authGate state) so a mutation can
-// persist a CANDIDATE map and only publish it into the live g.users after
+// saveUsersFile writes the given user and principal maps and epoch counter to
+// path atomically. Free-standing (doesn't touch authGate state) so a mutation
+// can persist a CANDIDATE map and only publish it into the live gate after
 // the write succeeds — otherwise a failed rename/write left the in-memory
 // mutation applied while the handler reported an error, so the running
 // process and users.json silently diverged (DASH-005). For createUser
 // specifically this also keeps g.setupRequired from flipping to false before
 // the first account is durably saved (DASH-006).
-func saveUsersFile(path string, users map[string]*dashUser, epochCounter uint64) error {
+func saveUsersFile(path string, users map[string]*dashUser, principals map[string]*dashPrincipal, epochCounter uint64) error {
 	var f usersFileFormat
 	f.EpochCounter = epochCounter
 	for _, u := range users {
 		f.Users = append(f.Users, *u)
 	}
 	sort.Slice(f.Users, func(i, j int) bool { return f.Users[i].Username < f.Users[j].Username })
+	for _, p := range principals {
+		f.OIDCPrincipals = append(f.OIDCPrincipals, *p)
+	}
+	sort.Slice(f.OIDCPrincipals, func(i, j int) bool { return f.OIDCPrincipals[i].Subject < f.OIDCPrincipals[j].Subject })
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
@@ -298,6 +337,121 @@ func cloneUsersLocked(users map[string]*dashUser) map[string]*dashUser {
 		cp := *v
 		out[k] = &cp
 	}
+	return out
+}
+
+// clonePrincipalsLocked is cloneUsersLocked for the OIDC principal map.
+func clonePrincipalsLocked(principals map[string]*dashPrincipal) map[string]*dashPrincipal {
+	out := make(map[string]*dashPrincipal, len(principals))
+	for k, v := range principals {
+		cp := *v
+		out[k] = &cp
+	}
+	return out
+}
+
+// upsertOIDCPrincipal records an SSO sign-in against the principal store.
+// First sign-in creates the row with the next store epoch; later ones refresh
+// the display fields and role from the IdP (the IdP stays authoritative for
+// role) while PRESERVING the epoch, so one device signing in does not retire
+// another device's still-valid session. The epoch is captured and the
+// candidate persisted within the same critical section — the session minted
+// with the returned epoch can never predate the row it validates against
+// (A02 for external identities).
+func (g *authGate) upsertOIDCPrincipal(subject, username, email, role string) (epoch uint64, liveRole string, err error) {
+	if subject == "" || username == "" {
+		return 0, "", fmt.Errorf("principal subject and username are required")
+	}
+	g.credMu.Lock()
+	defer g.credMu.Unlock()
+	liveRole = normalizeRole(role)
+	candidate := clonePrincipalsLocked(g.oidcPrincipals)
+	if existing := candidate[subject]; existing != nil {
+		existing.Username = username
+		existing.Email = email
+		existing.Role = liveRole
+		existing.LastSignIn = time.Now().UTC().Format(time.RFC3339)
+		if err := saveUsersFile(g.usersFile, g.users, candidate, g.epochCounter); err != nil {
+			return 0, "", err
+		}
+		g.oidcPrincipals = candidate
+		return existing.AuthEpoch, liveRole, nil
+	}
+	epoch = g.epochCounter + 1
+	candidate[subject] = &dashPrincipal{
+		Subject:    subject,
+		Username:   username,
+		Email:      email,
+		Role:       liveRole,
+		AuthEpoch:  epoch,
+		LastSignIn: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := saveUsersFile(g.usersFile, g.users, candidate, epoch); err != nil {
+		return 0, "", err
+	}
+	g.oidcPrincipals = candidate
+	g.epochCounter = epoch
+	return epoch, liveRole, nil
+}
+
+// revokePrincipalSessions bumps an external principal's epoch, retiring every
+// live session for that identity on its next request. Re-signing in mints a
+// fresh session against the new epoch; it cannot resurrect the old ones.
+func (g *authGate) revokePrincipalSessions(subject string) error {
+	g.credMu.Lock()
+	defer g.credMu.Unlock()
+	existing := g.oidcPrincipals[subject]
+	if existing == nil {
+		return fmt.Errorf("principal not found")
+	}
+	candidate := clonePrincipalsLocked(g.oidcPrincipals)
+	epoch := g.epochCounter + 1
+	candidate[subject].AuthEpoch = epoch
+	if err := saveUsersFile(g.usersFile, g.users, candidate, epoch); err != nil {
+		return err
+	}
+	g.oidcPrincipals = candidate
+	g.epochCounter = epoch
+	return nil
+}
+
+// revokeSessions durably revokes every session of a LOCAL account by bumping
+// its epoch (the in-memory session wipe callers also perform is just
+// cleanup). Refuses unknown users.
+func (g *authGate) revokeSessions(username string) error {
+	g.credMu.Lock()
+	defer g.credMu.Unlock()
+	if g.users[username] == nil {
+		return fmt.Errorf("user not found")
+	}
+	candidate := cloneUsersLocked(g.users)
+	epoch := g.epochCounter + 1
+	candidate[username].AuthEpoch = epoch
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
+		return err
+	}
+	g.users = candidate
+	g.epochCounter = epoch
+	return nil
+}
+
+// principalView is the API projection of an SSO identity — never a secret
+// (principals hold no credentials).
+type principalView struct {
+	Subject  string `json:"subject"`
+	Username string `json:"username"`
+	Email    string `json:"email,omitempty"`
+	Role     string `json:"role"`
+}
+
+func (g *authGate) listSSOPrincipals() []principalView {
+	g.credMu.RLock()
+	defer g.credMu.RUnlock()
+	out := make([]principalView, 0, len(g.oidcPrincipals))
+	for _, p := range g.oidcPrincipals {
+		out = append(out, principalView{Subject: p.Subject, Username: p.Username, Email: p.Email, Role: p.Role})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Subject < out[j].Subject })
 	return out
 }
 
@@ -364,7 +518,7 @@ func (g *authGate) createUser(username, password, role string) error {
 	candidate := cloneUsersLocked(g.users)
 	epoch := g.epochCounter + 1
 	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: normalizeRole(role), AuthEpoch: epoch}
-	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
 		return err
 	}
 	g.epochCounter = epoch
@@ -415,7 +569,7 @@ func (g *authGate) setPasswordCAS(username string, expected uint64, password str
 	epoch := g.epochCounter + 1
 	candidate[username].PasswordHash = string(hash)
 	candidate[username].AuthEpoch = epoch
-	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
 		return err
 	}
 	g.epochCounter = epoch
@@ -454,7 +608,7 @@ func (g *authGate) setPasswordMigratingEnv(username, password string) error {
 		epoch := g.epochCounter + 1
 		candidate[username].PasswordHash = string(hash)
 		candidate[username].AuthEpoch = epoch
-		if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
+		if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
 			return err
 		}
 		g.epochCounter = epoch
@@ -464,7 +618,7 @@ func (g *authGate) setPasswordMigratingEnv(username, password string) error {
 	candidate := cloneUsersLocked(g.users)
 	epoch := g.epochCounter + 1
 	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: RoleAdmin, AuthEpoch: epoch}
-	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
 		return err
 	}
 	g.epochCounter = epoch
@@ -490,7 +644,7 @@ func (g *authGate) setRole(username, role string) error {
 	epoch := g.epochCounter + 1
 	candidate[username].Role = role
 	candidate[username].AuthEpoch = epoch
-	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
 		return err
 	}
 	g.epochCounter = epoch
@@ -514,7 +668,7 @@ func (g *authGate) deleteUser(username string) error {
 	candidate := cloneUsersLocked(g.users)
 	delete(candidate, username)
 	epoch := g.epochCounter + 1
-	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
 		return err
 	}
 	g.epochCounter = epoch
@@ -615,9 +769,10 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 // handleUserAction manages one account:
 //
-//	DELETE /api/users/{username}           remove the account
-//	PUT    /api/users/{username}           change role  {"role": "editor"}
-//	POST   /api/users/{username}/password  admin reset  {"password": "..."}
+//	DELETE /api/users/{username}              remove the account
+//	PUT    /api/users/{username}              change role  {"role": "editor"}
+//	POST   /api/users/{username}/password     admin reset  {"password": "..."}
+//	POST   /api/users/{username}/revoke-sessions  retire all live sessions
 //
 // Admin-only (enforced by the gate).
 func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
@@ -695,7 +850,71 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		s.gate.deleteUserSessions(username)
 		writeData(w, map[string]bool{"ok": true})
 
+	case r.Method == http.MethodPost && sub == "revoke-sessions":
+		// A02: durable revocation — the epoch bump retires every live
+		// session for the account on its next request; the in-memory wipe
+		// is immediate cleanup. The user simply signs in again.
+		if err := s.gate.revokeSessions(username); err != nil {
+			if strings.Contains(err.Error(), "user not found") {
+				writeErrorStatus(w, err.Error(), http.StatusNotFound)
+			} else {
+				writeError(w, err.Error())
+			}
+			return
+		}
+		s.gate.deleteUserSessions(username)
+		writeData(w, map[string]bool{"ok": true})
+
 	default:
 		writeError(w, "unsupported user action")
 	}
+}
+
+// handleSSOPrincipals lists the external (SSO) identities known to this
+// instance (GET, admin-only via adminOnlyPrefixes).
+func (s *Server) handleSSOPrincipals(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if s.gate == nil {
+		writeError(w, "authentication is disabled")
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeData(w, s.gate.listSSOPrincipals())
+}
+
+// handleSSORevoke durably revokes every live session for one external
+// identity (POST, admin-only): the principal's epoch is bumped, so its
+// sessions die on their next request and a re-sign-in mints a fresh session
+// against the new epoch. The subject travels in the body because principal
+// ids are opaque issuer-derived strings, not route-safe names.
+func (s *Server) handleSSORevoke(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if s.gate == nil {
+		writeError(w, "authentication is disabled")
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Subject string `json:"subject"`
+	}
+	if err := strictDecode(r, &body); err != nil {
+		writeError(w, "invalid request body")
+		return
+	}
+	if body.Subject == "" {
+		writeError(w, "subject is required")
+		return
+	}
+	if err := s.gate.revokePrincipalSessions(body.Subject); err != nil {
+		writeErrorStatus(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.gate.deleteUserSessions(body.Subject)
+	writeData(w, map[string]bool{"ok": true})
 }

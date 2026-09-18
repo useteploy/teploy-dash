@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
@@ -504,12 +505,35 @@ func (g *authGate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := o.resolveRole(claims)
+	// A02/A08: the identity is the issuer-namespaced subject, NOT the
+	// display-name claims — <sub> is only unique within one issuer, and a
+	// username claim is mutable. The principal row keyed by this id is what
+	// makes the SSO session revocable: created on first sign-in, refreshed
+	// (display fields + role; the IdP stays authoritative for role) on later
+	// ones while preserving the epoch so one device's sign-in does not
+	// retire another's session. The session embeds the epoch captured inside
+	// the same critical section that persisted the row, closing the
+	// issuance-vs-revocation race for external identities.
+	subject := oidcSubjectID(o.issuer, idToken.Subject)
+	email := strings.ToLower(strings.TrimSpace(claimString(claims["email"])))
+	epoch, liveRole, err := g.upsertOIDCPrincipal(subject, username, email, role)
+	if err != nil {
+		log.Printf("auth: OIDC principal store failed: %v", err)
+		g.oidcFail(w, r, "SSO sign-in failed — please try again")
+		return
+	}
 	g.recordSuccess(g.clientIP(r))
-	// External principal: no local account, no epoch to revalidate; the role
-	// derives from claims at issuance (issuer+sub identity is the deferred
-	// A04 redesign).
-	g.issueSessionCookie(w, r, username, role, 0, false)
+	g.issueSessionCookie(w, r, subject, username, liveRole, epoch, false)
 	http.Redirect(w, r, flow.next, http.StatusFound)
+}
+
+// oidcSubjectID builds the principal id for an SSO identity: issuer-namespaced
+// (A08), because <sub> is unique only within one issuer. sha256 keeps the
+// namespace fixed-width and ASCII regardless of the issuer URL — the same
+// scheme teploy-observe migration 040 uses.
+func oidcSubjectID(issuer, sub string) string {
+	sum := sha256.Sum256([]byte(issuer))
+	return "oidc:" + hex.EncodeToString(sum[:8]) + ":" + sub
 }
 
 // oidcFail logs nothing sensitive, counts the attempt against the same per-IP

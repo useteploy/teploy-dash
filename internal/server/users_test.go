@@ -73,10 +73,23 @@ func TestRequiredRole(t *testing.T) {
 // both. A missing/unknown role gets the least privilege.
 func TestRoleGateEnforcement(t *testing.T) {
 	g := newTestGate(t)
-	// Seed an account so the gate leaves setup mode; the sessions below are
-	// independent of it and exercise each role directly.
-	if err := g.createUser("admin", "adminpass1", RoleAdmin); err != nil {
-		t.Fatal(err)
+	// Seed one account per role so every session validates against a live
+	// principal row (the unconditional epoch check retires sessions with no
+	// row — A02). The "garbage" role normalizes to viewer at creation, and
+	// validation re-reads the role live, so an unknown issued role can never
+	// exceed the account's real privilege.
+	for _, u := range []struct {
+		name, pass, role string
+	}{
+		{"admin", "adminpass1", RoleAdmin},
+		{"v", "viewerpass1", RoleViewer},
+		{"e", "editorpass1", RoleEditor},
+		{"a", "admin2pass1", RoleAdmin},
+		{"x", "garbagepass", "garbage"},
+	} {
+		if err := g.createUser(u.name, u.pass, u.role); err != nil {
+			t.Fatal(err)
+		}
 	}
 	mux := http.NewServeMux()
 	ok := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }
@@ -324,7 +337,7 @@ func TestSessionEpochInvalidation(t *testing.T) {
 	if !ok {
 		t.Fatal("bob must authenticate")
 	}
-	token := g.newSessionFor("bob", "bobpass123", bob.AuthEpoch, true)
+	token := g.newSessionFor("bob", "bob", "bobpass123", bob.AuthEpoch, true)
 	if code := do(token); code != http.StatusForbidden {
 		t.Fatalf("editor session on admin route = %d, want 403", code)
 	}
@@ -346,7 +359,7 @@ func TestSessionEpochInvalidation(t *testing.T) {
 
 	// Deletion, then recreation under the SAME name: the new account's epoch
 	// is strictly higher, so no earlier session can ride the identity.
-	token2 := g.newSessionFor("bob", "newpass123", 0, true)
+	token2 := g.newSessionFor("bob", "bob", "newpass123", 0, true)
 	if err := g.deleteUser("bob"); err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +648,7 @@ func TestChangePasswordStoredUserHTTTP(t *testing.T) {
 	if !ok {
 		t.Fatal("alice must authenticate")
 	}
-	token := g.newSessionFor("alice", "alicepass1", alice.AuthEpoch, true)
+	token := g.newSessionFor("alice", "alice", "alicepass1", alice.AuthEpoch, true)
 	if code := post(token, "alicepass1", "newpass123"); code != http.StatusOK {
 		t.Fatalf("self password change = %d, want 200", code)
 	}

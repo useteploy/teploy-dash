@@ -76,6 +76,11 @@ type Config struct {
 	OperationResolver  operation.Resolver
 	OperationExecutor  operation.Executor
 	OperationMaxEvents int
+	// Operation retention knobs (useteploy__teploy-dash-04). Zero values take
+	// the operation package defaults; negative values disable a bound.
+	OperationMaxJournalBytes int64
+	OperationMaxHistoryAge   time.Duration
+	OperationMaxOperations   int
 	// CLI/read hooks keep machine-contract handling testable without changing
 	// production behavior.
 	CLIRunner          func(context.Context, ...string) (*cli.Result, error)
@@ -237,8 +242,11 @@ func New(config Config) *Server {
 	// when the installed CLI has it (probed once per process).
 	operation.SetVarStdinSupport(cli.VarStdinSupported)
 	s.operations, s.operationInitErr = operation.New(config.DataDir, operation.Options{
-		MaxEvents: config.OperationMaxEvents,
-		Resolver:  resolver,
+		MaxEvents:       config.OperationMaxEvents,
+		MaxJournalBytes: config.OperationMaxJournalBytes,
+		MaxHistoryAge:   config.OperationMaxHistoryAge,
+		MaxOperations:   config.OperationMaxOperations,
+		Resolver:        resolver,
 		ProjectResolver: func(server, app, revision string) (string, error) {
 			if s.manifests == nil {
 				return "", fmt.Errorf("manifest service unavailable")
@@ -384,13 +392,15 @@ type authGate struct {
 	// Bootstrap credentials from env vars (plaintext, fallback when no users
 	// file). The env-var user is always treated as an admin.
 	user, pass string
-	// On-disk users (bcrypt hashes + role). Protected by credMu.
-	usersFile     string // users.json — canonical multi-user store
-	legacyFile    string // auth.json — single-user file migrated on first load
-	credMu        sync.RWMutex
-	users         map[string]*dashUser
-	epochCounter  uint64 // monotonic AuthEpoch source; guarded by credMu
-	setupRequired bool
+	// On-disk users (bcrypt hashes + role) and external (SSO) principals.
+	// Both protected by credMu; both share the store-wide epoch counter.
+	usersFile      string // users.json — canonical multi-user + principal store
+	legacyFile     string // auth.json — single-user file migrated on first load
+	credMu         sync.RWMutex
+	users          map[string]*dashUser
+	oidcPrincipals map[string]*dashPrincipal
+	epochCounter   uint64 // monotonic AuthEpoch source; guarded by credMu
+	setupRequired  bool
 	// Optional OIDC single sign-on. nil when not configured.
 	oidc *oidcAuth
 	// Rate limiting
@@ -427,11 +437,14 @@ type authGate struct {
 // isn't a standing credential.
 const bootstrapTokenTTL = 30 * time.Minute
 
-// sessionInfo is one live session: which user, what role, and when it expires.
-// epoch is the account's AuthEpoch at issuance for local-password sessions
-// (local=true); every request revalidates it against the account so a session
-// issued against revoked credentials stops working on its next use (A03).
+// sessionInfo is one live session: which principal (sub), what display name,
+// what role, and when it expires. epoch is the principal's AuthEpoch at
+// issuance; every request revalidates it against the live principal row —
+// local account or OIDC identity alike — so a session issued against revoked
+// state stops working on its next use (A02/A03). For local sessions sub is
+// the username; for SSO sessions it is the issuer-namespaced principal id.
 type sessionInfo struct {
+	sub   string
 	user  string
 	role  string
 	exp   time.Time
@@ -459,6 +472,7 @@ func newAuthGate(user, pass, credFile string) *authGate {
 		usersFile:      filepath.Join(filepath.Dir(credFile), "users.json"),
 		legacyFile:     credFile,
 		users:          make(map[string]*dashUser),
+		oidcPrincipals: make(map[string]*dashPrincipal),
 		trustedProxies: parseTrustedProxies(os.Getenv("TEPLOY_DASH_TRUSTED_PROXY")),
 		fails:          make(map[string]*failInfo),
 		sessions:       make(map[string]*sessionInfo),
@@ -516,7 +530,7 @@ func (g *authGate) materializeEnvBootstrap(name, pass string) error {
 	defer g.credMu.Unlock()
 	candidate := cloneUsersLocked(g.users)
 	candidate[name] = &dashUser{Username: name, PasswordHash: string(hash), Role: RoleAdmin, AuthEpoch: 1}
-	if err := saveUsersFile(g.usersFile, candidate, 1); err != nil {
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, 1); err != nil {
 		return err
 	}
 	g.epochCounter = 1
@@ -560,14 +574,15 @@ func (g *authGate) newSession(user, role string) string {
 		local = true
 	}
 	g.credMu.RUnlock()
-	return g.newSessionFor(user, role, epoch, local)
+	return g.newSessionFor(user, user, role, epoch, local)
 }
 
-// newSessionFor issues a session with an explicit epoch/local pair. Login
-// uses the epoch captured by authenticate (the same read that verified the
-// hash), closing the issuance race where a reset lands between verification
-// and session creation (A03).
-func (g *authGate) newSessionFor(user, role string, epoch uint64, local bool) string {
+// newSessionFor issues a session for one principal (sub) with an explicit
+// epoch/local pair. Login uses the epoch captured by authenticate (the same
+// read that verified the hash), and the OIDC callback uses the epoch captured
+// by upsertOIDCPrincipal's locked persistence — both close the issuance race
+// where a revocation lands between verification and session creation (A02).
+func (g *authGate) newSessionFor(sub, user, role string, epoch uint64, local bool) string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand failed: " + err.Error())
@@ -581,7 +596,7 @@ func (g *authGate) newSessionFor(user, role string, epoch uint64, local bool) st
 			delete(g.sessions, k)
 		}
 	}
-	g.sessions[token] = &sessionInfo{user: user, role: normalizeRole(role), exp: now.Add(sessionTTL), epoch: epoch, local: local}
+	g.sessions[token] = &sessionInfo{sub: sub, user: user, role: normalizeRole(role), exp: now.Add(sessionTTL), epoch: epoch, local: local}
 	return token
 }
 
@@ -609,13 +624,15 @@ func (g *authGate) deleteSession(token string) {
 	delete(g.sessions, token)
 }
 
-// deleteUserSessions invalidates every live session belonging to one user —
-// used when their password or role changes, or the account is removed.
-func (g *authGate) deleteUserSessions(user string) {
+// deleteUserSessions invalidates every live session belonging to one
+// principal (local account or SSO identity) — used when their password or
+// role changes, the account is removed, or an admin revokes sessions. The
+// durable revocation is the epoch bump; this in-memory wipe is cleanup.
+func (g *authGate) deleteUserSessions(sub string) {
 	g.sessMu.Lock()
 	defer g.sessMu.Unlock()
 	for k, si := range g.sessions {
-		if si.user == user {
+		if si.sub == sub {
 			delete(g.sessions, k)
 		}
 	}
@@ -724,24 +741,30 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		if cookieErr == nil {
 			session, _ = g.lookupSession(cookie.Value)
 		}
-		// A live session is validated against the CURRENT account state
-		// before it authorizes anything: a local-password session must still
-		// match the account's AuthEpoch (password/role change, deletion, or a
-		// same-name recreation all bump it), and its ROLE is read live from
-		// the account rather than trusted from issuance time. This is the
-		// security boundary; deleteUserSessions remains only as memory
-		// cleanup (A03). External (OIDC) sessions have their own principal
-		// policy and keep their issued role until the identity work lands.
-		if session != nil && session.local {
+		// A live session is validated against the CURRENT principal state
+		// before it authorizes anything — unconditionally, for local and
+		// SSO sessions alike (A02): the session's epoch must match the
+		// principal row's, and its ROLE is read live from the row rather
+		// than trusted from issuance time. A missing row (deleted account,
+		// revoked principal, or a session from a pre-principal install) is
+		// a dead session. This is the security boundary;
+		// deleteUserSessions remains only as memory cleanup (A03).
+		if session != nil {
 			g.credMu.RLock()
-			u := g.users[session.user]
-			if u == nil || u.AuthEpoch != session.epoch {
-				g.credMu.RUnlock()
+			var live *sessionInfo
+			if session.local {
+				if u := g.users[session.sub]; u != nil && u.AuthEpoch == session.epoch {
+					live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(u.Role), exp: session.exp, epoch: session.epoch, local: true}
+				}
+			} else if p := g.oidcPrincipals[session.sub]; p != nil && p.AuthEpoch == session.epoch {
+				live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(p.Role), exp: session.exp, epoch: session.epoch, local: false}
+			}
+			g.credMu.RUnlock()
+			if live == nil {
 				g.deleteSession(cookie.Value)
 				session = nil
 			} else {
-				session = &sessionInfo{user: session.user, role: normalizeRole(u.Role), exp: session.exp, epoch: session.epoch, local: true}
-				g.credMu.RUnlock()
+				session = live
 			}
 		}
 		// Login throttling keys on the client IP, so applying it before the
@@ -827,7 +850,7 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	g.recordSuccess(ip)
 	// Embed the epoch captured by authenticate's single locked read; a reset
 	// landing after this point leaves the new session immediately invalid.
-	g.issueSessionCookie(w, r, user.Username, user.Role, user.AuthEpoch, true)
+	g.issueSessionCookie(w, r, user.Username, user.Username, user.Role, user.AuthEpoch, true)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -885,7 +908,7 @@ func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 	g.credMu.RLock()
 	epoch := g.users[body.Username].AuthEpoch
 	g.credMu.RUnlock()
-	g.issueSessionCookie(w, r, body.Username, RoleAdmin, epoch, true)
+	g.issueSessionCookie(w, r, body.Username, body.Username, RoleAdmin, epoch, true)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -953,8 +976,8 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request, user, role string, epoch uint64, local bool) {
-	token := g.newSessionFor(user, role, epoch, local)
+func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request, sub, user, role string, epoch uint64, local bool) {
+	token := g.newSessionFor(sub, user, role, epoch, local)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
@@ -1140,6 +1163,8 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("/api/login/methods", s.handleLoginMethods)
 		s.mux.HandleFunc("/api/users", s.handleUsers)
 		s.mux.HandleFunc("/api/users/", s.handleUserAction)
+		s.mux.HandleFunc("/api/sso", s.handleSSOPrincipals)
+		s.mux.HandleFunc("/api/sso/revoke", s.handleSSORevoke)
 		if s.gate.oidc != nil {
 			s.mux.HandleFunc("/oidc/login", s.gate.handleOIDCLogin)
 			s.mux.HandleFunc("/oidc/callback", s.gate.handleOIDCCallback)

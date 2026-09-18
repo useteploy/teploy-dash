@@ -212,6 +212,9 @@ return 404.
 | `TEPLOY_DASH_PASSWORD` | _(optional)_ | Bootstrap password. If set, credentials are taken from this env var. If absent and no `users.json` exists, the first run shows the setup page to create an account. |
 | `TEPLOY_DASH_PUBLIC_STATUS` | _(off)_ | Set to `1`/`true` to enable the public `/status` page (same as `--public-status`). |
 | `TEPLOY_DASH_TRUSTED_PROXY` | _(none)_ | Comma-separated proxy IPs/CIDRs. When set, the real client IP is read from `X-Forwarded-For` (for rate-limiting) and `X-Forwarded-Proto` is trusted for the secure-cookie flag. Set this when running behind Caddy/nginx. |
+| `TEPLOY_DASH_OPERATION_JOURNAL_BYTES` | `4194304` | Per-operation event-journal cap in bytes. When crossed, the journal is compacted to the retained tail (oldest events dropped, marked as a gap on replay). |
+| `TEPLOY_DASH_OPERATION_HISTORY_DAYS` | `30` | Retention age for finished operations: records and event journals older than this are deleted at startup. `0` keeps the default; set a huge value to effectively disable. |
+| `TEPLOY_DASH_MAX_OPERATIONS` | `5000` | Maximum retained operation records (oldest finished operations are removed first, live ones are never removed). |
 | `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
 | `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
 
@@ -240,9 +243,13 @@ redirect URI with your provider.
 | `TEPLOY_DASH_OIDC_DEFAULT_ROLE` | `viewer` | Role for an authenticated user matching no role claim or group (least privilege). |
 
 Role resolution order: a recognized `teploy_role` claim wins; otherwise groups
-are matched (admin > editor > viewer); otherwise the default role. SSO users are
-not stored in `users.json` — their role comes fresh from the IdP on every login,
-so manage them in your IdP, not in Settings → Users.
+are matched (admin > editor > viewer); otherwise the default role. Every SSO
+sign-in is recorded in `users.json` as a principal keyed by
+`oidc:<issuer-hash>:<sub>` — the issuer-namespaced subject, not the display
+name. Roles stay IdP-authoritative (refreshed on every sign-in, read live by
+active sessions), and an administrator can list (`GET /api/sso`) or revoke
+(`POST /api/sso/revoke`) a principal's sessions without touching the IdP;
+revocation forces a fresh sign-in.
 
 #### Self-hosted identity providers
 
@@ -323,6 +330,9 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / DELETE | `/api/restore-tests/{id}` | Detail / delete. |
 | POST | `/api/restore-tests/{id}/run` | Verify the latest backup now (restores into a scratch container via `teploy accessory verify-backup`). |
 | GET / POST | `/api/notifications` | Read / write alert config. |
+| GET | `/api/sso` | List SSO principals (admin). |
+| POST | `/api/sso/revoke` | Revoke all sessions of one SSO principal `{subject}` (admin). |
+| POST | `/api/users/{username}/revoke-sessions` | Revoke all sessions of one local account (admin). |
 | GET / PUT | `/api/homepage` | Service links (Home grid + pinned header icons). |
 
 All non-health routes require a valid session cookie. Sessions are issued by
