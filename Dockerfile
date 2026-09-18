@@ -1,4 +1,11 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
+# Build identity (A64): source-built images report the same version/commit/
+# date metadata goreleaser injects, so incident reports from a source build
+# don't masquerade as a clean release ("dev"). CI passes the checked-out
+# revision; a local build stays visibly "dev".
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
 RUN apk add --no-cache git ca-certificates
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -6,7 +13,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
-        -ldflags="-s -w" \
+        -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${VCS_REF} -X main.date=${BUILD_DATE}" \
         -o /teploy-dash \
         ./cmd/teploy-dash
 
