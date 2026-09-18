@@ -7,24 +7,39 @@ round-2 audit, pass 7, registered below). Fields are quoted from the audit
 register; line references point at the review commits listed per item where
 recorded.
 
-Open items: 1 P2 improvement, 18 deferred findings (design/architecture),
+Open items: 0 P2 improvements, 14 deferred findings (design/architecture),
 2 upstream (teploy-cli) items, plus recorded residuals inside partially-fixed
 findings (2026-09-17 pass 6). Round-2 (pass 7) deferrals are folded into the
-same deferral list below.
+same deferral list below. The 2026-09-18 hardening session closed the dash-04
+journal/retention item and the A02/A08 identity cluster; see the resolution
+log.
 
-## useteploy__teploy-dash-04 - P2 - Open improvement
+## useteploy__teploy-dash-04 - P2 - FIXED 2026-09-18 (commit bb519ce)
 
 **Bound operation retention and reduce global-lock persistence work**
 
 - Kind: Improvement
 - Evidence: Every emitted event rewrites the retained event list through atomicWrite, including file and directory sync, while the manager-wide mutex is held. Operations and their event lists are loaded into memory at startup; only events per operation have a count bound.
-- Impact: A chatty command or large operation history can increase disk traffic and stall unrelated operations, reads, cancellations, and subscriptions. The actual throughput impact has not been benchmarked.
-- Proposed fix: Use per-operation serialized persistence with bounded batching or an append journal, add retention/archival limits, and specify a maximum encoded event size consistent with the reader's 1 MiB scanner limit.
-- Acceptance test: Benchmark several chatty operations concurrently with cancel/Get calls; test retention across restart and an event near and above the accepted byte-size limit.
-- Review commit: `03061cf69843229189c33e51bdcc4edcc6e1c6de` (last reviewed 2026-09-10)
 - 2026-09-17 update: still deferred; A26's immediate safety patch (16 KiB
   event-payload bound, corrupt-history isolation) landed but the journal /
   retention / batching redesign remains open here.
+- 2026-09-18: FIXED. Events persist to a per-operation append-only JSONL
+  journal (one append(2) per event, no per-event fsync or rewrite; the
+  operation record remains the commit point, A25). Retention is bounded and
+  configurable: per-op journal byte cap with compaction to the retained
+  suffix (TEPLOY_DASH_OPERATION_JOURNAL_BYTES, default 4 MiB), terminal
+  history age applied at startup (TEPLOY_DASH_OPERATION_HISTORY_DAYS,
+  default 30d), and a total operation-count bound removing oldest terminal
+  records first (TEPLOY_DASH_MAX_OPERATIONS, default 5000; live operations
+  never removed). Replay is gap-aware: sequence holes, torn/corrupt journal
+  tails (truncated at the damage offset so the journal never grows behind a
+  dead line), and retention truncation are surfaced as explicit gap events,
+  keeping A26's 16 KiB bound and corrupt-history isolation. The in-memory
+  event window stays bounded to maxEvents; older sequences are served from
+  the journal on disk via EventsAfter/Subscribe. Same-target admission now
+  executes in durable FIFO order (per-target runner queue, AdmissionSeq on
+  the record) — the A12/A27 core; admission budgets and idempotency
+  namespacing remain deferred below.
 
 ## 2026-09-17 source-code audit (pass 6)
 
@@ -160,13 +175,23 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
 
 ### Deferred (design/architecture, with rationale)
 
-- A02 - session issuance races account revocation (High): the epoch-based
-  issuance/revocation transaction is a session-layer redesign. Mitigations
-  in place: 24h session TTL, all sessions invalidated on password/role
-  change and deletion; the residual window is seconds-long. Revisit with
-  A08's issuer+sub identity work (below).
-- A08 (residual) - OIDC identity from issuer+sub instead of display-name
-  claims: session identity model change; needs the same redesign as A02.
+- A02 - FIXED 2026-09-18 (commit 478337e): the epoch-based
+  issuance/revocation redesign landed. Every session carries its principal
+  key + AuthEpoch; issuance captures the epoch inside the same locked
+  critical section that verified credentials (local) or persisted the
+  principal row (OIDC), and validation re-checks the epoch unconditionally
+  on every request — issue -> revoke -> old token rejected is gate-tested
+  for both identity kinds, plus an explicit concurrent login/revoke/request
+  race test under -race. Admin revoke operations:
+  POST /api/users/{u}/revoke-sessions and POST /api/sso/revoke.
+- A08 - FIXED 2026-09-18 (commit 478337e, residual): OIDC identity is the
+  issuer-namespaced subject oidc:<sha256(issuer)[:16]>:<sub>, persisted as
+  a principal row in users.json (additive; pre-principal installs load an
+  empty set and their in-memory sessions die at restart as before).
+  Display-name claims are attribution only; role stays IdP-authoritative
+  and is read live by active sessions (re-sign-in preserves the epoch, so
+  one device's sign-in does not retire another's session). A missing
+  principal row is a dead session — the observe-040 semantics.
 - A09 (residual) - canonical callback origin: a configured redirect URL is
   supported (TEPLOY_DASH_OIDC_REDIRECT_URL); deriving from the Host header
   remains the default. Bounded discovery landed.
@@ -174,9 +199,11 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
   restricting env/KV/log reads to editors intentionally changes the
   documented viewer contract and needs an approved role matrix + migration.
   Baseline security headers landed.
-- A12 - monitor reload/delete stale-result atomicity: needs the per-slot
-  lock + outbox scheduler restructure. The generation fence (pass 4/5)
-  covers the common interleavings.
+- A12 - CORE LANDED 2026-09-18 (commit bb519ce): same-target operations
+  execute in durable FIFO admission order (per-target runner queue +
+  persisted AdmissionSeq). Still deferred: admission budgets (queue-depth
+  caps per principal) and the monitor outbox scheduler restructure; the
+  generation fence (pass 4/5) covers the common interleavings.
 - A19 (residual) - MCP idempotency keys scoped per token: additive protocol
   change; requires client coordination.
 - A21 (residual) - strict per-tool DTO decoding and full JSON-RPC envelope
@@ -190,12 +217,14 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
 - A24 - hand-written WebSocket: replacing it (maintained implementation or
   SSE-only) changes the frontend log path; the SSE fallback already exists
   and same-origin is enforced. Defer with the frontend log-viewer rework.
-- A26 (residual) - journal persistence, byte+age retention, replay-gap
-  events, persistence-degraded readiness: folded into open item
-  useteploy__teploy-dash-04 above.
-- A27 - FIFO queue, actor attribution, alias-fingerprint checks: operation
-  scheduler redesign; current per-target semaphore prevents concurrent
-  same-target execution but does not order enqueues.
+- A26 (residual) - FIXED 2026-09-18 via useteploy__teploy-dash-04 (commit
+  bb519ce): journal persistence, byte+age retention, and replay-gap events
+  landed; persistence-degraded readiness remains with the A39/A47
+  health-contract work.
+- A27 - CORE LANDED 2026-09-18 (commit bb519ce): FIFO admission ordering
+  (see A12). Still deferred: actor attribution fields and
+  alias-fingerprint admission checks (API + schema change needing client
+  coordination).
 - A28 - manifest revision leases + validation work budget: cross-service
   (manifest store + operation admission) design.
 - A30 (residual) - unknown /api/* routes 404 vs SPA fallback;
@@ -387,14 +416,16 @@ dash side was ours to do.
 
 ### Deferred (round-2 items, with rationale; folded into the open list)
 
-- A04 (residual) - OIDC identity from issuer+sub, canonical callback URL
-  validation: same session-identity redesign as pass-6 A08's residual.
+- A04 (residual) - FIXED 2026-09-18 (commit 478337e): OIDC identity is now
+  issuer+sub (see pass-6 A08 above). Canonical callback URL validation
+  remains with the A09/A06 origin-config work.
 - A06 (residual) - configured-public-origin comparisons and login-admission
   budgeting (bcrypt concurrency cap): needs an origin config surface and
   load measurements; the lockout/NAT and setup gaps are fixed.
-- A12 - FIFO scheduler with durable enqueue sequence + admission budgets:
-  scheduler redesign; the per-target semaphore prevents same-target
-  overlap but does not order enqueues (same as pass-6 A27).
+- A12 - CORE LANDED 2026-09-18 (commit bb519ce): durable FIFO admission
+  sequence + per-target ordered execution (same as pass-6 A12/A27). Still
+  deferred: admission budgets and idempotency-key namespacing (client
+  coordination).
 - A13 - idempotency keys namespaced per principal and wired into UI/MCP +
   actor-attribution fields: additive API + operation-schema change needing
   client coordination.
@@ -402,8 +433,8 @@ dash side was ours to do.
   queue and unifying template-vs-app lock targets: single-mutation-boundary
   redesign; the env/kv direct paths are single SSH round trips with typed
   errors today, and the queue conversion changes the frontend contract.
-- A16 - journal persistence, retention, gap negotiation: open item
-  useteploy__teploy-dash-04 above.
+- A16 - FIXED 2026-09-18 via useteploy__teploy-dash-04 (commit bb519ce):
+  journal persistence, retention, and gap negotiation landed.
 - A17 - manifest revision leases vs admitted operations: with no
   auto-replay (A08) the crash case is closed; the live delete-while-queued
   case fails visibly at execution. Lease coordination remains design work
@@ -467,3 +498,25 @@ operation records. No push performed.
   dismissed with evidence, 18 deferred with rationale (merged above);
   UPSTREAM-1 and UPSTREAM-2 adoptions landed (A11, A38). Conventional
   commits reference the round-2 finding IDs.
+
+## Resolution log (2026-09-18 hardening session)
+
+- Identity cluster (commit 478337e): pass-6 A02 and the A08 residual (=
+  pass-7 A04 residual) FIXED — unified principal store in users.json with
+  per-principal AuthEpoch, unconditional per-request version checks for
+  local and SSO sessions, issuer-namespaced OIDC identity, admin
+  revocation endpoints, additive migration (empty principal set on legacy
+  stores, duplicate subjects fail closed). Acceptance gates in
+  internal/server/principals_test.go (issue -> revoke -> old token
+  rejected for both kinds, role-change revocation, issuer scoping,
+  concurrent revocation races under -race).
+- Journal cluster (commit bb519ce): useteploy__teploy-dash-04 FIXED (and
+  with it pass-6 A26's residual, pass-7 A16) plus the A12/A27
+  (pass-6) / A12 (pass-7) ordering cores — append-only per-operation
+  journal, configurable size+age+count retention, gap-event replay,
+  bounded in-memory window with disk fallback, FIFO admission ordering.
+  Tests in internal/operation/journal_test.go.
+- Gates at the closing docs commit: `go vet ./...` clean; `go test ./...`
+  all 12 packages ok; `go test -race -count=1 ./...` all 12 packages ok
+  (two consecutive race runs clean); `make build` ok. README documents the
+  new endpoints and retention env vars. No push performed.
