@@ -1,8 +1,11 @@
 package restoretest
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,8 +16,10 @@ func newTestRunner(t *testing.T, out string, cliErr error) (*Runner, store.Store
 	t.Helper()
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error) {
-		return out, "boom-stderr", cliErr
+	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+		// cliErr models the CLI's non-zero EXIT (verdict-bearing per the
+		// documented verify-backup semantics), not a transport failure.
+		return out, "boom-stderr", cliErr, nil
 	}
 	return r, st
 }
@@ -98,8 +103,8 @@ func TestRunNow_TracksOutcomeTransitions(t *testing.T) {
 	}
 
 	r.mu.Lock()
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error) {
-		return `{"ok":true,"metric":"tables=7","date":"20260710-050000"}`, "", nil
+	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+		return `{"ok":true,"metric":"tables=7","date":"20260710-050000"}`, "", nil, nil
 	}
 	r.mu.Unlock()
 
@@ -119,9 +124,9 @@ func TestStartSeedsBaselineAndSkipsImmediateRunForKnownTests(t *testing.T) {
 	ran := 0
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error) {
+	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 		ran++
-		return `{"ok":true}`, "", nil
+		return `{"ok":true}`, "", nil, nil
 	}
 	rt := store.RestoreTest{
 		ID: "rt2", Server: "prod", App: "a", Accessory: "db",
@@ -145,4 +150,62 @@ func TestStartSeedsBaselineAndSkipsImmediateRunForKnownTests(t *testing.T) {
 	if !ok || seeded {
 		t.Errorf("expected baseline seeded to false, got ok=%v val=%v", ok, seeded)
 	}
+}
+
+// A26: a TRANSPORT failure (timeout, missing binary) is a failed
+// verification even when the child managed to print a parseable {"ok":true}
+// before hanging — and failure branches must not inherit the previous run's
+// metric/date/duration fields.
+func TestRunNow_TransportErrorBeatsLyingStdout(t *testing.T) {
+	out := `{"app":"myapp","ok":true,"metric":"tables=42","date":"20260710-040000","duration_ms":9500}`
+	st := store.NewFileStore(t.TempDir())
+	r := New(st)
+	var calls int32
+	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+		atomic.AddInt32(&calls, 1)
+		if atomic.LoadInt32(&calls) == 1 {
+			// A clean, persisted success first, so stale fields exist.
+			return out, "", nil, nil
+		}
+		// Second run: timeout, but the CLI already printed its (stale) JSON.
+		return out, "", nil, context.DeadlineExceeded
+	}
+	rt := seedTest(t, st)
+	first := r.RunNow(rt)
+	if !first.LastOK || first.LastMetric != "tables=42" {
+		t.Fatalf("first run = %+v", first)
+	}
+
+	second := r.RunNow(first)
+	if second.LastOK {
+		t.Fatal("transport timeout with ok:true stdout reported as successful verification")
+	}
+	if second.LastMetric != "" || second.LastDate != "" || second.LastDurationMs != 0 {
+		t.Fatalf("failure branch inherited stale metric fields: %+v", second)
+	}
+	if !strings.Contains(second.LastDetail, "did not complete") {
+		t.Fatalf("detail = %q", second.LastDetail)
+	}
+
+	// A transport failure whose result cannot be persisted must not alert
+	// either — swap in a failing store wrapper.
+	bad := &failingResultStore{Store: st}
+	r2 := New(bad)
+	r2.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+		return `{"ok":false,"detail":"broken backup"}`, "", nil, nil
+	}
+	r2.RunNow(seedTest(t, st))
+	if bad.calls != 1 {
+		t.Fatalf("SaveRestoreTestResult calls = %d", bad.calls)
+	}
+}
+
+type failingResultStore struct {
+	store.Store
+	calls int
+}
+
+func (f *failingResultStore) SaveRestoreTestResult(id string, result store.RestoreTest) error {
+	f.calls++
+	return errors.New("disk full")
 }

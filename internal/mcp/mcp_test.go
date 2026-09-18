@@ -472,3 +472,101 @@ func TestDeleteFailureKeepsInMemoryRemovalDeferred(t *testing.T) {
 		t.Fatal("failed revocation removed the token from memory while it remains on disk")
 	}
 }
+
+// A41: an argument object carrying a field the tool's schema does not
+// advertise (or a null value) is rejected BEFORE the tool runs — the old
+// path silently ignored unknown fields, so an unrecognized `dry_run: true`
+// rode along with a real deployment request.
+func TestToolsCallRejectsUnknownAndNullArguments(t *testing.T) {
+	ts, full, _, backend := testServer(t)
+	defer ts.Close()
+
+	call := func(args string) map[string]interface{} {
+		return rpc(t, ts.URL, full, "tools/call", map[string]interface{}{
+			"name": "teploy_deploy", "arguments": json.RawMessage(args),
+		})
+	}
+
+	resp := call(`{"server":"prod","app":"web","image":"web:1","dry_run":true}`)
+	if resp["error"] == nil {
+		t.Fatalf("unknown argument accepted: %+v", resp)
+	}
+	resp = call(`{"server":"prod","app":"web","image":null}`)
+	if resp["error"] == nil {
+		t.Fatalf("null argument accepted: %+v", resp)
+	}
+	if len(backend.calls) != 0 {
+		t.Fatalf("backend ran on invalid input: %v", backend.calls)
+	}
+}
+
+// A42: present-but-invalid request IDs are invalid requests, not
+// notifications; a valid string/number ID round-trips verbatim.
+func TestRPCIDValidation(t *testing.T) {
+	ts, full, _, _ := testServer(t)
+	defer ts.Close()
+	cases := []struct {
+		id    string
+		valid bool
+	}{
+		{`"abc"`, true},
+		{`42`, true},
+		{`null`, false},
+		{`true`, false},
+		{`{"x":1}`, false},
+		{`[1]`, false},
+	}
+	for _, tc := range cases {
+		body := []byte(`{"jsonrpc":"2.0","id":` + tc.id + `,"method":"ping"}`)
+		req, _ := http.NewRequest("POST", ts.URL, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+full)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if tc.valid {
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("id %s: code = %d, want 200", tc.id, resp.StatusCode)
+			}
+			continue
+		}
+		var parsed struct {
+			Error *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+			t.Errorf("id %s: bad body", tc.id)
+			continue
+		}
+		if parsed.Error == nil || parsed.Error.Code != -32600 {
+			t.Errorf("id %s: error = %+v, want -32600", tc.id, parsed.Error)
+		}
+	}
+}
+
+// A42: a present but unknown MCP-Protocol-Version header is rejected.
+func TestProtocolVersionHeader(t *testing.T) {
+	ts, full, _, _ := testServer(t)
+	defer ts.Close()
+	post := func(version string) int {
+		req, _ := http.NewRequest("POST", ts.URL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+		req.Header.Set("Authorization", "Bearer "+full)
+		if version != "" {
+			req.Header.Set("MCP-Protocol-Version", version)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post("1999-01-01"); code != http.StatusBadRequest {
+		t.Fatalf("unsupported version header: code = %d, want 400", code)
+	}
+	if code := post("2025-06-18"); code != http.StatusOK {
+		t.Fatalf("supported version header: code = %d, want 200", code)
+	}
+}

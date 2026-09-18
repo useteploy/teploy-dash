@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +35,12 @@ type VerifyResult struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
-// runCLIFunc abstracts the CLI delegate call so tests can fake the subprocess.
-type runCLIFunc func(server, user, app, accessory, bucket, region string) (stdout, stderr string, err error)
+// runCLIFunc abstracts the CLI delegate call so tests can fake the
+// subprocess. The contract (matching the real adapter below): exitErr is
+// the CLI's NON-ZERO EXIT, which the documented verify-backup semantics say
+// still carries a JSON verdict on stdout; err is a TRANSPORT failure
+// (timeout, missing binary) that no stdout payload can override (A26).
+type runCLIFunc func(server, user, app, accessory, bucket, region string) (stdout, stderr string, exitErr error, err error)
 
 // Runner manages restore tests and runs them on their intervals.
 type Runner struct {
@@ -53,7 +58,14 @@ type Runner struct {
 	timers  map[string]*time.Ticker
 	stopChs map[string]chan struct{}
 	lastOK  map[string]bool // last known outcome per test (for transition alerts)
-	mu      sync.Mutex
+	// running is the per-test single-flight claim (A25): a manual run and a
+	// scheduled tick (or a reload racing either) share one claim, so the
+	// same test never runs two expensive verifications at once.
+	running map[string]bool
+	// wg tracks in-flight runs so Stop can join them before the store
+	// closes (A46).
+	wg sync.WaitGroup
+	mu sync.Mutex
 }
 
 // New creates a restore-test runner.
@@ -63,12 +75,22 @@ func New(st store.Store) *Runner {
 		timers:  make(map[string]*time.Ticker),
 		stopChs: make(map[string]chan struct{}),
 		lastOK:  make(map[string]bool),
-		runCLI: func(server, user, app, accessory, bucket, region string) (string, string, error) {
+		running: make(map[string]bool),
+		runCLI: func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 			res, err := cli.AccessoryVerifyBackup(server, user, app, accessory, bucket, region)
 			if res == nil {
-				return "", "", err
+				return "", "", nil, err
 			}
-			return res.Stdout, res.Stderr, err
+			// The delegate runs verify-backup with plain Run: a NON-ZERO
+			// EXIT is not an error for this command (the CLI prints its JSON
+			// verdict on stdout and exits non-zero on failed verification),
+			// so a real err here is transport-only. The exit-error parameter
+			// stays available for adapters that surface it.
+			var exitErr error
+			if ee, ok := err.(*exec.ExitError); ok {
+				exitErr, err = ee, nil
+			}
+			return res.Stdout, res.Stderr, exitErr, err
 		},
 	}
 }
@@ -109,10 +131,12 @@ func (r *Runner) Start() {
 	log.Printf("[restoretest] Started %d restore tests", len(tests))
 }
 
-// Stop stops all scheduled tests.
+// Stop stops all scheduled tests and waits (bounded) for in-flight runs to
+// finish, so shutdown never closes the store underneath a live verification
+// (A46). A run that outlives the bound is logged loudly rather than
+// silently racing the closing store.
 func (r *Runner) Stop() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for id, ch := range r.stopChs {
 		close(ch)
 		if t, ok := r.timers[id]; ok {
@@ -121,6 +145,18 @@ func (r *Runner) Stop() {
 	}
 	r.timers = make(map[string]*time.Ticker)
 	r.stopChs = make(map[string]chan struct{})
+	r.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		log.Printf("[restoretest] shutdown: a verification run did not finish in time; it may race storage shutdown")
+	}
 }
 
 // Reload reloads a single test (stop + start with new config).
@@ -167,11 +203,26 @@ func (r *Runner) startTest(t store.RestoreTest) {
 	r.mu.Unlock()
 
 	go func() {
-		// Run immediately only on first-ever schedule; an interval-boundary
-		// run is expensive (downloads the backup, boots a container), so a
-		// dash restart must not re-trigger every configured test at once.
-		if t.LastRunAt.IsZero() {
-			r.RunNow(t)
+		// Interval-boundary runs are expensive (they download the backup and
+		// boot a scratch container), so scheduling follows the PERSISTED
+		// last-run time rather than the process clock: a first-ever test
+		// runs immediately, an overdue one runs promptly on restart, and a
+		// fresh one waits exactly the remainder of its interval — restarting
+		// more often than the interval can no longer postpone verification
+		// indefinitely (A25).
+		if !t.LastRunAt.IsZero() {
+			if delay := initialDelay(t.LastRunAt, interval, time.Now()); delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-stopCh:
+					timer.Stop()
+					return
+				}
+			}
+		}
+		if cur, err := r.store.GetRestoreTest(t.ID); err == nil && cur.Enabled {
+			r.RunNow(*cur)
 		}
 		for {
 			select {
@@ -188,6 +239,19 @@ func (r *Runner) startTest(t store.RestoreTest) {
 			}
 		}
 	}()
+}
+
+// initialDelay returns how long a restarted schedule waits before its first
+// run: the remainder of lastRun+interval, or 0 when the test has never run
+// or is already overdue (A25).
+func initialDelay(lastRun time.Time, interval time.Duration, now time.Time) time.Duration {
+	if lastRun.IsZero() || interval <= 0 {
+		return 0
+	}
+	if due := lastRun.Add(interval); due.After(now) {
+		return due.Sub(now)
+	}
+	return 0
 }
 
 func (r *Runner) stopTest(id string) {
@@ -211,7 +275,25 @@ func (r *Runner) teardownLocked(id string) {
 
 // RunNow executes one verification run synchronously, persists the outcome
 // onto the test, and fires fail/recover alerts. Returns the updated test.
+// A manual request and a scheduled tick share the per-test claim, so a
+// second concurrent invocation returns the unchanged record instead of
+// stacking an expensive overlapping run (A25).
 func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
+	r.mu.Lock()
+	if r.running[t.ID] {
+		r.mu.Unlock()
+		return t
+	}
+	r.running[t.ID] = true
+	r.wg.Add(1)
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.running, t.ID)
+		r.mu.Unlock()
+		r.wg.Done()
+	}()
+
 	r.mu.Lock()
 	userFor := r.userFor
 	hostFor := r.hostFor
@@ -229,18 +311,27 @@ func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
 		}
 	}
 
-	stdout, stderr, err := runCLI(host, user, t.App, t.Accessory, t.Bucket, t.Region)
+	stdout, stderr, _, err := runCLI(host, user, t.App, t.Accessory, t.Bucket, t.Region)
 
+	// A26: the verdict starts from a FRESH projection — failure branches
+	// must not inherit the previous run's metric/date/duration, and a
+	// transport error (timeout, missing binary) is a failed verification
+	// even when the child managed to print a parseable {"ok":true} before
+	// hanging.
 	t.LastRunAt = time.Now()
 	var res VerifyResult
 	switch {
-	case err != nil && strings.TrimSpace(stdout) == "":
-		// The subprocess itself failed (timeout, missing binary) — no result.
+	case err != nil:
 		t.LastOK = false
-		t.LastDetail = fmt.Sprintf("verify-backup did not run: %v", err)
+		t.LastMetric = ""
+		t.LastDate = ""
+		t.LastDurationMs = 0
+		t.LastDetail = fmt.Sprintf("verify-backup did not complete: %v", err)
 	case json.Unmarshal([]byte(strings.TrimSpace(stdout)), &res) != nil:
-		// Non-zero exit before a result was produced (bad flags, SSH failure).
 		t.LastOK = false
+		t.LastMetric = ""
+		t.LastDate = ""
+		t.LastDurationMs = 0
 		detail := strings.TrimSpace(stderr)
 		if detail == "" {
 			detail = strings.TrimSpace(stdout)
@@ -256,9 +347,12 @@ func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
 
 	// Persist ONLY the result fields (A15): a config edit saved while this
 	// long run was in flight must survive, and a deleted test must not be
-	// resurrected by its own completion.
+	// resurrected by its own completion. A26: a failed save makes the run
+	// visibly unpersisted — no alert is sent off a state nobody can see.
 	if err := r.store.SaveRestoreTestResult(t.ID, t); err != nil {
-		log.Printf("[restoretest] Failed to save result for %s: %v", t.ID, err)
+		log.Printf("[restoretest] Failed to save result for %s: %v (result not persisted, no alert sent)", t.ID, err)
+		t.LastDetail = fmt.Sprintf("%s [result could not be persisted: %v]", t.LastDetail, err)
+		return t
 	}
 
 	// Alert on failure, and on recovery after a known failure.

@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -45,6 +46,11 @@ type Config struct {
 	SMTPPass      string `json:"smtp_pass,omitempty"`
 	EmailTo       string `json:"email_to,omitempty"`
 	EmailFrom     string `json:"email_from,omitempty"`
+	// SMTPAllowInsecure opts this installation into plaintext SMTP for
+	// trusted LAN relays. Without it, delivery REQUIRES STARTTLS and fails
+	// loudly when the server doesn't offer it — the old code downgraded
+	// silently, sending alert payloads (and auth) in the clear (A45).
+	SMTPAllowInsecure bool `json:"smtp_allow_insecure,omitempty"`
 }
 
 // Event represents a monitor state change.
@@ -131,13 +137,13 @@ func (d *Dispatcher) sendWebhook(event Event) {
 func (d *Dispatcher) sendEmail(event Event) {
 	msg := buildEmailMessage(d.config.EmailFrom, d.config.EmailTo, event)
 
-	addr := fmt.Sprintf("%s:%d", d.config.SMTPHost, d.config.SMTPPort)
+	addr := net.JoinHostPort(d.config.SMTPHost, strconv.Itoa(d.config.SMTPPort))
 	var auth smtp.Auth
 	if d.config.SMTPUser != "" {
 		auth = smtp.PlainAuth("", d.config.SMTPUser, d.config.SMTPPass, d.config.SMTPHost)
 	}
 
-	if err := sendMailTimeout(addr, d.config.SMTPHost, auth, d.config.EmailFrom, []string{d.config.EmailTo}, []byte(msg), 10*time.Second); err != nil {
+	if err := sendMailTimeout(addr, d.config.SMTPHost, auth, d.config.EmailFrom, []string{d.config.EmailTo}, []byte(msg), 10*time.Second, d.config.SMTPAllowInsecure); err != nil {
 		log.Printf("[alert] Email failed: %v", err)
 	}
 }
@@ -160,7 +166,13 @@ func buildEmailMessage(from, to string, event Event) string {
 // mail server can't leak a goroutine on every monitor flap. The deadline covers
 // the whole dial+exchange; a watchdog closes the conn on expiry so even a
 // post-greeting hang unblocks.
-func sendMailTimeout(addr, host string, auth smtp.Auth, from string, to []string, msg []byte, timeout time.Duration) error {
+//
+// A45: transport expectations are explicit instead of opportunistic.
+// STARTTLS is REQUIRED unless the caller explicitly opted into plaintext
+// (Config.SMTPAllowInsecure, for trusted LAN relays); when credentials are
+// configured but the server offers no AUTH, delivery fails instead of
+// silently sending unauthenticated.
+func sendMailTimeout(addr, host string, auth smtp.Auth, from string, to []string, msg []byte, timeout time.Duration, allowInsecure bool) error {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return err
@@ -188,15 +200,18 @@ func sendMailTimeout(addr, host string, auth smtp.Auth, from string, to []string
 	}()
 
 	if ok, _ := c.Extension("STARTTLS"); ok {
-		if err := c.StartTLS(&tls.Config{ServerName: host}); err != nil {
+		if err := c.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
 			return err
 		}
+	} else if !allowInsecure {
+		return errors.New("SMTP server does not offer required STARTTLS (set smtp_allow_insecure for a trusted LAN relay)")
 	}
 	if auth != nil {
-		if ok, _ := c.Extension("AUTH"); ok {
-			if err := c.Auth(auth); err != nil {
-				return err
-			}
+		if ok, _ := c.Extension("AUTH"); !ok {
+			return errors.New("SMTP authentication configured but the server offers no AUTH")
+		}
+		if err := c.Auth(auth); err != nil {
+			return err
 		}
 	}
 	if err := c.Mail(from); err != nil {

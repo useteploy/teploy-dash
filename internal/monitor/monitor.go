@@ -26,7 +26,10 @@ type Runner struct {
 	// older generation must not save its result, mutate lastStat, or alert —
 	// it describes a configuration that no longer exists.
 	generations map[string]uint64
-	mu          sync.Mutex
+	// wg tracks in-flight checks so Stop can join them before the store
+	// closes (A46).
+	wg sync.WaitGroup
+	mu sync.Mutex
 }
 
 // New creates a monitor runner.
@@ -99,11 +102,13 @@ func (r *Runner) CheckNow(m store.Monitor) store.CheckResult {
 	}
 }
 
-// Stop stops all running monitors.
+// Stop stops all running monitors and waits (bounded) for any in-flight
+// check to finish, so shutdown never closes the store underneath a check
+// that is about to persist its result (A46). Checks are individually bounded
+// by their configured timeout, so the wait is short in practice; a straggler
+// is logged rather than silently racing the closing store.
 func (r *Runner) Stop() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	for id, ch := range r.stopChs {
 		close(ch)
 		if t, ok := r.timers[id]; ok {
@@ -112,6 +117,18 @@ func (r *Runner) Stop() {
 	}
 	r.timers = make(map[string]*time.Ticker)
 	r.stopChs = make(map[string]chan struct{})
+	r.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		log.Printf("[monitor] shutdown: an in-flight check did not finish in time; it may race storage shutdown")
+	}
 }
 
 // Reload reloads a single monitor (stop + start with new config).
@@ -159,17 +176,25 @@ func (r *Runner) startMonitor(m store.Monitor) {
 
 	go func() {
 		// Run first check immediately
-		r.runCheck(m)
+		r.runCheckLocked(m)
 
 		for {
 			select {
 			case <-ticker.C:
-				r.runCheck(m)
+				r.runCheckLocked(m)
 			case <-stopCh:
 				return
 			}
 		}
 	}()
+}
+
+// runCheckLocked wraps runCheck in the runner's WaitGroup so Stop can join
+// in-flight checks (A46).
+func (r *Runner) runCheckLocked(m store.Monitor) {
+	r.wg.Add(1)
+	defer r.wg.Done()
+	r.runCheck(m)
 }
 
 func (r *Runner) stopMonitor(id string) {

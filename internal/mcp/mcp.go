@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,6 +75,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A42: a client that pins a protocol version gets it validated. The
+	// header is optional for the initial handshake (the version is then
+	// negotiated in initialize params), but a PRESENT unknown version is
+	// rejected rather than silently answered with our latest.
+	if version := r.Header.Get("MCP-Protocol-Version"); version != "" && !supportedProtocols[version] {
+		http.Error(w, "unsupported MCP protocol version", http.StatusBadRequest)
+		return
+	}
+
 	tok, ok := h.authenticate(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="teploy-dash MCP"`)
@@ -100,15 +110,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRPC(w, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: `invalid request: "jsonrpc" must be "2.0"`}})
 		return
 	}
-
-	// Notifications (no id) get a bare 202 per streamable-HTTP.
-	if len(req.ID) == 0 || string(req.ID) == "null" {
+	// A42: validate the ID shape MCP allows (string or number). A present
+	// but null/object/array/bool ID is an invalid request, not a
+	// notification; a genuinely absent ID is the notification path.
+	if len(req.ID) != 0 {
+		if !validRPCID(req.ID) {
+			writeRPC(w, rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32600, Message: "invalid request: id must be a string or a number"}})
+			return
+		}
+	} else {
+		// Notifications (no id) get a bare 202 per streamable-HTTP.
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
 	resp := h.dispatch(r, req, tok)
 	writeRPC(w, resp)
+}
+
+// validRPCID reports whether a raw request ID matches JSON-RPC 2.0's string
+// or number contract (A42). The raw bytes are preserved verbatim in the
+// response — no lossy number conversion.
+func validRPCID(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	switch trimmed[0] {
+	case '"':
+		return json.Valid(trimmed)
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		var n json.Number
+		return json.Unmarshal(trimmed, &n) == nil
+	}
+	return false
 }
 
 func (h *Handler) authenticate(r *http.Request) (Token, bool) {
@@ -165,15 +200,30 @@ func (h *Handler) dispatch(r *http.Request, req rpcRequest, tok Token) rpcRespon
 		resp.Result = map[string]interface{}{"tools": visible}
 
 	case "tools/call":
+		// A41: arguments are kept RAW until they have been validated against
+		// the advertised schema's top-level fields — the old map-decode path
+		// silently ignored unknown fields (an unrecognized `dry_run: true`
+		// beside a real deploy request) and defaulted nulls.
 		var params struct {
-			Name      string                 `json:"name"`
-			Arguments map[string]interface{} `json:"arguments"`
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			resp.Error = &rpcError{Code: -32602, Message: "invalid params"}
 			return resp
 		}
-		resp.Result = h.callTool(r, params.Name, params.Arguments, tok)
+		if err := validateToolArguments(h.tools, params.Name, params.Arguments); err != nil {
+			resp.Error = &rpcError{Code: -32602, Message: err.Error()}
+			return resp
+		}
+		var args map[string]interface{}
+		if len(params.Arguments) > 0 {
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				resp.Error = &rpcError{Code: -32602, Message: "arguments must be an object"}
+				return resp
+			}
+		}
+		resp.Result = h.callTool(r, params.Name, args, tok)
 
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)}
@@ -203,6 +253,44 @@ func (h *Handler) callTool(r *http.Request, name string, args map[string]interfa
 		}
 	}
 	return toolError(fmt.Sprintf("unknown tool: %s", name))
+}
+
+// validateToolArguments enforces the top-level argument contract a tool's
+// schema advertises (additionalProperties: false) BEFORE any side effect
+// (A41): unknown fields and null values are rejected instead of ignored.
+func validateToolArguments(tools []Tool, name string, raw json.RawMessage) error {
+	var tool *Tool
+	for i := range tools {
+		if tools[i].Name == name {
+			tool = &tools[i]
+			break
+		}
+	}
+	if tool == nil {
+		return nil // unknown tool: callTool reports it as a tool error
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return fmt.Errorf("arguments must be an object")
+	}
+	allowed := map[string]bool{}
+	if props, ok := tool.InputSchema["properties"].(map[string]interface{}); ok {
+		for key := range props {
+			allowed[key] = true
+		}
+	}
+	for key, value := range fields {
+		if !allowed[key] {
+			return fmt.Errorf("unknown argument %q for tool %s", key, name)
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("argument %q must not be null", key)
+		}
+	}
+	return nil
 }
 
 func toolError(msg string) map[string]interface{} {

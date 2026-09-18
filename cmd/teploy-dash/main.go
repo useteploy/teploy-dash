@@ -67,10 +67,29 @@ func run() error {
 		authUser = "admin"
 	}
 	if *noAuth {
+		// A63: no-auth is a local-development mode; binding it to a
+		// non-loopback address publishes an unauthenticated deployment-control
+		// surface. Refuse unless the operator takes the explicit opt-in env.
+		if os.Getenv("TEPLOY_DASH_UNSAFE_NO_AUTH") != "1" {
+			ip := net.ParseIP(*host)
+			if ip == nil || !ip.IsLoopback() {
+				return fmt.Errorf("--no-auth requires --host 127.0.0.1 or --host ::1 (set TEPLOY_DASH_UNSAFE_NO_AUTH=1 to override deliberately)")
+			}
+		}
 		log.Println("WARNING: --no-auth enabled. UI is accessible without authentication.")
 		authUser = ""
 		authPass = ""
 	}
+
+	// A48: single-owner guard for the data directory. Local file stores and
+	// in-memory schedulers have no cross-process coordination; a second
+	// instance pointed at the same data would race rewrites and run duplicate
+	// schedules. The lock is held for the process lifetime.
+	release, lockErr := acquireInstanceLock(*dataDir)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
 
 	// Initialize store (Nucleus if configured, JSONL fallback). The fallback is
 	// silent by default — a Nucleus outage otherwise degrades persistence,
@@ -98,6 +117,12 @@ func run() error {
 			// Same redaction on the fallback path.
 			log.Printf("Warning: failed to connect to Nucleus, falling back to file store: %v", err)
 			fileStore = store.NewFileStore(*dataDir)
+			// A47: the fallback backend gets the same initialization check as
+			// the direct file path — a data directory that cannot back a
+			// store must fail startup, not surface later per-operation.
+			if ferr := fileStore.InitErr(); ferr != nil {
+				return fmt.Errorf("file store unavailable in %s (Nucleus fallback): %w", *dataDir, ferr)
+			}
 			st = fileStore
 		} else {
 			backend = "nucleus"

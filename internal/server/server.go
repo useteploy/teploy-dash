@@ -2654,14 +2654,15 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		// Never return secrets to the client; expose only whether one is
 		// configured.
 		writeData(w, map[string]any{
-			"webhook_url":        cfg.WebhookURL,
-			"webhook_secret_set": cfg.WebhookSecret != "",
-			"smtp_host":          cfg.SMTPHost,
-			"smtp_port":          cfg.SMTPPort,
-			"smtp_user":          cfg.SMTPUser,
-			"smtp_pass_set":      cfg.SMTPPass != "",
-			"email_to":           cfg.EmailTo,
-			"email_from":         cfg.EmailFrom,
+			"webhook_url":         cfg.WebhookURL,
+			"webhook_secret_set":  cfg.WebhookSecret != "",
+			"smtp_host":           cfg.SMTPHost,
+			"smtp_port":           cfg.SMTPPort,
+			"smtp_user":           cfg.SMTPUser,
+			"smtp_pass_set":       cfg.SMTPPass != "",
+			"email_to":            cfg.EmailTo,
+			"email_from":          cfg.EmailFrom,
+			"smtp_allow_insecure": cfg.SMTPAllowInsecure,
 		})
 	case "POST":
 		// Patch DTO (A34): the GET response contains read-only view flags
@@ -2670,14 +2671,15 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		// fields are pointers: absent = preserve the stored value; present =
 		// replace (empty string clears it deliberately).
 		var patch struct {
-			WebhookURL    *string `json:"webhook_url"`
-			WebhookSecret *string `json:"webhook_secret"`
-			SMTPHost      *string `json:"smtp_host"`
-			SMTPPort      *int    `json:"smtp_port"`
-			SMTPUser      *string `json:"smtp_user"`
-			SMTPPass      *string `json:"smtp_pass"`
-			EmailTo       *string `json:"email_to"`
-			EmailFrom     *string `json:"email_from"`
+			WebhookURL        *string `json:"webhook_url"`
+			WebhookSecret     *string `json:"webhook_secret"`
+			SMTPHost          *string `json:"smtp_host"`
+			SMTPPort          *int    `json:"smtp_port"`
+			SMTPUser          *string `json:"smtp_user"`
+			SMTPPass          *string `json:"smtp_pass"`
+			EmailTo           *string `json:"email_to"`
+			EmailFrom         *string `json:"email_from"`
+			SMTPAllowInsecure *bool   `json:"smtp_allow_insecure"`
 		}
 		if err := strictDecode(r, &patch); err != nil {
 			writeError(w, "invalid request body")
@@ -2707,6 +2709,9 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		}
 		if patch.EmailFrom != nil {
 			cfg.EmailFrom = *patch.EmailFrom
+		}
+		if patch.SMTPAllowInsecure != nil {
+			cfg.SMTPAllowInsecure = *patch.SMTPAllowInsecure
 		}
 		if err := saveNotificationsConfig(cfg); err != nil {
 			writeError(w, err.Error())

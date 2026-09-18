@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -57,7 +58,9 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	// ssh-agent is the correct way to use encrypted keys non-interactively in a
 	// daemon: when SSH_AUTH_SOCK is set, offer the agent's keys. The agent
 	// connection is owned by this function and closed once the handshake is
-	// done — previously every attempt leaked the unix socket (A18).
+	// done — previously every attempt leaked the unix socket (A18). The agent
+	// socket dial is deadline-bounded so a wedged agent can't stall the
+	// connect phase outside every other bound (A29).
 	agentMethod, agentConn, hasAgent := agentAuthMethod()
 	if hasAgent {
 		auth = append(auth, agentMethod)
@@ -92,6 +95,14 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 		return nil, fmt.Errorf("dialing %s: %w", host, err)
 	}
 
+	// A29: ctx cancellation closes the owned connection for EVERY phase
+	// after the dial (handshake, session creation, command run) — a deadline
+	// on the conn alone only bounded the handshake, and a context canceled
+	// mid-handshake could leave the socket (and the caller) hanging until
+	// that deadline. stop releases the watcher on normal exit.
+	stop := closeOnCancel(ctx, conn)
+	defer stop()
+
 	// Bound the handshake with a deadline (or the ctx deadline, whichever is
 	// sooner). Cleared once connected so long-lived sessions aren't affected.
 	hsDeadline := time.Now().Add(handshakeTimeout)
@@ -108,6 +119,21 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	conn.SetDeadline(time.Time{}) // clear handshake deadline
 
 	return &Client{client: ssh.NewClient(c, chans, reqs), host: host}, nil
+}
+
+// closeOnCancel arranges for c to be closed the moment ctx is done, until the
+// returned stop function is called on normal completion (A29).
+func closeOnCancel(ctx context.Context, c io.Closer) func() {
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+		case <-done:
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // hostKeyCallback returns a known_hosts-verifying callback (trust-on-first-use
@@ -157,21 +183,34 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 // errors on a genuine mismatch (same key type, different key = possible MITM).
 // An unknown key is only accepted when its trust record DURABLY persists —
 // a failed append is a connection error, not silent acceptance (A17).
+//
+// A30: the whole verify-or-enroll decision runs under a process-wide
+// enrollment mutex, and the trust file is RE-READ inside it. The old
+// callback was built when the file was absent and could run after the file
+// changed; its verify path also skipped straight to appending whenever the
+// file couldn't be parsed, and accepted a differing key for any host that
+// merely lacked a key of the same algorithm. Now: every parse/verify error
+// is fatal (fail closed), an unknown host (knownhosts.KeyError with an
+// EMPTY want list) is the only enrollment case, and append+sync+close
+// errors are joined.
 func acceptNewHostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		enrollMu.Lock()
+		defer enrollMu.Unlock()
 		if existing, err := knownhosts.New(knownHostsPath); err == nil {
 			verifyErr := existing(hostname, remote, key)
 			if verifyErr == nil {
 				return nil
 			}
 			var keyErr *knownhosts.KeyError
-			if errors.As(verifyErr, &keyErr) && len(keyErr.Want) > 0 {
-				for _, want := range keyErr.Want {
-					if want.Key.Type() == key.Type() {
-						return verifyErr // same type, different key = real mismatch
-					}
-				}
+			if !errors.As(verifyErr, &keyErr) || len(keyErr.Want) != 0 {
+				// A known host with a different key (any algorithm) is a
+				// mismatch, not an enrollment.
+				return verifyErr
 			}
+			// Want is empty: the host is genuinely unknown — enroll below.
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("load SSH trust store %s: %w", knownHostsPath, err)
 		}
 		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
 		if err := os.MkdirAll(filepath.Dir(knownHostsPath), 0700); err != nil {
@@ -181,13 +220,17 @@ func acceptNewHostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
 		if err != nil {
 			return fmt.Errorf("recording new host key for %s: %w", hostname, err)
 		}
-		defer f.Close()
-		if _, err := fmt.Fprintln(f, line); err != nil {
-			return fmt.Errorf("recording new host key for %s: %w", hostname, err)
-		}
-		return nil
+		_, writeErr := fmt.Fprintln(f, line)
+		syncErr := f.Sync()
+		closeErr := f.Close()
+		return errors.Join(writeErr, syncErr, closeErr)
 	}
 }
+
+// enrollMu serializes trust-store enrollment within this process (A30):
+// without it, two concurrent first connections presenting DIFFERENT keys
+// could both pass the "unknown" check and both be enrolled.
+var enrollMu sync.Mutex
 
 // insecureRecordingCallback accepts every host key (the container explicitly
 // opted into insecure host-key handling on a trusted private mesh) but appends
@@ -247,8 +290,11 @@ func (c *Client) stream(ctx context.Context, cmd string, stdout, stderr io.Write
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		sess.Signal(ssh.SIGTERM)
+		// A29: close FIRST — sending a remote signal can itself block on an
+		// unresponsive peer, and the session close is what unblocks the
+		// local run; the signal is best-effort after it.
 		sess.Close()
+		sess.Signal(ssh.SIGKILL) //nolint:errcheck
 		return ctx.Err()
 	}
 }
@@ -305,7 +351,7 @@ func agentAuthMethod() (ssh.AuthMethod, io.Closer, bool) {
 	if sock == "" {
 		return nil, nil, false
 	}
-	conn, err := net.Dial("unix", sock)
+	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
 		return nil, nil, false
 	}

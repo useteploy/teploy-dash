@@ -313,6 +313,14 @@ func (s *Store) Delete(server, app string, expectedRevision *string) error {
 	return os.RemoveAll(tombstone)
 }
 
+// Structural budgets for submitted manifests (A18): recursion is bounded by
+// a depth cap and a total node cap so a hostile YAML document cannot make
+// inspection do unbounded work regardless of the body-size limit.
+const (
+	maxManifestDepth = 64
+	maxManifestNodes = 10000
+)
+
 func Validate(content []byte, app string) error {
 	if len(content) == 0 {
 		return fmt.Errorf("manifest is required")
@@ -329,7 +337,7 @@ func Validate(content []byte, app string) error {
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return fmt.Errorf("manifest root must be a YAML mapping")
 	}
-	foundApp, err := inspectNode(document.Content[0], nil, false, make(map[*yaml.Node]bool))
+	foundApp, err := inspectNode(document.Content[0], nil, false, make(map[*yaml.Node]bool), &nodeBudget{})
 	if err != nil {
 		return err
 	}
@@ -339,9 +347,28 @@ func Validate(content []byte, app string) error {
 	return nil
 }
 
-func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiting map[*yaml.Node]bool) (string, error) {
+// nodeBudget counts traversed nodes across the whole document (A18).
+type nodeBudget struct {
+	count int
+}
+
+func (n *nodeBudget) visit() error {
+	n.count++
+	if n.count > maxManifestNodes {
+		return fmt.Errorf("manifest exceeds %d nodes", maxManifestNodes)
+	}
+	return nil
+}
+
+func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiting map[*yaml.Node]bool, budget *nodeBudget) (string, error) {
 	if node == nil {
 		return "", nil
+	}
+	if err := budget.visit(); err != nil {
+		return "", err
+	}
+	if len(path) > maxManifestDepth {
+		return "", fmt.Errorf("manifest nesting exceeds %d levels", maxManifestDepth)
 	}
 	if visiting[node] {
 		return "", fmt.Errorf("manifest contains a recursive YAML alias")
@@ -349,7 +376,7 @@ func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiti
 	visiting[node] = true
 	defer delete(visiting, node)
 	if node.Kind == yaml.AliasNode {
-		return inspectNode(node.Alias, path, inheritedSensitive, visiting)
+		return inspectNode(node.Alias, path, inheritedSensitive, visiting, budget)
 	}
 	var foundApp string
 	switch node.Kind {
@@ -374,7 +401,7 @@ func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiti
 				}
 				foundApp = valueNode.Value
 			}
-			childApp, err := inspectNode(valueNode, childPath, sensitive, visiting)
+			childApp, err := inspectNode(valueNode, childPath, sensitive, visiting, budget)
 			if err != nil {
 				return "", err
 			}
@@ -384,7 +411,7 @@ func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiti
 		}
 	case yaml.SequenceNode:
 		for _, child := range node.Content {
-			childApp, err := inspectNode(child, path, inheritedSensitive, visiting)
+			childApp, err := inspectNode(child, path, inheritedSensitive, visiting, budget)
 			if err != nil {
 				return "", err
 			}
