@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/manifest"
@@ -384,6 +386,7 @@ type authGate struct {
 	legacyFile    string // auth.json — single-user file migrated on first load
 	credMu        sync.RWMutex
 	users         map[string]*dashUser
+	epochCounter  uint64 // monotonic AuthEpoch source; guarded by credMu
 	setupRequired bool
 	// Optional OIDC single sign-on. nil when not configured.
 	oidc *oidcAuth
@@ -422,10 +425,15 @@ type authGate struct {
 const bootstrapTokenTTL = 30 * time.Minute
 
 // sessionInfo is one live session: which user, what role, and when it expires.
+// epoch is the account's AuthEpoch at issuance for local-password sessions
+// (local=true); every request revalidates it against the account so a session
+// issued against revoked credentials stops working on its next use (A03).
 type sessionInfo struct {
-	user string
-	role string
-	exp  time.Time
+	user  string
+	role  string
+	exp   time.Time
+	epoch uint64
+	local bool
 }
 
 type failInfo struct {
@@ -466,14 +474,52 @@ func newAuthGate(user, pass, credFile string) *authGate {
 			log.Printf("First-run setup required. Bootstrap token (valid %s): %s", bootstrapTokenTTL, g.bootstrapToken)
 			log.Printf("Enter this token on the /setup page to create the initial admin account.")
 			log.Printf("=====================================================================")
-		} else if !errors.Is(err, errNoUsers) {
+		} else if errors.Is(err, errNoUsers) {
+			// errNoUsers with an env password set is the env-bootstrap mode:
+			// the env credential becomes the FIRST STORED ACCOUNT right now
+			// (A02). Materializing it means there is no implicit fallback
+			// authentication path left to re-enable if the account is later
+			// deleted — deleting it removes the identity entirely. The
+			// env-var password is intentionally not held to the 8-character
+			// policy: it is the operator's pre-issued credential and the old
+			// implicit path accepted it at any length.
+			name := strings.TrimSpace(user)
+			if name == "" {
+				name = "admin"
+			}
+			if err := g.materializeEnvBootstrap(name, pass); err != nil {
+				g.initErr = fmt.Errorf("materialize env bootstrap account: %w", err)
+				log.Printf("auth: %v — refusing logins", g.initErr)
+			} else {
+				log.Printf("auth: environment bootstrap account %q created (later TEPLOY_DASH_PASSWORD changes no longer reset it; change the password from Settings)", name)
+			}
+		} else {
 			g.initErr = err
 			log.Printf("auth: credential store unavailable — refusing logins: %v", err)
 		}
-		// errNoUsers with an env password set is the plain env-bootstrap
-		// mode: no stored users, the env credential is the admin. Not an error.
 	}
 	return g
+}
+
+// materializeEnvBootstrap writes the env credential's account directly (no
+// minimum-length check — see newAuthGate). Caller has confirmed no users
+// store exists at all.
+func (g *authGate) materializeEnvBootstrap(name, pass string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcryptCost)
+	if err != nil {
+		return err
+	}
+	g.credMu.Lock()
+	defer g.credMu.Unlock()
+	candidate := cloneUsersLocked(g.users)
+	candidate[name] = &dashUser{Username: name, PasswordHash: string(hash), Role: RoleAdmin, AuthEpoch: 1}
+	if err := saveUsersFile(g.usersFile, candidate, 1); err != nil {
+		return err
+	}
+	g.epochCounter = 1
+	g.users = candidate
+	g.setupRequired = false
+	return nil
 }
 
 func generateBootstrapToken() string {
@@ -499,6 +545,26 @@ func (g *authGate) checkBootstrapToken(supplied string) bool {
 }
 
 func (g *authGate) newSession(user, role string) string {
+	// Snapshot the account's current epoch so the session can be revalidated
+	// against later credential/role changes (A03). Absent accounts (tests,
+	// external principals) get epoch 0 and are treated as non-local below
+	// when no matching account exists at validation time.
+	g.credMu.RLock()
+	epoch := uint64(0)
+	local := false
+	if u, ok := g.users[user]; ok {
+		epoch = u.AuthEpoch
+		local = true
+	}
+	g.credMu.RUnlock()
+	return g.newSessionFor(user, role, epoch, local)
+}
+
+// newSessionFor issues a session with an explicit epoch/local pair. Login
+// uses the epoch captured by authenticate (the same read that verified the
+// hash), closing the issuance race where a reset lands between verification
+// and session creation (A03).
+func (g *authGate) newSessionFor(user, role string, epoch uint64, local bool) string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand failed: " + err.Error())
@@ -512,7 +578,7 @@ func (g *authGate) newSession(user, role string) string {
 			delete(g.sessions, k)
 		}
 	}
-	g.sessions[token] = &sessionInfo{user: user, role: normalizeRole(role), exp: now.Add(sessionTTL)}
+	g.sessions[token] = &sessionInfo{user: user, role: normalizeRole(role), exp: now.Add(sessionTTL), epoch: epoch, local: local}
 	return token
 }
 
@@ -643,19 +709,42 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		}
 
 		ip := g.clientIP(r)
-		if g.lockedOut(ip) {
+		cookie, cookieErr := r.Cookie(sessionCookie)
+		var session *sessionInfo
+		if cookieErr == nil {
+			session, _ = g.lookupSession(cookie.Value)
+		}
+		// A live session is validated against the CURRENT account state
+		// before it authorizes anything: a local-password session must still
+		// match the account's AuthEpoch (password/role change, deletion, or a
+		// same-name recreation all bump it), and its ROLE is read live from
+		// the account rather than trusted from issuance time. This is the
+		// security boundary; deleteUserSessions remains only as memory
+		// cleanup (A03). External (OIDC) sessions have their own principal
+		// policy and keep their issued role until the identity work lands.
+		if session != nil && session.local {
+			g.credMu.RLock()
+			u := g.users[session.user]
+			if u == nil || u.AuthEpoch != session.epoch {
+				g.credMu.RUnlock()
+				g.deleteSession(cookie.Value)
+				session = nil
+			} else {
+				session = &sessionInfo{user: session.user, role: normalizeRole(u.Role), exp: session.exp, epoch: session.epoch, local: true}
+				g.credMu.RUnlock()
+			}
+		}
+		// Login throttling keys on the client IP, so applying it before the
+		// session check punished already-authenticated users sharing a NAT
+		// with someone hammering the login form. Lockout now applies only to
+		// unauthenticated traffic (A06).
+		if session == nil && g.lockedOut(ip) {
 			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
 				jsonError(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
 			} else {
 				http.Error(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
 			}
 			return
-		}
-
-		cookie, cookieErr := r.Cookie(sessionCookie)
-		var session *sessionInfo
-		if cookieErr == nil {
-			session, _ = g.lookupSession(cookie.Value)
 		}
 		if session == nil {
 			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
@@ -726,7 +815,9 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.recordSuccess(ip)
-	g.issueSessionCookie(w, r, user.Username, user.Role)
+	// Embed the epoch captured by authenticate's single locked read; a reset
+	// landing after this point leaves the new session immediately invalid.
+	g.issueSessionCookie(w, r, user.Username, user.Role, user.AuthEpoch, true)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -734,20 +825,13 @@ func (g *authGate) handleLogin(w http.ResponseWriter, r *http.Request) {
 // handleSetup creates the initial account. Only works in setup mode. The
 // setup-required check and the account creation run under setupMu as one
 // critical section so two concurrent bootstrap-token holders cannot both pass
-// the precondition and create different initial admins (A03).
+// the precondition and create different initial admins (A03). The request
+// body is decoded BEFORE the lock is taken — setup is rare and
+// contention-free, but a slow/stalled body must not hold the only writer.
 func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	g.setupMu.Lock()
-	defer g.setupMu.Unlock()
-	g.credMu.RLock()
-	inSetup := g.setupRequired
-	g.credMu.RUnlock()
-	if !inSetup {
-		jsonError(w, "account already configured", http.StatusConflict)
 		return
 	}
 	var body struct {
@@ -758,6 +842,15 @@ func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := strictDecode(r, &body); err != nil {
 		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	g.setupMu.Lock()
+	defer g.setupMu.Unlock()
+	g.credMu.RLock()
+	inSetup := g.setupRequired
+	g.credMu.RUnlock()
+	if !inSetup {
+		jsonError(w, "account already configured", http.StatusConflict)
 		return
 	}
 	if !g.checkBootstrapToken(body.BootstrapToken) {
@@ -779,7 +872,10 @@ func (g *authGate) handleSetup(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	g.issueSessionCookie(w, r, body.Username, RoleAdmin)
+	g.credMu.RLock()
+	epoch := g.users[body.Username].AuthEpoch
+	g.credMu.RUnlock()
+	g.issueSessionCookie(w, r, body.Username, RoleAdmin, epoch, true)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -805,7 +901,12 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if _, ok := g.authenticate(session.user, body.CurrentPassword); !ok {
+	// authenticate returns the account's AuthEpoch alongside the verdict; the
+	// change below compares against it, so an administrative reset landing
+	// between verification and commit fails this request instead of
+	// overwriting the newer credential (A03).
+	user, ok := g.authenticate(session.user, body.CurrentPassword)
+	if !ok {
 		jsonError(w, "current password is incorrect", http.StatusUnauthorized)
 		return
 	}
@@ -813,12 +914,23 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "passwords do not match", http.StatusBadRequest)
 		return
 	}
-	// A session identity with no stored account is the env-bootstrap admin;
-	// their first password change persists the account (admin role). Everyone
-	// else must already exist — an unknown name is an error, not a silent
-	// account creation (A03).
-	if err := g.setPasswordMigratingEnv(session.user, body.NewPassword); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+	// A session identity with no stored account is the (pre-materialization)
+	// env-bootstrap admin; their first password change persists the account
+	// (admin role). Since A02 the env credential is materialized at startup,
+	// so this branch is a compatibility fallback — everyone else is a stored
+	// user and gets the compare-and-swap reset (A01/A03).
+	var err error
+	if user.AuthEpoch != 0 || g.hasStoredUser(session.user) {
+		err = g.setPasswordCAS(session.user, user.AuthEpoch, body.NewPassword, true)
+	} else {
+		err = g.setPasswordMigratingEnv(session.user, body.NewPassword)
+	}
+	if err != nil {
+		if errors.Is(err, ErrStaleEpoch) {
+			jsonError(w, err.Error(), http.StatusConflict)
+		} else {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 	// Invalidate only this user's sessions — other users stay signed in.
@@ -831,8 +943,8 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request, user, role string) {
-	token := g.newSession(user, role)
+func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request, user, role string, epoch uint64, local bool) {
+	token := g.newSessionFor(user, role, epoch, local)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
@@ -842,6 +954,14 @@ func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request, us
 		Secure:   g.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+// hasStoredUser reports whether a local account exists under the name.
+func (g *authGate) hasStoredUser(name string) bool {
+	g.credMu.RLock()
+	defer g.credMu.RUnlock()
+	_, ok := g.users[name]
+	return ok
 }
 
 func (g *authGate) secureCookie(r *http.Request) bool {

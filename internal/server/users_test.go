@@ -3,10 +3,13 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -220,25 +223,141 @@ func TestEnvBootstrapAdmin(t *testing.T) {
 	}
 }
 
-// A01: once a stored account shadows the env username, the stored account is
-// authoritative. The old environment password must no longer sign in — with a
-// blank username OR the explicit name — and the stored role wins.
+// A02: the env bootstrap credential is materialized into a STORED account at
+// startup. Once the operator changes that password (or deletes the account
+// after adding another admin), the original env password is gone for good —
+// there is no implicit fallback authentication path left to re-enable.
 func TestEnvBootstrapShadowedByStoredAccount(t *testing.T) {
 	dir := t.TempDir()
 	g := newAuthGate("admin", "bootpass", filepath.Join(dir, "auth.json"))
+	if g.setupRequired {
+		t.Fatal("env bootstrap should not require setup")
+	}
+	// Materialized at startup: the account exists, as an admin.
+	if _, ok := g.authenticate("admin", "bootpass"); !ok {
+		t.Fatal("materialized env account must authenticate with the env password")
+	}
+	if err := g.setPassword("admin", "storedpass1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := g.authenticate("admin", "bootpass"); ok {
+		t.Error("old env password still authenticates after a password change")
+	}
+	// Deleting the account (possible once a second admin exists) must NOT
+	// resurrect the env password — the pre-A02 failure mode.
+	if err := g.createUser("admin2", "secondpass1", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.deleteUser("admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := g.authenticate("admin", "bootpass"); ok {
+		t.Error("retired env password re-enabled after deleting the materialized account")
+	}
+	// The store is canonical: a restart keeps the deleted account deleted
+	// and keeps the second admin.
+	g2 := newAuthGate("admin", "bootpass", filepath.Join(dir, "auth.json"))
+	if _, ok := g2.authenticate("admin2", "secondpass1"); !ok {
+		t.Error("second admin lost after reload")
+	}
+	if _, ok := g2.authenticate("admin", "bootpass"); ok {
+		t.Error("retired env password re-enabled after restart")
+	}
+}
+
+// A02: an environment username that collides with an EXISTING store never
+// authenticates with the env password — the store wins once it exists.
+func TestEnvIgnoredWhenStoreExists(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "auth.json")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	g := newAuthGate("", "", credFile)
 	if err := g.createUser("admin", "storedpass1", RoleEditor); err != nil {
 		t.Fatal(err)
 	}
+	// Restart with an env password set for a name that already exists.
+	g2 := newAuthGate("admin", "envpass123", credFile)
+	if _, ok := g2.authenticate("admin", "envpass123"); ok {
+		t.Error("env password authenticated against an existing stored account")
+	}
+	if u, ok := g2.authenticate("admin", "storedpass1"); !ok || u.Role != RoleEditor {
+		t.Fatalf("stored account = %+v, %v; want editor, true", u, ok)
+	}
+}
 
-	if _, ok := g.authenticate("", "bootpass"); ok {
-		t.Error("blank-username login with the old env password succeeded despite a stored account")
+// A03: a session issued before a password reset (or role change / deletion /
+// same-name recreation) stops authorizing on its next request — the epoch
+// embedded at issuance no longer matches the account.
+func TestSessionEpochInvalidation(t *testing.T) {
+	g := newTestGate(t)
+	if err := g.createUser("alice", "alicepass1", RoleAdmin); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := g.authenticate("admin", "bootpass"); ok {
-		t.Error("named login with the old env password succeeded despite a stored account")
+	if err := g.createUser("bob", "bobpass123", RoleEditor); err != nil {
+		t.Fatal(err)
 	}
-	u, ok := g.authenticate("", "storedpass1")
-	if !ok || u.Role != RoleEditor {
-		t.Fatalf("blank-username login with the stored password = %+v, %v; want editor, true", u, ok)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	h := g.wrap(mux)
+
+	// Role read is live: a session issued as editor upgrades immediately
+	// after an admin promotes the account, without re-login.
+	promote := func() {
+		if err := g.setRole("bob", RoleAdmin); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	do := func(token string) int {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/users", nil) // admin-only route
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	// Issue bob's session the way login does: epoch captured from authenticate.
+	bob, ok := g.authenticate("bob", "bobpass123")
+	if !ok {
+		t.Fatal("bob must authenticate")
+	}
+	token := g.newSessionFor("bob", "bobpass123", bob.AuthEpoch, true)
+	if code := do(token); code != http.StatusForbidden {
+		t.Fatalf("editor session on admin route = %d, want 403", code)
+	}
+	// A role change bumps the epoch too: the demotion/promotion takes effect
+	// on the account's very next request — the old session is revoked, not
+	// merely re-rated.
+	promote()
+	if code := do(token); code != http.StatusUnauthorized {
+		t.Fatalf("session after role change = %d, want 401 (revoked)", code)
+	}
+
+	// Password reset invalidates sessions issued against the old credential.
+	if err := g.setPassword("bob", "newpass123"); err != nil {
+		t.Fatal(err)
+	}
+	if code := do(token); code != http.StatusUnauthorized {
+		t.Fatalf("session after password reset = %d, want 401", code)
+	}
+
+	// Deletion, then recreation under the SAME name: the new account's epoch
+	// is strictly higher, so no earlier session can ride the identity.
+	token2 := g.newSessionFor("bob", "newpass123", 0, true)
+	if err := g.deleteUser("bob"); err != nil {
+		t.Fatal(err)
+	}
+	if code := do(token2); code != http.StatusUnauthorized {
+		t.Fatalf("session after deletion = %d, want 401", code)
+	}
+	if err := g.createUser("bob", "bobpass999", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if code := do(token2); code != http.StatusUnauthorized {
+		t.Fatalf("stale-epoch session on recreated account = %d, want 401", code)
 	}
 }
 
@@ -484,5 +603,84 @@ func TestDeleteUser_PersistFailureLeavesUserPresent(t *testing.T) {
 	g.credMu.RUnlock()
 	if !stillPresent {
 		t.Error("alice removed from live state despite failed persistence")
+	}
+}
+
+// A01: a stored user (setup-created admin, ordinary editor) can change their
+// OWN password through the real handler; previously every change routed
+// through the env-migration helper and failed with "user not found" whenever
+// no env credential was configured. The change must invalidate other
+// sessions, accept the new password, and reject the old one.
+func TestChangePasswordStoredUserHTTTP(t *testing.T) {
+	g := newTestGate(t)
+	if err := g.createUser("alice", "alicepass1", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/auth/password", g.handleChangePassword)
+	h := g.wrap(mux)
+
+	post := func(token, current, next string) int {
+		body := fmt.Sprintf(`{"current_password":%q,"new_password":%q,"confirm_password":%q}`, current, next, next)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/auth/password", strings.NewReader(body))
+		if token != "" {
+			req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+		}
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	alice, ok := g.authenticate("alice", "alicepass1")
+	if !ok {
+		t.Fatal("alice must authenticate")
+	}
+	token := g.newSessionFor("alice", "alicepass1", alice.AuthEpoch, true)
+	if code := post(token, "alicepass1", "newpass123"); code != http.StatusOK {
+		t.Fatalf("self password change = %d, want 200", code)
+	}
+	if _, ok := g.authenticate("alice", "newpass123"); !ok {
+		t.Error("new password rejected after change")
+	}
+	if _, ok := g.authenticate("alice", "alicepass1"); ok {
+		t.Error("old password accepted after change")
+	}
+	// The session used for the change was invalidated by it.
+	if code := post(token, "newpass123", "another123"); code != http.StatusUnauthorized {
+		t.Fatalf("pre-change session still valid = %d, want 401", code)
+	}
+}
+
+// A03: a self-service password change racing an administrative reset fails
+// closed — the CAS on the captured epoch returns a conflict instead of
+// silently overwriting the newer credential. The interleave is the window
+// inside the handler (verification done, commit not yet run), so it is
+// simulated at the unit boundary the handler drives.
+func TestChangePasswordCASConflict(t *testing.T) {
+	g := newTestGate(t)
+	if err := g.createUser("alice", "alicepass1", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	// Handler step 1: authenticate captures the account and its epoch.
+	alice, ok := g.authenticate("alice", "alicepass1")
+	if !ok {
+		t.Fatal("alice must authenticate")
+	}
+	// ...an administrative reset lands inside the window...
+	if err := g.setPassword("alice", "adminreset1"); err != nil {
+		t.Fatal(err)
+	}
+	// Handler step 2: the self-change commits against the stale epoch.
+	err := g.setPasswordCAS("alice", alice.AuthEpoch, "selfnewpass1", true)
+	if !errors.Is(err, ErrStaleEpoch) {
+		t.Fatalf("stale self-change err = %v, want ErrStaleEpoch", err)
+	}
+	// The admin reset survives untouched.
+	if _, ok := g.authenticate("alice", "adminreset1"); !ok {
+		t.Error("admin reset was overwritten by the stale self-change")
+	}
+	// A matching epoch still succeeds.
+	if err := g.setPasswordCAS("alice", 0, "freshpass1", false); err != nil {
+		t.Fatalf("unconditional reset failed: %v", err)
 	}
 }

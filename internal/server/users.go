@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,15 +122,25 @@ func currentUser(r *http.Request) (*sessionInfo, bool) {
 // ── User store ────────────────────────────────────────────────────────────
 
 // dashUser is one dashboard account. Only the bcrypt hash is persisted.
+// AuthEpoch is a per-account revision of the credential/role state: it is
+// assigned from a store-wide monotonic counter on every create, password
+// change, or role change, and embedded in sessions at issuance. A session
+// whose epoch no longer matches the account was issued against revoked
+// state and fails validation on its next request (A03).
 type dashUser struct {
 	Username     string `json:"username"`
 	PasswordHash string `json:"password_hash"`
 	Role         string `json:"role"`
+	AuthEpoch    uint64 `json:"auth_epoch,omitempty"`
 }
 
-// usersFileFormat is the on-disk shape of users.json.
+// usersFileFormat is the on-disk shape of users.json. EpochCounter is the
+// store-wide monotonic source of AuthEpoch values; advancing it on deletion
+// (with no account to carry the number) guarantees a recreated username gets
+// an epoch strictly higher than any session the previous account issued.
 type usersFileFormat struct {
-	Users []dashUser `json:"users"`
+	Users        []dashUser `json:"users"`
+	EpochCounter uint64     `json:"epoch_counter,omitempty"`
 }
 
 // legacyCredFile is the pre-RBAC single-user auth.json shape, read once to
@@ -174,6 +183,7 @@ func (g *authGate) loadUsers() error {
 			u.Role = normalizeRole(u.Role)
 			g.users[u.Username] = &u
 		}
+		g.epochCounter = f.EpochCounter
 		g.setupRequired = len(g.users) == 0
 		if len(g.users) == 0 {
 			return fmt.Errorf("no users configured in %s", g.usersFile)
@@ -223,19 +233,20 @@ func (g *authGate) loadUsers() error {
 // already the state that should be durable — see saveUsersFile for the
 // copy-on-write path every mutating handler below actually uses.
 func (g *authGate) saveUsersLocked() error {
-	return saveUsersFile(g.usersFile, g.users)
+	return saveUsersFile(g.usersFile, g.users, g.epochCounter)
 }
 
-// saveUsersFile writes the given user map to path atomically. Free-standing
-// (doesn't touch authGate state) so a mutation can persist a CANDIDATE map
-// and only publish it into the live g.users after the write succeeds —
-// otherwise a failed rename/write left the in-memory mutation applied while
-// the handler reported an error, so the running process and users.json
-// silently diverged (DASH-005). For createUser specifically this also keeps
-// g.setupRequired from flipping to false before the first account is
-// durably saved (DASH-006).
-func saveUsersFile(path string, users map[string]*dashUser) error {
+// saveUsersFile writes the given user map and epoch counter to path
+// atomically. Free-standing (doesn't touch authGate state) so a mutation can
+// persist a CANDIDATE map and only publish it into the live g.users after
+// the write succeeds — otherwise a failed rename/write left the in-memory
+// mutation applied while the handler reported an error, so the running
+// process and users.json silently diverged (DASH-005). For createUser
+// specifically this also keeps g.setupRequired from flipping to false before
+// the first account is durably saved (DASH-006).
+func saveUsersFile(path string, users map[string]*dashUser, epochCounter uint64) error {
 	var f usersFileFormat
+	f.EpochCounter = epochCounter
 	for _, u := range users {
 		f.Users = append(f.Users, *u)
 	}
@@ -271,9 +282,13 @@ func cloneUsersLocked(users map[string]*dashUser) map[string]*dashUser {
 // (against a dummy hash for unknown users) so response time doesn't reveal
 // which usernames exist. A blank username resolves to the configured
 // environment user BEFORE the stored-account lookup, so a stored account
-// shadowing the env name always wins: once the operator has changed the stored
-// password or role, the old environment password can no longer sign in as that
-// account (A01).
+// shadowing the env name always wins (A01).
+//
+// There is deliberately NO environment-password fallback anymore (A02): the
+// env credential is materialized into a stored account once at startup (see
+// newAuthGate), so deleting that account removes the identity entirely
+// instead of resurrecting a retired bootstrap password. The returned dashUser
+// carries the account's AuthEpoch so login can embed it in the session (A03).
 func (g *authGate) authenticate(username, password string) (*dashUser, bool) {
 	envUser := g.user
 	if envUser == "" {
@@ -289,17 +304,9 @@ func (g *authGate) authenticate(username, password string) (*dashUser, bool) {
 
 	if u != nil {
 		if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) == nil {
-			return &dashUser{Username: u.Username, Role: normalizeRole(u.Role)}, true
+			return &dashUser{Username: u.Username, Role: normalizeRole(u.Role), AuthEpoch: u.AuthEpoch}, true
 		}
 		return nil, false
-	}
-
-	// Env-var bootstrap: a single implicit admin, used only when no stored
-	// account shadows the name (e.g. TEPLOY_DASH_PASSWORD in Docker).
-	if g.pass != "" && username == envUser {
-		if subtle.ConstantTimeCompare([]byte(password), []byte(g.pass)) == 1 {
-			return &dashUser{Username: envUser, Role: RoleAdmin}, true
-		}
 	}
 
 	// Spend equal CPU on a miss to hide whether the username exists.
@@ -329,10 +336,12 @@ func (g *authGate) createUser(username, password, role string) error {
 		return fmt.Errorf("user %q already exists", username)
 	}
 	candidate := cloneUsersLocked(g.users)
-	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: normalizeRole(role)}
-	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+	epoch := g.epochCounter + 1
+	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: normalizeRole(role), AuthEpoch: epoch}
+	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
 		return err
 	}
+	g.epochCounter = epoch
 	g.users = candidate
 	g.setupRequired = false
 	return nil
@@ -343,6 +352,20 @@ func (g *authGate) createUser(username, password, role string) error {
 // turned an ordinary admin reset against a typo'd name into accidental admin
 // creation (A03). Env-bootstrap migration has its own method below.
 func (g *authGate) setPassword(username, password string) error {
+	return g.setPasswordCAS(username, 0, password, false)
+}
+
+// ErrStaleEpoch reports a compare-and-swap password change whose captured
+// account epoch no longer matches — an administrative reset (or another
+// self-change) landed between verification and commit (A03).
+var ErrStaleEpoch = errors.New("account changed since the password was verified; try again")
+
+// setPasswordCAS replaces an existing user's password, requiring the account's
+// current AuthEpoch to equal expected when checkEpoch is set. The caller
+// captures the epoch from the SAME authenticated read that verified the
+// current password, so an interleaved reset fails the change instead of
+// silently overwriting the newer credential.
+func (g *authGate) setPasswordCAS(username string, expected uint64, password string, checkEpoch bool) error {
 	if len(password) < 8 {
 		return fmt.Errorf("password must be at least 8 characters")
 	}
@@ -359,11 +382,17 @@ func (g *authGate) setPassword(username, password string) error {
 	if u == nil {
 		return fmt.Errorf("user not found")
 	}
+	if checkEpoch && u.AuthEpoch != expected {
+		return ErrStaleEpoch
+	}
 	candidate := cloneUsersLocked(g.users)
+	epoch := g.epochCounter + 1
 	candidate[username].PasswordHash = string(hash)
-	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+	candidate[username].AuthEpoch = epoch
+	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
 		return err
 	}
+	g.epochCounter = epoch
 	g.users = candidate
 	return nil
 }
@@ -396,18 +425,23 @@ func (g *authGate) setPasswordMigratingEnv(username, password string) error {
 	if u := g.users[username]; u != nil {
 		// A stored account appeared between authenticate and now — plain reset.
 		candidate := cloneUsersLocked(g.users)
+		epoch := g.epochCounter + 1
 		candidate[username].PasswordHash = string(hash)
-		if err := saveUsersFile(g.usersFile, candidate); err != nil {
+		candidate[username].AuthEpoch = epoch
+		if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
 			return err
 		}
+		g.epochCounter = epoch
 		g.users = candidate
 		return nil
 	}
 	candidate := cloneUsersLocked(g.users)
-	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: RoleAdmin}
-	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+	epoch := g.epochCounter + 1
+	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: RoleAdmin, AuthEpoch: epoch}
+	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
 		return err
 	}
+	g.epochCounter = epoch
 	g.users = candidate
 	g.setupRequired = false
 	return nil
@@ -427,15 +461,20 @@ func (g *authGate) setRole(username, role string) error {
 		return fmt.Errorf("cannot demote the last admin")
 	}
 	candidate := cloneUsersLocked(g.users)
+	epoch := g.epochCounter + 1
 	candidate[username].Role = role
-	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+	candidate[username].AuthEpoch = epoch
+	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
 		return err
 	}
+	g.epochCounter = epoch
 	g.users = candidate
 	return nil
 }
 
 // deleteUser removes an account, refusing to remove the last remaining admin.
+// The epoch counter still advances so a later account created under the same
+// name gets an epoch no earlier session could carry (A03).
 func (g *authGate) deleteUser(username string) error {
 	g.credMu.Lock()
 	defer g.credMu.Unlock()
@@ -448,9 +487,11 @@ func (g *authGate) deleteUser(username string) error {
 	}
 	candidate := cloneUsersLocked(g.users)
 	delete(candidate, username)
-	if err := saveUsersFile(g.usersFile, candidate); err != nil {
+	epoch := g.epochCounter + 1
+	if err := saveUsersFile(g.usersFile, candidate, epoch); err != nil {
 		return err
 	}
+	g.epochCounter = epoch
 	g.users = candidate
 	return nil
 }

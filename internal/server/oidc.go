@@ -500,7 +500,10 @@ func (g *authGate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	role := o.resolveRole(claims)
 	g.recordSuccess(g.clientIP(r))
-	g.issueSessionCookie(w, r, username, role)
+	// External principal: no local account, no epoch to revalidate; the role
+	// derives from claims at issuance (issuer+sub identity is the deferred
+	// A04 redesign).
+	g.issueSessionCookie(w, r, username, role, 0, false)
 	http.Redirect(w, r, flow.next, http.StatusFound)
 }
 
