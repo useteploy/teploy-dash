@@ -2,13 +2,15 @@
 
 Unresolved findings for this repository from the ChatGPT-led audit series
 (2026-09-09 through 2026-09-11 passes 1-5; register: teploy-neutron-lullmail
-expanded audit — and the 2026-09-17 source-code audit, pass 6, registered
-below). Fields are quoted from the audit register; line references point at
-the review commits listed per item where recorded.
+expanded audit — the 2026-09-17 source-code audit, pass 6, and the 2026-09-17
+round-2 audit, pass 7, registered below). Fields are quoted from the audit
+register; line references point at the review commits listed per item where
+recorded.
 
 Open items: 1 P2 improvement, 18 deferred findings (design/architecture),
 2 upstream (teploy-cli) items, plus recorded residuals inside partially-fixed
-findings (2026-09-17 pass).
+findings (2026-09-17 pass 6). Round-2 (pass 7) deferrals are folded into the
+same deferral list below.
 
 ## useteploy__teploy-dash-04 - P2 - Open improvement
 
@@ -244,3 +246,224 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
   packages ok (one unreproduced timing flake in internal/server observed on
   a single loaded run, clean on 5 consecutive re-runs); `make build` ok;
   CI now enforces race + gofmt + tidy gates. No push performed.
+
+## 2026-09-17 round-2 source-code audit (pass 7)
+
+Register for the independent round-2 audit pinned at reviewed commit
+`1633875ea4cb85db58cbb9653eb9eb0fdeaa622d` (64 findings, A01-A64; finding
+IDs below are that report's, NOT pass 6's — the two series overlap in
+numbering but not in content). The report itself is register-only (not
+copied into this repository).
+
+Context at remediation time: the two items dash had reported upstream were
+FIXED in teploy-cli — UPSTREAM-1 became the stdin secret contract
+(`env set KEY --stdin`, `kv set KEY --stdin`, `template install
+--var-stdin`) and UPSTREAM-2 became atomic `server rename` / `server
+update` with typed ErrServerExists / ErrServerNotFound. Where the report
+called for it, dash ADOPTED both (see A11 and A38 below); adoption on the
+dash side was ours to do.
+
+### Fixed in this pass (44)
+
+- A01 - stored users can change their own passwords: handleChangePassword
+  dispatches to the CAS reset instead of the env-migration helper.
+- A02 - env bootstrap is materialized into a stored admin account once at
+  startup; the implicit env-password authentication branch is deleted, so
+  deleting the account removes the identity instead of re-enabling a
+  retired bootstrap password (survives restart).
+- A03 - per-account AuthEpoch assigned from a persisted monotonic counter
+  (advanced across deletion); sessions embed the epoch captured by
+  authenticate's locked read and are revalidated with live role on every
+  request; self password changes compare-and-swap (409 on conflict).
+- A05 - /api/auth/me registered in every mode; --no-auth answers an
+  explicit {mode:"disabled", full-capability} envelope; frontend consumers
+  updated.
+- A07 - bounded route-safe username grammar for new accounts; unknown
+  roles rejected at the create/update boundary; duplicate group/project
+  rename destinations answer 409.
+- A08 - recovery never auto-replays persisted queued records (post-rename
+  dir-sync uncertainty made an errored enqueue's record visible); queued
+  and running records surface as interrupted for explicit retry.
+- A09 - Cancel persists a cancel_requested record before acknowledging;
+  recovery resolves it as canceled; setRunning refuses to start one.
+- A10 - redactedRequest preserves empty template variable values.
+- A11 (UPSTREAM-1 adoption + ours) - env set / kv set / template vars move
+  onto the CLI's stdin contract with one-time capability probes and legacy
+  fallback; RunStream/RunContext/RunWithStdin/checkExit errors never embed
+  the argv; line redaction covers multiline secret components.
+- A14 - operation records persist the admitted host/user snapshot;
+  execution re-resolves and fails ops whose alias was repointed or removed.
+- A18 - manifest inspection bounded by depth (64) and node-count (10k)
+  budgets (aliases were already cycle-checked).
+- A20 - API minimum monitor interval matches the runner's 10s floor; HTTP
+  monitor targets structurally validated at the boundary.
+- A21 - history cleanup copies retained records as original bytes and
+  aborts on malformed lines (the old corrupt branch re-encoded a zero-value
+  record over the evidence).
+- A24 - restore-test upserts take a config-only DTO rejecting result
+  fields; SaveRestoreTestResult (both backends) applies a result only when
+  the stored target identity matches the run's; toggle posts config-only.
+- A25 (part) - per-test single-flight claim for manual + scheduled runs;
+  restarted schedules derive their first fire from the persisted last-run
+  time (overdue runs fire promptly, fresh ones wait the true remainder).
+- A26 - transport failures are failed verifications even against a lying
+  ok:true stdout (the adapter separates the CLI's documented nonzero-exit
+  verdict semantics from transport errors); failure branches clear stale
+  metric fields; unpersisted results send no alert.
+- A27 - RunContext/RunWithStdin share one bounded, context-aware primitive
+  (4 MiB/1 MiB capture budgets that kill the child and surface the overflow
+  cause, process-group cleanup, WaitDelay).
+- A28 - a scanner failure terminates the child process group immediately
+  and is returned as the primary error.
+- A30 - TOFU enrollment under a process mutex with the trust file re-read
+  inside it; every parse/verify error fatal; only a genuinely unknown host
+  (empty Want) enrolls; append/sync/close errors joined.
+- A34 (part) - resolveServers returns an error; failed discovery no longer
+  selects the local-state path or serves an empty fleet as success.
+- A35 - writeRawJSON forwards exact validated bytes (no interface{}
+  round-trip corrupting integers above 2^53).
+- A36 (part) - unmatched /api/ routes return a JSON 404; the SPA fallback
+  serves GET/HEAD only.
+- A38 (UPSTREAM-2 adoption + ours) - server edit uses the CLI's atomic
+  `server rename`/`server update`; typed errors map to 409/404; the
+  remove+add emulation and its unreliable rollback are deleted.
+- A40 - the shared homepage list is validated before replace (bounded
+  count, unique route-safe IDs, absolute credential-free HTTP(S) URLs,
+  #RRGGBB colors, bounded name/description/icon).
+- A41 (part) - tools/call validates raw arguments against the advertised
+  top-level schema (unknown fields and nulls rejected before any effect).
+- A42 (part) - MCP-Protocol-Version header validated; request IDs follow
+  the string/number contract with null answered -32600.
+- A45 - SMTP requires STARTTLS unless smtp_allow_insecure is set; auth
+  configured without server AUTH fails loudly; net.JoinHostPort.
+- A46 (part) - monitor and restore runners join in-flight work (bounded,
+  loud on stragglers) before shutdown closes the store.
+- A47 (part) - the Nucleus-fallback file store gets the same InitErr
+  startup check as the direct path.
+- A48 - exclusive flock on <dataDir>/.instance.lock refuses a second
+  dashboard instance over the same data directory (unix).
+- A49 - the app detail page pins an immutable resource snapshot, watches
+  route identity, and reads every path/action (incl. remove confirmation)
+  from the snapshot.
+- A50 - pollers/listeners install only if the component survived its
+  initial load; late responses from superseded resources don't write.
+- A52 - Links editor commits candidates; failed saves keep draft and
+  committed list; toggles/removals roll back.
+- A53 - the operation stream interprets status events from the event data
+  and closes after an explicit replay-complete marker (added server-side);
+  replaced-stream guards.
+- A54 - KV reveal state uses own-property checks; accessory changes reset
+  the scope; TTLs validated as nonnegative integers.
+- A56 - notification secrets get keep/replace/clear controls.
+- A57 - resource IDs from crypto.getRandomValues (insecure-context safe);
+  restore dialog no longer references undefined editingId state.
+- A59 - CI, release, and source Dockerfile build on Go 1.27.1.
+- A61 - installer downloads archive + checksums from the same resolved
+  tag, requires exactly one matching row, verifies before extraction,
+  bounded curl timeouts/retries.
+- A62 - absolute-charset prefix validation; destination dir created; the
+  unit's ExecStart uses the real prefix and binds loopback by default;
+  credentials written privately (umask 077 + install 0600); rotation
+  guidance matches the materialized-account behavior.
+- A63 - --no-auth refuses non-loopback binds without the explicit
+  TEPLOY_DASH_UNSAFE_NO_AUTH=1 override.
+- A64 - source Dockerfile accepts VERSION/VCS_REF/BUILD_DATE build args
+  and injects them via ldflags.
+- A06 (part) - setup decodes its body before taking setupMu and gets the
+  same-origin check; the per-IP lockout applies only to unauthenticated
+  traffic. A04 (part) - the OIDC exchange/verify phase has a dedicated
+  15s deadline. A22 (part) - undecodable store entries are logged as
+  skipped rather than silently dropped.
+
+### False positives / already-correct (2)
+
+- A15's lock/unlock MCP claim (partial): teploy_lock/teploy_unlock already
+  route through the same validated builders the lifecycle tools use; the
+  report's own minimum (reusing operation kinds) is satisfied for the MCP
+  surface. The remaining direct-CLI env/kv/lock paths are deferred below.
+- A28's WaitDelay note re RunStream: pass 6 landed WaitDelay + readers-
+  before-Wait; the genuinely new part (scan-failure cancellation) is fixed
+  above.
+
+### Deferred (round-2 items, with rationale; folded into the open list)
+
+- A04 (residual) - OIDC identity from issuer+sub, canonical callback URL
+  validation: same session-identity redesign as pass-6 A08's residual.
+- A06 (residual) - configured-public-origin comparisons and login-admission
+  budgeting (bcrypt concurrency cap): needs an origin config surface and
+  load measurements; the lockout/NAT and setup gaps are fixed.
+- A12 - FIFO scheduler with durable enqueue sequence + admission budgets:
+  scheduler redesign; the per-target semaphore prevents same-target
+  overlap but does not order enqueues (same as pass-6 A27).
+- A13 - idempotency keys namespaced per principal and wired into UI/MCP +
+  actor-attribution fields: additive API + operation-schema change needing
+  client coordination.
+- A15 (residual) - routing env/kv/lock mutations through the operation
+  queue and unifying template-vs-app lock targets: single-mutation-boundary
+  redesign; the env/kv direct paths are single SSH round trips with typed
+  errors today, and the queue conversion changes the frontend contract.
+- A16 - journal persistence, retention, gap negotiation: open item
+  useteploy__teploy-dash-04 above.
+- A17 - manifest revision leases vs admitted operations: with no
+  auto-replay (A08) the crash case is closed; the live delete-while-queued
+  case fails visibly at execution. Lease coordination remains design work
+  (same as pass-6 A28).
+- A19 - conditional (revision-guarded) check commits in both stores:
+  store-schema change; the generation fence covers the common
+  interleavings (same as pass-6 A12).
+- A22 (residual) - partial-error envelopes for list reads, bounded
+  recent-history index for status aggregation, sub-ms precision
+  normalization across backends: API-contract redesign.
+- A23 - configuration-persist and runner-reconcile as one ordered
+  transition: per-resource coordinator redesign.
+- A25 (residual) - persisting next_due_at as durable state (vs deriving
+  from LastRunAt as landed): store-schema addition.
+- A29 (residual) - bounded Client.Run output and agent-signing deadlines:
+  the SSH read paths that matter (fleet/logs) are bounded elsewhere;
+  remaining hardening rides the A22/A31 envelope work.
+- A31 - remote-read observation envelope, exact container identity,
+  stderr surfacing: protocol redesign across remote/machine.
+- A32/A33 - WebSocket replacement and full stream framing/revocation: same
+  deferral as pass-6 A24 (SSE fallback exists and is same-origin-checked).
+- A37 - groups optimistic concurrency + composite app identity: the
+  groups.json schema is shared with the CLI; coordinated migration
+  (same as pass-6 A35).
+- A39 - store file/dir permission migration (0700/0600): needs a migration
+  note and CLI coordination (same as pass-6 A32 residual).
+- A43 (Advisory) - explicit secret/scope/lifetime role matrix and token
+  expiry/scopes: policy decision; viewer value access remains documented
+  and tested behavior.
+- A44 - durable bounded alert outbox with retries: reliability subsystem
+  (same as pass-6 A40).
+- A47 (residual) - readiness vs liveness endpoints and degraded-persistence
+  reporting: health-contract redesign (same as pass-6 A39 residual).
+- A51 - frontend load/empty/partial/stale state model: UI-state redesign;
+  the loaders with user-facing impact (fleet, links, notifications, detail
+  identity) got targeted honesty fixes in this pass.
+- A55 - monitor selection as a canonical URL route: frontend routing
+  refactor (same as pass-6 A47 residual).
+- A58 - accessibility pass: same as pass-6 A49.
+- A60 - browser/installer/CLI-contract CI, action/image digest pinning:
+  same as pass-6 A50 residual.
+
+### Round-2 gates
+
+`go vet ./...` clean; `go test ./...` all 12 packages ok; `go test -race
+-count=1 ./...` all 12 packages ok; `make build` ok. Two environment-bound
+timing issues were investigated to root cause and are NOT regressions:
+TestRunStreamEmitsBothStreamsAndCancelsProcessGroup hangs whenever macOS
+group-kill misses a just-forked background child (a plain-Go reproduction
+with zero dash code hangs identically on this host; CI runs Linux) — the
+test now preflights the host's group-kill behavior and skips with an
+explicit reason where the platform can't do it, keeping the full assertion
+on Linux; and one internal/server TempDir-cleanup race in
+TestMCPMutationsRouteThroughOperations was fixed by waiting for terminal
+operation records. No push performed.
+
+## Resolution log (pass 7)
+
+- 2026-09-17 (pass 7, round-2 audit at 1633875): 44 findings fixed (14
+  partially, residuals recorded), 2 false-positive/partial claims
+  dismissed with evidence, 18 deferred with rationale (merged above);
+  UPSTREAM-1 and UPSTREAM-2 adoptions landed (A11, A38). Conventional
+  commits reference the round-2 finding IDs.

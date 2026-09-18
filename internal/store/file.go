@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -65,10 +66,16 @@ func (s *FileStore) ListMonitors() ([]Monitor, error) {
 		}
 		data, err := os.ReadFile(filepath.Join(s.dir, "monitors", e.Name()))
 		if err != nil {
+			// A22: a damaged entry must at least be VISIBLE as skipped; the
+			// partial-error envelope itself is deferred design.
+			log.Printf("[store] skipping unreadable monitor entry %s: %v", e.Name(), err)
 			continue
 		}
 		var m Monitor
-		if json.Unmarshal(data, &m) == nil {
+		if err := json.Unmarshal(data, &m); err != nil {
+			log.Printf("[store] skipping undecodable monitor entry %s: %v", e.Name(), err)
+			continue
+		} else {
 			monitors = append(monitors, m)
 		}
 	}
@@ -147,10 +154,14 @@ func (s *FileStore) ListRestoreTests() ([]RestoreTest, error) {
 		}
 		data, err := os.ReadFile(filepath.Join(s.dir, "restore-tests", e.Name()))
 		if err != nil {
+			log.Printf("[store] skipping unreadable restore-test entry %s: %v", e.Name(), err)
 			continue
 		}
 		var t RestoreTest
-		if json.Unmarshal(data, &t) == nil {
+		if err := json.Unmarshal(data, &t); err != nil {
+			log.Printf("[store] skipping undecodable restore-test entry %s: %v", e.Name(), err)
+			continue
+		} else {
 			tests = append(tests, t)
 		}
 	}

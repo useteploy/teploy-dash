@@ -455,8 +455,13 @@ func (g *authGate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		g.oidcFail(w, r, "SSO provider is unavailable — try again shortly")
 		return
 	}
+	// A04 (partial): the exchange/verification phase gets its own short
+	// deadline instead of inheriting the (unbounded) request context, so a
+	// stalled provider cannot hold the callback handler indefinitely.
+	exchangeCtx, exchangeCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer exchangeCancel()
 	cfg := o.oauthConfig(g.effectiveRedirect(r, o))
-	tok, err := cfg.Exchange(ctx, q.Get("code"), oauth2.VerifierOption(flow.verifier))
+	tok, err := cfg.Exchange(exchangeCtx, q.Get("code"), oauth2.VerifierOption(flow.verifier))
 	if err != nil {
 		log.Printf("auth: OIDC token exchange failed: %v", err)
 		g.oidcFail(w, r, "SSO sign-in failed — please try again")
@@ -467,7 +472,7 @@ func (g *authGate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		g.oidcFail(w, r, "SSO response was missing an ID token")
 		return
 	}
-	idToken, err := o.verifier.Verify(ctx, rawID)
+	idToken, err := o.verifier.Verify(exchangeCtx, rawID)
 	if err != nil {
 		log.Printf("auth: OIDC ID-token verification failed: %v", err)
 		g.oidcFail(w, r, "SSO sign-in failed — please try again")

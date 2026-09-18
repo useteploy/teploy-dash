@@ -38,12 +38,18 @@ func TestMCPMutationsRouteThroughOperations(t *testing.T) {
 		t.Fatalf("restart: %v", err)
 	}
 
+	// Wait for TERMINAL records, not mere existence: the workers persist
+	// their terminal state after the records appear, and the test's TempDir
+	// is removed the moment it returns — leaving the persist racing the
+	// cleanup.
 	deadline := time.Now().Add(3 * time.Second)
 	kinds := map[string]bool{}
 	for time.Now().Before(deadline) {
 		kinds = map[string]bool{}
 		for _, op := range s.operations.List("", "", 0) {
-			kinds[string(op.Request.Kind)] = true
+			if op.Status.Terminal() {
+				kinds[string(op.Request.Kind)] = true
+			}
 		}
 		if kinds["deploy"] && kinds["rollback"] && kinds["app_lifecycle"] {
 			break

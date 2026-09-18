@@ -666,6 +666,13 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			// so this branch only runs for the local-account first-run flow.
 			switch r.URL.Path {
 			case "/api/health", "/setup", "/api/setup":
+				// A06: setup is a state-changing route holding the bootstrap
+				// token — it gets the same same-origin requirement as every
+				// other mutation instead of bypassing the check below.
+				if isMutating(r.Method) && !sameOrigin(r) {
+					http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+					return
+				}
 				next.ServeHTTP(w, r)
 			default:
 				if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
