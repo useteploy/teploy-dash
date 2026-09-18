@@ -25,9 +25,15 @@ document.addEventListener('alpine:init', () => {
     loading: true,
     statusFilter: '',
     _timer: null,
+    _alive: false,
 
     async init() {
+      // A50: navigating away during the initial load destroys the component
+      // BEFORE the interval exists; the alive flag stops init's continuation
+      // from installing an orphan poller.
+      this._alive = true;
       await this.load();
+      if (!this._alive) return;
       // Poll while the page is visible — not only while the list already
       // holds an active operation (an empty or terminal-only list never
       // discovered work started elsewhere until a manual refresh).
@@ -37,6 +43,7 @@ document.addEventListener('alpine:init', () => {
       }, 3000);
     },
     destroy() {
+      this._alive = false;
       if (this._timer) clearInterval(this._timer);
     },
 
@@ -65,13 +72,17 @@ document.addEventListener('alpine:init', () => {
     loading: true,
     actionLoading: false,
     _es: null,
+    _alive: false,
 
     async init() {
+      this._alive = true;
       const id = Alpine.store('router').params.id;
       try {
-        this.op = await api.get(`/api/operations/${id}`);
+        const op = await api.get(`/api/operations/${id}`);
+        if (!this._alive) return; // destroyed while loading (A50)
+        this.op = op;
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this._alive) showToast(e.message, 'error');
         this.loading = false;
         return;
       }
@@ -79,13 +90,19 @@ document.addEventListener('alpine:init', () => {
       this.stream(id);
     },
     destroy() {
+      this._alive = false;
       if (this._es) this._es.close();
     },
 
     // SSE: replays the full event history, then follows live. Status events
-    // refresh the header; stdout/stderr append to the log (bounded).
+    // are interpreted from the EVENT ITSELF — a replayed historical status
+    // is not a live transition, and the old refetch-on-every-status closed
+    // the stream on a terminal snapshot before the replayed output arrived
+    // (A53). The server terminates terminal histories with an explicit
+    // replay-complete marker.
     stream(id) {
-      this._es = new EventSource(`/api/operations/${id}/events`);
+      const source = new EventSource(`/api/operations/${id}/events`);
+      this._es = source;
       const maxLines = 5000;
       const append = (e, cls) => {
         const ev = JSON.parse(e.data);
@@ -100,21 +117,35 @@ document.addEventListener('alpine:init', () => {
           if (el) el.scrollTop = el.scrollHeight;
         });
       };
-      this._es.addEventListener('stdout', e => append(e, ''));
-      this._es.addEventListener('stderr', e => append(e, 'op-line-err'));
-      this._es.addEventListener('status', async () => {
-        try { this.op = await api.get(`/api/operations/${id}`); } catch {}
-        if (this.op && this.terminal()) this._es.close();
+      source.addEventListener('stdout', e => { if (this._es === source) append(e, ''); });
+      source.addEventListener('stderr', e => { if (this._es === source) append(e, 'op-line-err'); });
+      source.addEventListener('status', e => {
+        if (this._es !== source) return;
+        let status = '';
+        try { status = (JSON.parse(e.data) || {}).data || ''; } catch { return; }
+        if (!this.op || !status) return;
+        this.op = { ...this.op, status };
       });
-      this._es.onerror = async () => {
+      // The server ends every terminal history with this marker: close AFTER
+      // the full replay, then take one authoritative snapshot (A53).
+      source.addEventListener('replay-complete', () => {
+        if (this._es !== source) return;
+        source.close();
+        api.get(`/api/operations/${encodeURIComponent(id)}`).then(op => {
+          if (this._es === source) this.op = op;
+        }).catch(() => {});
+      });
+      source.onerror = () => {
         // Terminal operations close the stream server-side; anything else is
         // a dropped connection — re-fetch the authoritative status instead of
-        // showing an indefinitely "running" operation.
-        if (this.op && this.terminal()) {
-          this._es.close();
-          return;
-        }
-        try { this.op = await api.get(`/api/operations/${id}`); } catch {}
+        // showing an indefinitely "running" operation. EventSource retries
+        // with Last-Event-ID on its own.
+        if (this._es !== source) return;
+        api.get(`/api/operations/${encodeURIComponent(id)}`).then(op => {
+          if (this._es !== source) return;
+          this.op = op;
+          if (this.terminal()) source.close();
+        }).catch(() => {});
       };
     },
 
@@ -122,6 +153,8 @@ document.addEventListener('alpine:init', () => {
       return ['succeeded', 'failed', 'canceled', 'interrupted'].includes(this.op?.status);
     },
     cancelable() {
+      // cancel_requested is transitional: the durable intent is already
+      // recorded, so offer no second button (A09).
       return ['queued', 'running'].includes(this.op?.status);
     },
     retryable() {

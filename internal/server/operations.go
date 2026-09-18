@@ -238,7 +238,18 @@ func (s *Server) handleOperationEvents(w http.ResponseWriter, r *http.Request, i
 		flusher.Flush()
 		return nil
 	}
-	if err := writeEvents(replay); err != nil || terminal {
+	if err := writeEvents(replay); err != nil {
+		return
+	}
+	if terminal {
+		// A53: an explicit end-of-replay marker terminates the stream for
+		// terminal histories — the client no longer has to guess from a
+		// refetched snapshot and close early (losing replayed output) or
+		// reconnect forever when the retained history is empty.
+		if _, err := fmt.Fprint(w, "event: replay-complete\ndata: {\"terminal\":true}\n\n"); err != nil {
+			return
+		}
+		flusher.Flush()
 		return
 	}
 	for {

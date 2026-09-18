@@ -759,7 +759,7 @@
                 </div>
                 <div class="form-group">
                   <label class="form-label">Accessory</label>
-                  <input class="form-input" placeholder="nucleus" x-model="kvAccessory" @keydown.enter="loadKv()">
+                  <input class="form-input" placeholder="nucleus" x-model="kvAccessory" @change="resetKvScope()" @keydown.enter="loadKv()">
                 </div>
                 <button class="btn" @click="loadKv()" :disabled="kvLoading" x-text="kvLoading ? 'Loading…' : 'Refresh'"></button>
               </div>
@@ -796,7 +796,7 @@
                         <tr>
                           <td style="font-family: var(--mono); font-size: 12px;" x-text="k"></td>
                           <td style="font-family: var(--mono); font-size: 12px;"
-                              x-text="k in kvValues ? (kvValues[k] === null ? '(not set)' : kvValues[k]) : '--------'"></td>
+                              x-text="hasKvValue(k) ? (kvValues[k] === null ? '(not set)' : kvValues[k]) : '--------'"></td>
                           <td>
                             <!-- Keys the store holds but this panel cannot drive: the
                                  CLI takes the key as argv, so a flag-shaped or
@@ -808,7 +808,7 @@
                             </template>
                             <template x-if="!kvReadonly.has(k)">
                               <span>
-                                <button class="btn btn-sm" @click="revealKv(k)" x-text="k in kvValues ? 'Refresh' : 'Reveal'"></button>
+                                <button class="btn btn-sm" @click="revealKv(k)" x-text="hasKvValue(k) ? 'Refresh' : 'Reveal'"></button>
                                 <button class="btn btn-sm btn-danger" x-show="canEdit()" @click="delKv(k)">Remove</button>
                               </span>
                             </template>
@@ -1036,8 +1036,8 @@
             <div class="dialog-actions">
               <button type="button" class="btn" @click="closeDialog()">Cancel</button>
               <button type="submit" class="btn btn-primary" :disabled="creating">
-                <span x-show="!creating" x-text="editingId ? 'Save' : 'Create'">Create</span>
-                <span x-show="creating" x-text="editingId ? 'Saving...' : 'Creating...'">Creating...</span>
+                <span x-show="!creating">Create</span>
+                <span x-show="creating">Creating...</span>
               </button>
             </div>
           </form>
@@ -1163,8 +1163,8 @@
             <div class="dialog-actions">
               <button type="button" class="btn" @click="closeDialog()">Cancel</button>
               <button type="submit" class="btn btn-primary" :disabled="creating">
-                <span x-show="!creating" x-text="editingId ? 'Save' : 'Create'">Create</span>
-                <span x-show="creating" x-text="editingId ? 'Saving...' : 'Creating...'">Creating...</span>
+                <span x-show="!creating">Create</span>
+                <span x-show="creating">Creating...</span>
               </button>
             </div>
           </form>
@@ -1716,8 +1716,17 @@
             <input class="form-input" x-model="notifications.webhook_url" placeholder="https://hooks.slack.com/services/...">
           </div>
           <div class="form-group">
-            <label class="form-label">Webhook Signing Secret <span x-show="notifications.webhook_secret_set" style="opacity:0.6;font-weight:400">(set — type to replace)</span></label>
-            <input class="form-input" type="password" x-model="webhookSecretDraft" placeholder="optional — signs deliveries so receivers can verify origin">
+            <label class="form-label">Webhook Signing Secret</label>
+            <div class="form-row" style="align-items:center; gap:8px;">
+              <input class="form-input" type="password" x-model="webhookSecretDraft"
+                     :disabled="webhookSecretMode === 'keep'"
+                     :placeholder="webhookSecretMode === 'keep' ? (notifications.webhook_secret_set ? '(set — unchanged)' : '(not set)') : 'replacement secret'">
+              <select class="form-input" style="max-width:130px;" x-model="webhookSecretMode" :disabled="!notifications.webhook_secret_set && webhookSecretMode === 'keep'">
+                <option value="keep" :disabled="!notifications.webhook_secret_set">Keep</option>
+                <option value="replace">Replace</option>
+                <option value="clear" :disabled="!notifications.webhook_secret_set">Clear</option>
+              </select>
+            </div>
           </div>
 
           <h3 class="section-title" style="font-size: 14px; margin-top: 24px;">Email (SMTP)</h3>
@@ -1737,8 +1746,17 @@
               <input class="form-input" x-model="notifications.smtp_user" placeholder="alerts@example.com">
             </div>
             <div class="form-group">
-              <label class="form-label">SMTP Password <span x-show="notifications.smtp_pass_set" style="opacity:0.6;font-weight:400">(set — type to replace)</span></label>
-              <input class="form-input" type="password" x-model="smtpPasswordDraft" placeholder="••••••••">
+              <label class="form-label">SMTP Password</label>
+              <div class="form-row" style="align-items:center; gap:8px;">
+                <input class="form-input" type="password" x-model="smtpPasswordDraft"
+                       :disabled="smtpPasswordMode === 'keep'"
+                       :placeholder="smtpPasswordMode === 'keep' ? (notifications.smtp_pass_set ? '(set — unchanged)' : '(not set)') : 'new password'">
+                <select class="form-input" style="max-width:130px;" x-model="smtpPasswordMode">
+                  <option value="keep" :disabled="!notifications.smtp_pass_set">Keep</option>
+                  <option value="replace">Replace</option>
+                  <option value="clear" :disabled="!notifications.smtp_pass_set">Clear</option>
+                </select>
+              </div>
             </div>
           </div>
           <div class="form-row">

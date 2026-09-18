@@ -130,6 +130,23 @@ async function logout() {
   location.href = '/login';
 }
 
+// randomID generates resource IDs without crypto.randomUUID, which exists
+// only in secure contexts (A57) — crypto.getRandomValues does not have that
+// restriction.
+function randomID() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('').slice(0, 21);
+}
+
+// authRole reads the role out of /api/auth/me's envelope: {mode, user:{role}}
+// when auth is enabled, {mode:"disabled", ...} when it is off (A05).
+function authRole(me) {
+  if (!me) return null;
+  if (me.mode === 'disabled') return 'admin';
+  return (me.user && me.user.role) || me.role || null;
+}
+
 // ── Alpine.js App ──
 document.addEventListener('alpine:init', () => {
   // ── Router Store ──
@@ -246,10 +263,18 @@ document.addEventListener('alpine:init', () => {
   // reloads when either surface edits it.
   Alpine.data('navLinks', () => ({
     items: [],
+    _alive: false,
 
     async init() {
+      this._alive = true;
       await this.load();
-      window.addEventListener('teploy:links-changed', () => this.load());
+      if (!this._alive) return; // destroyed during load (A50)
+      window.addEventListener('teploy:links-changed', this._reload = () => this.load());
+    },
+
+    destroy() {
+      this._alive = false;
+      if (this._reload) window.removeEventListener('teploy:links-changed', this._reload);
     },
 
     async load() {
@@ -599,6 +624,11 @@ document.addEventListener('alpine:init', () => {
   // ── App Detail Page ──
   Alpine.data('appDetailPage', () => ({
     tab: 'general',
+    // resource is the IMMUTABLE identity this page was opened for (A49).
+    // Every path and destructive action reads it — never the live router
+    // params, which already point at the NEXT app the moment the user
+    // navigates app-detail -> app-detail without a remount.
+    resource: null,
     app: null,
     envVars: [],
     deployLog: [],
@@ -639,6 +669,34 @@ document.addEventListener('alpine:init', () => {
     roleLoaded: false,
 
     async init() {
+      this.activateResource(Alpine.store('router').params);
+      // Same-type navigation (app A -> app B) does not remount this
+      // component; watch the route identity and re-activate when it changes
+      // so a stale page can never display A while acting on B (A49).
+      Alpine.effect(() => {
+        const params = Alpine.store('router').params;
+        if (Alpine.store('router').page !== 'app-detail') return;
+        if (!this.resource) return;
+        if (params.server !== this.resource.server || params.name !== this.resource.name) {
+          this.activateResource(params);
+          this.reload();
+        }
+      });
+      await this.reload();
+    },
+
+    activateResource(params) {
+      this.resource = Object.freeze({server: params.server, name: params.name});
+      this.app = null;
+      this.envVars = [];
+      this.deployLog = [];
+      this.accessories = [];
+      this.drift = null;
+      this.stats = [];
+      this.health = null;
+    },
+
+    async reload() {
       await Promise.all([this.loadStatus(), this.loadAccessories()]);
       // Both are extra SSH round trips; run them after the page paints and in
       // parallel with each other so neither delays the view.
@@ -699,18 +757,21 @@ document.addEventListener('alpine:init', () => {
     },
 
     appPath() {
-      const { server, name } = Alpine.store('router').params;
-      return `/api/apps/${server}/${name}`;
+      const { server, name } = this.resource || Alpine.store('router').params;
+      return `/api/apps/${encodeURIComponent(server)}/${encodeURIComponent(name)}`;
     },
 
     async loadStatus() {
+      const target = this.resource;
       this.loading = true;
       try {
-        this.app = await api.get(`${this.appPath()}/status`);
+        const app = await api.get(`${this.appPath()}/status`);
+        if (this.resource !== target) return; // route changed mid-flight (A50)
+        this.app = app;
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.resource === target) showToast(e.message, 'error');
       }
-      this.loading = false;
+      if (this.resource === target) this.loading = false;
     },
 
     async loadEnv() {
@@ -746,8 +807,9 @@ document.addEventListener('alpine:init', () => {
     canEdit() { return this.role === null || this.role === 'admin' || this.role === 'editor'; },
 
     async loadRole() {
-      // A 401 here means auth is off, not that the user is a viewer.
-      this.role = await api.get('/api/auth/me').then(u => u.role).catch(() => null);
+      // The endpoint answers explicitly for disabled auth; null (network
+      // failure) still means "don't hide anything" — the server enforces.
+      this.role = await api.get('/api/auth/me').then(authRole).catch(() => null);
       this.roleLoaded = true;
     },
 
@@ -758,6 +820,32 @@ document.addEventListener('alpine:init', () => {
       return q ? `?${q}` : '';
     },
 
+    // `k in kvValues` on a plain object answers true for inherited members
+    // (constructor, toString, hasOwnProperty) — an own-property check keeps
+    // prototype-named keys from rendering as already revealed (A54).
+    hasKvValue(key) { return Object.hasOwn(this.kvValues, key); },
+
+    // Any scope change drops revealed values and aborts in-flight reads
+    // (A54): a value revealed under one accessory must not display under
+    // another.
+    resetKvScope() {
+      ++this.kvGeneration;
+      this.kvValues = {};
+      this.kvKeys = [];
+      this.kvReadonly = new Set();
+      this.kvLoading = false;
+      this.kvError = '';
+    },
+
+    // TTL is a nonnegative integer or unset — parseInt's silent truncation
+    // accepted "12abc" and fractional values (A54).
+    parseTTL(raw) {
+      if (raw === '' || raw === null || raw === undefined) return undefined;
+      const ttl = Number(raw);
+      if (!Number.isSafeInteger(ttl) || ttl < 0) throw new Error('TTL must be a nonnegative integer');
+      return ttl;
+    },
+
     async loadKv() {
       const generation = ++this.kvGeneration;
       const scope = `${this.appPath()}\n${this.kvAccessory}`;
@@ -765,7 +853,10 @@ document.addEventListener('alpine:init', () => {
       this.kvError = '';
       try {
         const res = await api.get(`${this.appPath()}/kv${this.kvQuery({ pattern: this.kvPattern || '*' })}`);
-        if (generation !== this.kvGeneration || scope !== `${this.appPath()}\n${this.kvAccessory}`) return;
+        if (generation !== this.kvGeneration || scope !== `${this.appPath()}\n${this.kvAccessory}`) {
+          if (generation === this.kvGeneration) this.kvLoading = false;
+          return;
+        }
         this.kvKeys = (res && res.keys) || [];
         // Keys the store holds but this panel cannot operate on (see the
         // Readonly field in kv.go). Rendering them with live buttons meant
@@ -800,11 +891,13 @@ document.addEventListener('alpine:init', () => {
 
     async setKv() {
       if (!this.newKvKey) return;
+      let ttl;
+      try { ttl = this.parseTTL(this.newKvTtl); }
+      catch (e) { showToast(e.message, 'error'); return; }
       this.kvSaving = true;
       try {
         const body = { key: this.newKvKey, value: this.newKvValue, accessory: this.kvAccessory || 'nucleus' };
-        const ttl = parseInt(this.newKvTtl, 10);
-        if (!isNaN(ttl) && ttl > 0) body.ttl = ttl;
+        if (ttl > 0) body.ttl = ttl;
         await api.post(`${this.appPath()}/kv`, body);
         showToast('Key set', 'success');
         this.newKvKey = '';
@@ -861,17 +954,21 @@ document.addEventListener('alpine:init', () => {
     },
 
     async removeApp() {
-      const name = this.app.name;
-      if (!confirm(`Remove ${name} from ${this.app.server}?\n\nThis stops and removes its containers, removes its route, and deletes its deploy state. Volumes and accessory data are preserved.`)) return;
+      const target = this.resource;
+      // The action must match the DISPLAYED record: a stale page whose data
+      // has not (yet) loaded, or no longer matches the route, must not
+      // submit anything (A49).
+      if (!this.app || this.app.name !== target.name || this.app.server !== target.server) return;
+      if (!confirm(`Remove ${target.name} from ${target.server}?\n\nThis stops and removes its containers, removes its route, and deletes its deploy state. Volumes and accessory data are preserved.`)) return;
       const redirect = prompt('Optional: leave a permanent redirect to this URL (blank for none):', '');
       if (redirect === null) return; // cancelled
       this.actionLoading = true;
       try {
-        const op = await api.post(`${this.appPath()}/remove`, { redirect: redirect.trim() });
+        const op = await api.post(`/api/apps/${encodeURIComponent(target.server)}/${encodeURIComponent(target.name)}/remove`, { redirect: redirect.trim() });
         if (isOperation(op)) {
           Alpine.store('router').navigate('operation-detail', { id: op.id });
         } else {
-          showToast(`Removed ${name}`, 'success');
+          showToast(`Removed ${target.name}`, 'success');
           Alpine.store('router').navigate('projects');
         }
       } catch (e) {
@@ -985,12 +1082,15 @@ document.addEventListener('alpine:init', () => {
     },
 
     async init() {
+      this._alive = true;
       await this.loadTests();
       await this.loadServers();
+      if (!this._alive) return; // destroyed during load (A50)
       this.refreshInterval = setInterval(() => this.loadTests(), 30000);
     },
 
     destroy() {
+      this._alive = false;
       if (this.refreshInterval) clearInterval(this.refreshInterval);
     },
 
@@ -1017,7 +1117,7 @@ document.addEventListener('alpine:init', () => {
       this.creating = true;
       try {
         const body = {
-          id: crypto.randomUUID().replace(/-/g, '').slice(0, 21),
+          id: randomID(),
           server: this.newTest.server,
           app: this.newTest.app.trim(),
           accessory: this.newTest.accessory.trim(),
@@ -1057,7 +1157,10 @@ document.addEventListener('alpine:init', () => {
 
     async toggleEnabled(t) {
       try {
-        await rawFetch.post('/api/restore-tests', { ...t, enabled: !t.enabled });
+        // Config-only fields: the API rejects result fields on the upsert
+        // (A24) — spread the record minus the last-result columns.
+        const {last_run_at, last_ok, last_detail, last_metric, last_date, last_duration_ms, ...config} = t;
+        await rawFetch.post('/api/restore-tests', {...config, enabled: !t.enabled});
         await this.loadTests();
         showToast(!t.enabled ? 'Restore test enabled' : 'Restore test disabled', 'success');
       } catch (e) {
@@ -1186,10 +1289,14 @@ document.addEventListener('alpine:init', () => {
     newGroupName: '',
     // Change password form
     pw: { current: '', next: '', confirm: '', saving: false, error: '' },
-    // Secret drafts for notifications (A34): typed only when replacing;
-    // blank means "keep the stored secret".
+    // Secret drafts + three-state modes for notifications (A56): keep
+    // (omit the field entirely), replace (send the draft), or clear (send
+    // an explicit empty string). Before this, a stored secret could never
+    // be removed through the form.
     smtpPasswordDraft: '',
+    smtpPasswordMode: 'keep',
     webhookSecretDraft: '',
+    webhookSecretMode: 'keep',
     // MCP tokens
     mcpTokens: [],
     newMcpToken: { name: '', readOnly: 'false' },
@@ -1209,6 +1316,7 @@ document.addEventListener('alpine:init', () => {
       this.loading = true;
       try {
         this.me = await api.get('/api/auth/me').catch(() => ({ username: '', role: 'viewer' }));
+        this.me = { username: (this.me && this.me.user && this.me.user.username) || '', role: authRole(this.me) || 'viewer' };
         const admin = this.isAdmin();
         // Admin-only endpoints are only fetched for admins — non-admins would
         // just get 403s. Groups (editor-writable) and the current user load for
@@ -1419,17 +1527,22 @@ document.addEventListener('alpine:init', () => {
         email_to: n.email_to || '',
         email_from: n.email_from || '',
       };
-      if (this.smtpPasswordDraft !== undefined && this.smtpPasswordDraft !== null && this.smtpPasswordDraft !== '') {
-        body.smtp_pass = this.smtpPasswordDraft;
-      }
-      if (this.webhookSecretDraft !== undefined && this.webhookSecretDraft !== null && this.webhookSecretDraft !== '') {
-        body.webhook_secret = this.webhookSecretDraft;
-      }
+      const applySecret = (field, mode, draft) => {
+        if (mode === 'clear') { body[field] = ''; return; }
+        if (mode === 'replace') {
+          if (draft === '') throw new Error('Enter a replacement secret or switch back to Keep');
+          body[field] = draft;
+        }
+      };
       try {
+        applySecret('smtp_pass', this.smtpPasswordMode, this.smtpPasswordDraft);
+        applySecret('webhook_secret', this.webhookSecretMode, this.webhookSecretDraft);
         await api.post('/api/notifications', body);
-        this.smtpPasswordDraft = '';
-        this.webhookSecretDraft = '';
+        this.smtpPasswordDraft = ''; this.smtpPasswordMode = 'keep';
+        this.webhookSecretDraft = ''; this.webhookSecretMode = 'keep';
         showToast('Notifications saved', 'success');
+        const n = await api.get('/api/notifications').catch(() => null);
+        if (n) this.notifications = n;
       } catch (e) {
         showToast(e.message, 'error');
       }
@@ -1570,12 +1683,15 @@ document.addEventListener('alpine:init', () => {
     },
 
     async init() {
+      this._alive = true;
       await this.loadMonitors();
       await this.loadCLIStatus();
+      if (!this._alive) return; // destroyed during load (A50)
       this.refreshInterval = setInterval(() => this.loadMonitors(), 30000);
     },
 
     destroy() {
+      this._alive = false;
       if (this.refreshInterval) clearInterval(this.refreshInterval);
     },
 
@@ -1606,7 +1722,7 @@ document.addEventListener('alpine:init', () => {
     async createMonitor() {
       this.creating = true;
       try {
-        const id = this.editingId || crypto.randomUUID().replace(/-/g, '').slice(0, 21);
+        const id = this.editingId || randomID();
         const body = {
           id,
           name: this.newMonitor.name,
@@ -1894,7 +2010,7 @@ document.addEventListener('alpine:init', () => {
       // The API makes links editor-writable; with --no-auth it enforces nothing
       // and the Home grid edits freely, so match that rather than showing a
       // read-only table on an install that has no roles at all.
-      this.role = await api.get('/api/auth/me').then(u => (u && u.role) || null).catch(() => null);
+      this.role = await api.get('/api/auth/me').then(authRole).catch(() => null);
       try {
         const raw = (await api.get('/api/homepage')) || [];
         this.items = raw.map(i => ({ ...i, _faviconFailed: false }));
@@ -1933,6 +2049,28 @@ document.addEventListener('alpine:init', () => {
       this.form = { name: '', url: '', description: '', color: '#3b82f6', icon: '', home: true, pinned: false, dark_icon: false };
     },
 
+    // Candidate-first commit (A52): a failed save keeps BOTH the edit draft
+    // and the committed list intact — the old path mutated the list up front,
+    // swallowed the persist error, and cleared the form as if it had saved.
+    buildCandidate(fields) {
+      const candidate = this.items.map(item => ({ ...item }));
+      if (this.editingId) {
+        const idx = candidate.findIndex(item => item.id === this.editingId);
+        if (idx < 0) throw new Error('Shortcut no longer exists; reload');
+        candidate[idx] = { ...candidate[idx], ...fields };
+      } else {
+        candidate.push({ id: randomID(), ...fields });
+      }
+      return candidate;
+    },
+
+    async persistCandidate(candidate) {
+      const clean = candidate.map(({ _faviconFailed, ...i }) => i);
+      await api.put('/api/homepage', clean);
+      this.items = candidate;
+      window.dispatchEvent(new CustomEvent('teploy:links-changed'));
+    },
+
     async save() {
       const name = this.form.name.trim();
       const url = this.form.url.trim();
@@ -1947,33 +2085,34 @@ document.addEventListener('alpine:init', () => {
         dark_icon: this.form.dark_icon,
         _faviconFailed: false,
       };
-      if (this.editingId) {
-        const idx = this.items.findIndex(i => i.id === this.editingId);
-        if (idx !== -1) this.items[idx] = { ...this.items[idx], ...fields };
-      } else {
-        this.items.push({ id: Math.random().toString(36).slice(2), ...fields });
+      try {
+        const candidate = this.buildCandidate(fields);
+        await this.persistCandidate(candidate);
+        this.cancel();
+      } catch (e) {
+        showToast(e.message, 'error');
       }
-      await this.persist();
-      this.cancel();
     },
 
     async toggle(item, field) {
-      item[field] = !item[field];
-      await this.persist();
+      const before = item[field];
+      item[field] = !before;
+      try {
+        await this.persistCandidate(this.items);
+      } catch (e) {
+        item[field] = before; // not committed — undo the optimistic toggle
+        showToast(e.message, 'error');
+      }
     },
 
     async remove(id) {
-      this.items = this.items.filter(i => i.id !== id);
-      if (this.editingId === id) this.cancel();
-      await this.persist();
-    },
-
-    async persist() {
+      const before = this.items;
+      const candidate = this.items.filter(i => i.id !== id);
       try {
-        const clean = this.items.map(({ _faviconFailed, ...i }) => i);
-        await api.put('/api/homepage', clean);
-        window.dispatchEvent(new CustomEvent('teploy:links-changed'));
+        await this.persistCandidate(candidate);
+        if (this.editingId === id) this.cancel();
       } catch (e) {
+        this.items = before;
         showToast(e.message, 'error');
       }
     },
