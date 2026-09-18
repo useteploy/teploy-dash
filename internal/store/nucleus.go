@@ -292,7 +292,9 @@ func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 
 // SaveRestoreTestResult applies only the last-result columns (A15): config
 // edits made while the run was in flight survive, and a deleted test stays
-// deleted (zero rows affected).
+// deleted (zero rows affected). The WHERE clause also requires the identity
+// columns to match the run's target (A24): a retargeted or recreated test
+// never inherits the old target's verification result.
 func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
@@ -304,9 +306,10 @@ func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) erro
 		`UPDATE restore_tests
 		 SET last_run_ms = $1, last_ok = $2, last_detail = $3,
 		     last_metric = $4, last_date = $5, last_duration_ms = $6
-		 WHERE id = $7`,
+		 WHERE id = $7 AND server = $8 AND app = $9 AND accessory = $10 AND bucket = $11`,
 		lastRunMs, result.LastOK, result.LastDetail, result.LastMetric,
 		result.LastDate, result.LastDurationMs, id,
+		result.Server, result.App, result.Accessory, result.Bucket,
 	)
 	return err
 }

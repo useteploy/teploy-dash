@@ -269,9 +269,8 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A run started under the old config finishes after the operator edited
-	// the bucket.
-	run := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "old", LastOK: true, LastDetail: "ok", LastMetric: "checksum", LastRunAt: time.Now()}
+	// A run against the CURRENT configuration applies its result.
+	run := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", LastOK: true, LastDetail: "ok", LastMetric: "checksum", LastRunAt: time.Now()}
 	if err := s.SaveRestoreTestResult("t1", run); err != nil {
 		t.Fatal(err)
 	}
@@ -283,15 +282,23 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 		t.Errorf("result fields not applied: %+v", got)
 	}
 
+	// A24: the operator retargets the test (new bucket) while a run against
+	// the OLD bucket is still in flight. The late result describes a
+	// different target and must be dropped, not attached to the new config —
+	// while the config edit itself survives untouched.
 	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "NEW", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveRestoreTestResult("t1", run); err != nil {
+	stale := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", LastOK: false, LastDetail: "stale", LastRunAt: time.Now()}
+	if err := s.SaveRestoreTestResult("t1", stale); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.GetRestoreTest("t1")
 	if got.Bucket != "NEW" {
 		t.Errorf("config edit overwritten by late result: bucket=%q", got.Bucket)
+	}
+	if got.LastDetail == "stale" {
+		t.Errorf("retargeted test inherited the old target's result: %+v", got)
 	}
 
 	// Deleted mid-run: no resurrect.

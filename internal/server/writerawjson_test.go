@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -14,10 +15,27 @@ func TestWriteRawJSON_ValidJSONIsWrapped(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
+	// A35: the exact bytes are forwarded (key order preserved, integers
+	// never round-tripped through float64) — the old decode/re-encode path
+	// corrupted integers above 2^53.
 	got := w.Body.String()
-	want := `{"data":{"count":3,"ok":true}}` + "\n"
+	want := `{"data":{"ok":true,"count":3}}` + "\n"
 	if got != want {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// A35: a large integer survives the passthrough exactly. Decoding into
+// interface{} re-encoded 9007199254740993 as 9007199254740992.
+func TestWriteRawJSON_LargeIntegersSurvive(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeRawJSON(w, `{"id":9007199254740993,"neg":-9007199254740993}`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "9007199254740993") || strings.Contains(w.Body.String(), "9007199254740992") {
+		t.Errorf("large integer corrupted: %q", w.Body.String())
 	}
 }
 

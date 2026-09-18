@@ -2,9 +2,9 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -224,6 +224,13 @@ func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) error {
 	if err := json.Unmarshal(data, &stored); err != nil {
 		return fmt.Errorf("reading stored restore test: %w", err)
 	}
+	// A24: a result only applies to the configuration that produced it. If
+	// the test was retargeted (or deleted and recreated) while the run was
+	// in flight, the stored identity no longer matches and the result is
+	// dropped rather than attributed to the new target.
+	if stored.Server != result.Server || stored.App != result.App || stored.Accessory != result.Accessory || stored.Bucket != result.Bucket {
+		return nil
+	}
 	stored.LastRunAt = result.LastRunAt
 	stored.LastOK = result.LastOK
 	stored.LastDetail = result.LastDetail
@@ -383,6 +390,14 @@ func (s *FileStore) Cleanup() error {
 
 // rewriteHistoryFile rewrites one history file without records older than
 // cutoff, preserving the original on any failure.
+//
+// Retained records are copied as their ORIGINAL bytes (A21): re-encoding a
+// decoded struct drops unknown future fields, and the old corrupt-record
+// branch re-encoded the ZERO-VALUE of a failed decode — replacing evidence
+// with a fabricated record whose zero timestamp a later cleanup then
+// dropped, destroying data while claiming to preserve it. A malformed line
+// now aborts the whole rewrite (the original stays intact and the error is
+// reported for operator repair).
 func rewriteHistoryFile(path string, cutoff time.Time) error {
 	inFile, err := os.Open(path)
 	if err != nil {
@@ -406,25 +421,31 @@ func rewriteHistoryFile(path string, cutoff time.Time) error {
 
 	scanner := bufio.NewScanner(inFile)
 	scanner.Buffer(make([]byte, 64<<10), maxRecordBytes)
-	encoder := json.NewEncoder(tmp)
+	writer := bufio.NewWriter(tmp)
 	for scanner.Scan() {
-		var r CheckResult
-		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
-			// Corrupt record: keep it rather than delete data we don't
-			// understand — quarantine decisions belong to an operator.
-			if err := encoder.Encode(r); err != nil && err != io.EOF {
-				return err
-			}
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		if !r.CheckedAt.Before(cutoff) {
-			if err := encoder.Encode(r); err != nil {
-				return err
-			}
+		var r CheckResult
+		if err := json.Unmarshal(line, &r); err != nil || r.CheckedAt.IsZero() {
+			return fmt.Errorf("malformed history record (%d bytes); original retained", len(line))
+		}
+		if r.CheckedAt.Before(cutoff) {
+			continue
+		}
+		if _, err := writer.Write(line); err != nil {
+			return err
+		}
+		if err := writer.WriteByte('\n'); err != nil {
+			return err
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		return err

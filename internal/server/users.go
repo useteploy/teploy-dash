@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -24,6 +25,28 @@ const (
 	RoleEditor = "editor"
 	RoleViewer = "viewer"
 )
+
+// usernameRE is the creation grammar for new accounts (A07): a route-safe,
+// bounded name that can never collide with the slash-separated management
+// routes or exceed filename limits. Existing accounts outside the grammar
+// keep working; only NEW names are rejected.
+var usernameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$`)
+
+func validateUsername(name string) error {
+	if !usernameRE.MatchString(name) {
+		return fmt.Errorf("username must start with a letter or digit and use only letters, digits, and _ . @ - (max 64 characters)")
+	}
+	return nil
+}
+
+// validRole reports whether r names a known role exactly.
+func validRole(r string) bool {
+	switch r {
+	case RoleAdmin, RoleEditor, RoleViewer:
+		return true
+	}
+	return false
+}
 
 // maxPasswordBytes is bcrypt's hard input ceiling — GenerateFromPassword errors
 // beyond it. Reject longer passwords rather than store the empty hash the error
@@ -320,6 +343,9 @@ func (g *authGate) createUser(username, password, role string) error {
 	if username == "" {
 		return fmt.Errorf("username is required")
 	}
+	if err := validateUsername(username); err != nil {
+		return err
+	}
 	if len(password) < 8 {
 		return fmt.Errorf("password must be at least 8 characters")
 	}
@@ -572,6 +598,11 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid request body")
 			return
 		}
+		// A07: a typo'd role must be rejected, not silently mapped to viewer.
+		if body.Role != "" && !validRole(body.Role) {
+			writeError(w, "role must be admin, editor, or viewer")
+			return
+		}
 		if err := s.gate.createUser(body.Username, body.Password, body.Role); err != nil {
 			writeError(w, err.Error())
 			return
@@ -628,6 +659,12 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
+			return
+		}
+		// A07: reject unknown roles at the boundary (empty keeps the old
+		// normalize-to-viewer behavior for hand-rolled callers).
+		if body.Role != "" && !validRole(body.Role) {
+			writeError(w, "role must be admin, editor, or viewer")
 			return
 		}
 		if err := s.gate.setRole(username, body.Role); err != nil {

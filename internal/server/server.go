@@ -1130,7 +1130,6 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("/api/logout", s.gate.handleLogout)
 		s.mux.HandleFunc("/api/setup", s.gate.handleSetup)
 		s.mux.HandleFunc("/api/auth/password", s.gate.handleChangePassword)
-		s.mux.HandleFunc("/api/auth/me", s.handleWhoami)
 		s.mux.HandleFunc("/api/login/methods", s.handleLoginMethods)
 		s.mux.HandleFunc("/api/users", s.handleUsers)
 		s.mux.HandleFunc("/api/users/", s.handleUserAction)
@@ -1139,6 +1138,12 @@ func (s *Server) routes() {
 			s.mux.HandleFunc("/oidc/callback", s.gate.handleOIDCCallback)
 		}
 	}
+
+	// A05: the identity endpoint exists in EVERY mode. With auth disabled it
+	// answers explicitly (mode "disabled", full capabilities) instead of
+	// falling through to the SPA, which the settings page read as "viewer"
+	// and used to hide administration controls that work fine in no-auth.
+	s.mux.HandleFunc("/api/auth/me", s.handleWhoami)
 
 	// Homepage
 	s.mux.HandleFunc("/api/homepage", s.handleHomepage)
@@ -1190,6 +1195,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/status", s.handleStatusPage)
 	s.mux.HandleFunc("/api/status", s.handleStatusAPI)
 
+	// A36: /api/ is reserved for JSON APIs. Unmatched API paths must return a
+	// real 404 envelope, not the SPA's index.html with HTTP 200 (more
+	// specific registrations above still win in ServeMux).
+	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		jsonError(w, "API route not found", http.StatusNotFound)
+	})
+
 	// Frontend
 	s.mux.HandleFunc("/", s.handleFrontend)
 }
@@ -1228,7 +1240,12 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 
 // collectFleetApps gathers app state from all servers in parallel.
 func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error) {
-	servers := s.resolveServers()
+	servers, err := s.resolveServers()
+	if err != nil {
+		// A discovery failure must not fall through to the local-state path
+		// (A34) — it would render a broken fleet as "local installation".
+		return nil, fmt.Errorf("server discovery failed: %w", err)
+	}
 
 	if len(servers) == 0 {
 		// Fall back to local state files when no servers configured.
@@ -1287,20 +1304,19 @@ func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error
 }
 
 // resolveServers returns server connections from the CLI's servers.yml via the CLI delegate.
-func (s *Server) resolveServers() []remote.ServerConn {
+// A failure is an ERROR, not an empty list: callers must not mistake a broken
+// discovery (missing CLI, non-zero exit, malformed JSON) for an unconfigured
+// installation and fall back to local-state mode (A34).
+func (s *Server) resolveServers() ([]remote.ServerConn, error) {
 	if !s.cliInstalled() {
-		return nil
+		return nil, nil
 	}
 	result, err := s.runCLI(context.Background(), "server", "list", "--json")
 	if err != nil {
-		// Don't silently treat a CLI failure as "no servers" (which would fall
-		// through to the empty local-state path) — log it so the cause is visible.
-		log.Printf("[fleet] could not list servers from the teploy CLI: %v", err)
-		return nil
+		return nil, fmt.Errorf("listing servers from the teploy CLI: %w", err)
 	}
 	if result.ExitCode != 0 {
-		log.Printf("[fleet] could not list servers from the teploy CLI: %v", commandFailure([]string{"server", "list", "--json"}, result))
-		return nil
+		return nil, commandFailure([]string{"server", "list", "--json"}, result)
 	}
 
 	var raw map[string]struct {
@@ -1308,8 +1324,7 @@ func (s *Server) resolveServers() []remote.ServerConn {
 		User string `json:"user"`
 	}
 	if err := json.Unmarshal([]byte(result.Stdout), &raw); err != nil {
-		log.Printf("[fleet] could not parse server list: %v", err)
-		return nil
+		return nil, fmt.Errorf("parsing the server list: %w", err)
 	}
 
 	var servers []remote.ServerConn
@@ -1324,12 +1339,25 @@ func (s *Server) resolveServers() []remote.ServerConn {
 			User: user,
 		})
 	}
+	return servers, nil
+}
+
+// serversBestEffort resolves servers for lookups (name resolution, nav
+// inference) where a discovery failure degrades to "unknown server" rather
+// than an error; the enqueue path re-resolves through the operation
+// resolver, which fails visibly.
+func (s *Server) serversBestEffort() []remote.ServerConn {
+	servers, err := s.resolveServers()
+	if err != nil {
+		log.Printf("[fleet] server discovery failed: %v", err)
+		return nil
+	}
 	return servers
 }
 
 // lookupServer finds a server connection by name.
 func (s *Server) lookupServer(name string) (remote.ServerConn, bool) {
-	for _, srv := range s.resolveServers() {
+	for _, srv := range s.serversBestEffort() {
 		if srv.Name == name {
 			return srv, true
 		}
@@ -2294,6 +2322,14 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 			if g.Name == groupName {
 				for j, p := range g.Projects {
 					if p.Name == projectName {
+						if body.Name != projectName {
+							for _, other := range g.Projects {
+								if other.Name == body.Name {
+									writeErrorStatus(w, "a project named "+body.Name+" already exists in this group", http.StatusConflict)
+									return
+								}
+							}
+						}
 						data.Groups[i].Projects[j].Name = body.Name
 						if err := saveGroupsFile(data); err != nil {
 							writeError(w, err.Error())
@@ -2457,6 +2493,20 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// writeServerError maps the CLI's typed server-registry errors to honest
+// HTTP statuses (UPSTREAM-2): an existing destination is a conflict, a
+// missing source is not found. Anything else stays a 400.
+func writeServerError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, cli.ErrServerExists):
+		writeErrorStatus(w, "a server by that name already exists", http.StatusConflict)
+	case errors.Is(err, cli.ErrServerNotFound):
+		writeErrorStatus(w, "server not found", http.StatusNotFound)
+	default:
+		writeError(w, err.Error())
+	}
+}
+
 // lookupServerUserRole reads a server's configured SSH user + role from the
 // CLI's servers.yml (the source of truth, not the 60s fleet cache). Used to
 // preserve those fields on an edit that doesn't re-specify them.
@@ -2478,23 +2528,6 @@ func (s *Server) lookupServerUserRole(name string) (user, role string) {
 	return "", ""
 }
 
-// serverNameExists reports whether a server name is already configured in the
-// CLI's servers.yml. Used to reject renames onto an existing entry —
-// ServerAdd is an upsert, so a rename to a taken name would silently
-// overwrite that server's configuration (A36).
-func (s *Server) serverNameExists(name string) bool {
-	result, err := cli.ServerList()
-	if err != nil {
-		return false
-	}
-	var raw map[string]json.RawMessage
-	if json.Unmarshal([]byte(result.Stdout), &raw) != nil {
-		return false
-	}
-	_, exists := raw[name]
-	return exists
-}
-
 func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/config/servers/")
 	switch r.Method {
@@ -2506,8 +2539,10 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		}
 		writeData(w, result)
 	case "PUT":
-		// Edit by remove + re-add. CLI doesn't have a dedicated edit; this
-		// is the same approach the embedded UI takes via config.AddServer.
+		// Edit through the CLI's atomic `server rename` / `server update`
+		// (UPSTREAM-2). The old remove+add emulation dropped tags/vpn_ip on
+		// every edit, was non-atomic across two processes, and its rollback
+		// could itself fail silently (A38).
 		var body struct {
 			Name string `json:"name"`
 			Host string `json:"host"`
@@ -2522,10 +2557,8 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		if newName == "" {
 			newName = name
 		}
-		// Edit is remove+add, which would drop the SSH user/role if the form
-		// didn't resend them — silently downgrading a non-root server back to
-		// root. Preserve the existing values (read from servers.yml, not the
-		// cache) when the form leaves a field blank; a form value wins.
+		// Preserve the configured SSH user/role when the form leaves a field
+		// blank — a silent downgrade back to root was the old failure mode.
 		exUser, exRole := s.lookupServerUserRole(name)
 		user := body.User
 		if user == "" {
@@ -2535,41 +2568,17 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		if role == "" {
 			role = exRole
 		}
-		// Only remove when renaming. ServerAdd is an upsert, so a same-name edit
-		// updates in place and keeps the server's tags/vpn_ip. Doing remove+add
-		// as two processes for a same-name edit would drop tags/vpn_ip, because
-		// the re-add reads servers.yml after the remove already deleted them.
 		if newName != name {
-			// A rename onto an existing name would upsert-overwrite that
-			// server's whole configuration — reject it up front (A36).
-			if s.serverNameExists(newName) {
-				writeErrorStatus(w, "a server named "+newName+" already exists", http.StatusConflict)
+			if _, err := cli.ServerRename(name, newName); err != nil {
+				writeServerError(w, err)
 				return
 			}
-			// Capture the original host before removing so we can restore the
-			// server if the re-add under the new name fails (otherwise a failed
-			// rename silently loses the server config entirely).
-			origHost := body.Host
-			if orig, ok := s.lookupServer(name); ok && orig.Host != "" {
-				origHost = orig.Host
-			}
-			if _, err := cli.ServerRemove(name); err != nil {
-				writeError(w, err.Error())
-				return
-			}
-			if _, err := cli.ServerAdd(newName, body.Host, user, role); err != nil {
-				// Restore the original entry rather than leave the server lost.
-				_, _ = cli.ServerAdd(name, origHost, user, role)
-				writeError(w, "rename failed (original server restored): "+err.Error())
-				return
-			}
-			writeData(w, map[string]string{"status": "updated"})
+		}
+		if _, err := cli.ServerUpdate(newName, body.Host, user, role); err != nil {
+			writeServerError(w, err)
 			return
 		}
-		if _, err := cli.ServerAdd(newName, body.Host, user, role); err != nil {
-			writeError(w, err.Error())
-			return
-		}
+		s.fleet.set(nil)
 		writeData(w, map[string]string{"status": "updated"})
 	default:
 		http.Error(w, "method not allowed", 405)
@@ -2770,9 +2779,12 @@ func (s *Server) handleRegistryAction(w http.ResponseWriter, r *http.Request) {
 // ── Monitor Routes ────────────────────────────────────────────────────────
 
 // Monitor input bounds (A14). Intervals live between one fast poll and one
-// slow daily sweep; timeouts must fit inside the interval and one dial.
+// slow daily sweep; timeouts must fit inside the interval and one dial. The
+// minimum matches the runner's own floor (startMonitor clamps to 10s), so
+// the API never accepts an interval the scheduler would silently change
+// (A20).
 const (
-	monitorMinInterval = 5 * time.Second
+	monitorMinInterval = 10 * time.Second
 	monitorMaxInterval = 24 * time.Hour
 	monitorMaxTimeout  = time.Minute
 )
@@ -2830,6 +2842,19 @@ func validateMonitor(m *store.Monitor) error {
 	if m.Type == "tcp" || m.Type == "ping" {
 		if _, _, err := net.SplitHostPort(m.Target); err != nil {
 			return fmt.Errorf("%s monitor target must be host:port (TCP reachability probe, not ICMP)", m.Type)
+		}
+	}
+	if m.Type == "http" {
+		// A20: reject malformed HTTP targets at the boundary instead of
+		// accepting a config that fails on every check.
+		u, err := url.Parse(m.Target)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+			return fmt.Errorf("http monitor target must be an absolute HTTP(S) URL without credentials")
+		}
+		if port := u.Port(); port != "" {
+			if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("http monitor target has an invalid port")
+			}
 		}
 	}
 	return nil
@@ -3150,10 +3175,16 @@ func (s *Server) serveStandalonePage(w http.ResponseWriter, name string) {
 }
 
 // handleFrontend serves the embedded SPA. Unknown paths fall back to
-// index.html so client-side routing works.
+// index.html so client-side routing works. The fallback serves page routes
+// only — a POST to an unknown path is a 405, not an HTML body (A36).
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	if s.frontend == nil {
 		http.Error(w, "frontend not embedded", http.StatusInternalServerError)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -3221,6 +3252,66 @@ type homepageData struct {
 	Items []HomepageItem `json:"items"`
 }
 
+// shortcutURLRE-bound validation pieces (A40). Shared links render in href,
+// window.open, and style bindings for every user, so the whole list is
+// validated before it replaces the shared state: bounded count, unique
+// route-safe IDs, absolute HTTP(S) URLs without credentials or fragments,
+// and a narrow color grammar instead of arbitrary CSS fragments.
+var (
+	shortcutColorRE = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
+	shortcutIDRE    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+)
+
+const maxHomepageItems = 200
+
+func validateShortcutURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") ||
+		u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.RawFragment != "" {
+		return fmt.Errorf("shortcut URL %q must be an absolute HTTP(S) URL without credentials or fragment", raw)
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("shortcut URL %q has an invalid port", raw)
+		}
+	}
+	return nil
+}
+
+func validateHomepage(items []HomepageItem) error {
+	if len(items) > maxHomepageItems {
+		return fmt.Errorf("too many shortcuts (max %d)", maxHomepageItems)
+	}
+	seen := make(map[string]bool, len(items))
+	for _, item := range items {
+		item.Name = strings.TrimSpace(item.Name)
+		item.URL = strings.TrimSpace(item.URL)
+		if item.ID == "" || !shortcutIDRE.MatchString(item.ID) {
+			return fmt.Errorf("shortcut id %q must be 1-64 letters, digits, '_' or '-'", item.ID)
+		}
+		if seen[item.ID] {
+			return fmt.Errorf("duplicate shortcut id %q", item.ID)
+		}
+		seen[item.ID] = true
+		if item.Name == "" || len(item.Name) > 100 {
+			return fmt.Errorf("shortcut %q must have a name (max 100 characters)", item.ID)
+		}
+		if len(item.URL) > 2048 {
+			return fmt.Errorf("shortcut %q URL is too long", item.ID)
+		}
+		if err := validateShortcutURL(item.URL); err != nil {
+			return err
+		}
+		if item.Color != "" && !shortcutColorRE.MatchString(item.Color) {
+			return fmt.Errorf("shortcut %q color must be #RRGGBB", item.ID)
+		}
+		if len(item.Description) > 500 || len(item.Icon) > 8192 || strings.ContainsAny(item.Icon, "<>") {
+			return fmt.Errorf("shortcut %q description or icon is out of bounds", item.ID)
+		}
+	}
+	return nil
+}
+
 func (s *Server) homepageFilePath() string {
 	return filepath.Join(s.config.DataDir, "homepage.json")
 }
@@ -3276,6 +3367,10 @@ func (s *Server) handleHomepage(w http.ResponseWriter, r *http.Request) {
 		}
 		if items == nil {
 			items = []HomepageItem{}
+		}
+		if err := validateHomepage(items); err != nil {
+			writeError(w, err.Error())
+			return
 		}
 		if err := s.saveHomepage(homepageData{Items: items}); err != nil {
 			writeError(w, err.Error())
@@ -3371,12 +3466,15 @@ func writeRawJSON(w http.ResponseWriter, raw string) {
 		writeData(w, nil)
 		return
 	}
-	var parsed interface{}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+	// Forward the exact bytes: decoding into interface{} turns every number
+	// into a float64, and re-encoding silently corrupts integers above 2^53
+	// (A35). json.RawMessage marshals verbatim; validity is still enforced.
+	payload := json.RawMessage(raw)
+	if !json.Valid(payload) {
 		writeErrorStatus(w, "delegated command returned non-JSON output", http.StatusBadGateway)
 		return
 	}
-	writeData(w, parsed)
+	writeData(w, payload)
 }
 
 // ── Restore Tests ─────────────────────────────────────────────────────────
@@ -3404,43 +3502,60 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, tests)
 
 	case "POST":
-		var t store.RestoreTest
-		if err := strictDecode(r, &t); err != nil {
-			http.Error(w, "invalid request body", 400)
+		// A24: configuration input is a CONFIG-ONLY DTO. Result fields
+		// (last_ok, last_run_at, ...) are rejected outright — the old
+		// full-shape upsert let a caller forge verification results onto a
+		// freshly created test.
+		var body struct {
+			ID            string `json:"id"`
+			Server        string `json:"server"`
+			App           string `json:"app"`
+			Accessory     string `json:"accessory"`
+			Bucket        string `json:"bucket"`
+			Region        string `json:"region"`
+			IntervalHours int    `json:"interval_hours"`
+			Enabled       bool   `json:"enabled"`
+		}
+		if err := strictDecode(r, &body); err != nil {
+			http.Error(w, "invalid request body (configuration fields only)", 400)
 			return
 		}
 		// Every field below reaches the teploy CLI's argv (and from there a
 		// remote shell), so validate all of them at the boundary — same rule
 		// as monitors/app actions.
-		if !store.ValidID(t.ID) {
+		if !store.ValidID(body.ID) {
 			http.Error(w, "invalid restore test id (use letters, digits, '_' or '-')", 400)
 			return
 		}
-		if !store.ValidID(t.Server) || !store.ValidID(t.App) || !store.ValidID(t.Accessory) {
+		if !store.ValidID(body.Server) || !store.ValidID(body.App) || !store.ValidID(body.Accessory) {
 			http.Error(w, "server, app, and accessory are required (letters, digits, '_' or '-')", 400)
 			return
 		}
-		if !bucketPattern.MatchString(t.Bucket) || len(t.Bucket) > 63 {
+		if !bucketPattern.MatchString(body.Bucket) || len(body.Bucket) > 63 {
 			http.Error(w, "invalid bucket name", 400)
 			return
 		}
-		if t.Region == "" {
-			t.Region = "us-east-1"
+		if body.Region == "" {
+			body.Region = "us-east-1"
 		}
-		if !bucketPattern.MatchString(t.Region) || len(t.Region) > 25 {
+		if !bucketPattern.MatchString(body.Region) || len(body.Region) > 25 {
 			http.Error(w, "invalid region", 400)
 			return
 		}
-		if t.IntervalHours < 1 {
-			t.IntervalHours = 24
+		if body.IntervalHours < 1 {
+			body.IntervalHours = 24
 		}
-		if t.IntervalHours > 24*365 {
+		if body.IntervalHours > 24*365 {
 			http.Error(w, "interval_hours must be between 1 and 8760", 400)
 			return
 		}
 		// Preserve the last result across config edits: the client only
 		// round-trips config fields, and an upsert that zeroed the result
 		// columns would show "never run" after every edit.
+		t := store.RestoreTest{
+			ID: body.ID, Server: body.Server, App: body.App, Accessory: body.Accessory,
+			Bucket: body.Bucket, Region: body.Region, IntervalHours: body.IntervalHours, Enabled: body.Enabled,
+		}
 		if prev, err := s.store.GetRestoreTest(t.ID); err == nil && prev != nil {
 			t.LastRunAt = prev.LastRunAt
 			t.LastOK = prev.LastOK

@@ -120,7 +120,7 @@ func (b mcpBackend) ListServers(ctx context.Context) (string, error) {
 		Host string `json:"host"`
 	}
 	var out []serverInfo
-	for _, srv := range b.s.resolveServers() {
+	for _, srv := range b.s.serversBestEffort() {
 		out = append(out, serverInfo{Name: srv.Name, Host: srv.Host})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

@@ -452,6 +452,65 @@ func ServerRemove(name string) (*Result, error) {
 	return RunChecked("server", "remove", name)
 }
 
+// Typed server-registry errors surfaced by `server rename`/`server update`
+// (UPSTREAM-2). The CLI wraps its own config.ErrServerExists /
+// config.ErrServerNotFound, so dash classifies by the stable message text —
+// the same single-sourcing approach kvNotSet uses.
+var (
+	ErrServerExists   = errors.New("server already exists")
+	ErrServerNotFound = errors.New("server not found")
+)
+
+func classifyServerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "server already exists"):
+		return fmt.Errorf("%w: %w", ErrServerExists, err)
+	case strings.Contains(msg, "server not found"):
+		return fmt.Errorf("%w: %w", ErrServerNotFound, err)
+	}
+	return err
+}
+
+// ServerRename atomically renames a server entry, preserving every field of
+// the original record (host, user, role, tags, vpn_ip) in one commit — the
+// remove+add emulation lost metadata and could be interrupted between the
+// two writes (A38 / UPSTREAM-2 adoption).
+func ServerRename(oldName, newName string) (*Result, error) {
+	result, err := RunChecked("server", "rename", oldName, newName)
+	if err != nil {
+		return result, classifyServerError(err)
+	}
+	return result, nil
+}
+
+// ServerUpdate atomically updates the fields named by the non-empty
+// arguments; empty arguments leave that field untouched. Each write is one
+// atomic file replacement (A38 / UPSTREAM-2 adoption).
+func ServerUpdate(name, host, user, role string) (*Result, error) {
+	args := []string{"server", "update", name}
+	if host != "" {
+		args = append(args, "--host", host)
+	}
+	if user != "" {
+		args = append(args, "--user", user)
+	}
+	if role != "" {
+		args = append(args, "--role", role)
+	}
+	if len(args) == 3 {
+		return nil, fmt.Errorf("nothing to update")
+	}
+	result, err := RunChecked(args...)
+	if err != nil {
+		return result, classifyServerError(err)
+	}
+	return result, nil
+}
+
 // IsInstalled checks if the teploy CLI binary is available.
 func IsInstalled() bool {
 	_, err := exec.LookPath("teploy")
