@@ -116,7 +116,7 @@ func (s *Server) cliKVRun(ctx context.Context, serverName, appName, accessory, s
 	if err != nil {
 		return result, err
 	}
-	return result, cli.CheckExit(result, args)
+	return result, cli.CheckExit(result)
 }
 
 // kvParseKeys turns `teploy kv list` output into a slice. The command prints
@@ -325,6 +325,15 @@ func (s *Server) handleKVSet(w http.ResponseWriter, r *http.Request, serverName,
 	if body.TTL > 0 {
 		flagArgs = []string{"--ttl", strconv.FormatInt(body.TTL, 10)}
 	}
+	// A11 (UPSTREAM-1 adoption): when the CLI supports `kv set KEY --stdin`,
+	// the value travels on stdin instead of the argv. cliKVRun routes through
+	// the injected runner for testability, so the stdin payload goes where
+	// the runner can feed it.
+	if cli.KVStdinSupported() {
+		flagArgs = append(flagArgs, "--stdin")
+		s.kvRunStdin(w, r, serverName, appName, accessory, flagArgs, body.Key, body.Value)
+		return
+	}
 	if _, err := s.cliKVRun(r.Context(), serverName, appName, accessory, "set", flagArgs, body.Key, body.Value); err != nil {
 		writeError(w, err.Error())
 		return
@@ -332,6 +341,29 @@ func (s *Server) handleKVSet(w http.ResponseWriter, r *http.Request, serverName,
 	// `kv set` echoes "key = value"; there is nothing in it dash doesn't
 	// already know, and echoing it back would put the value in a second place.
 	writeData(w, kvWriteResponse{Key: body.Key, Accessory: accessory, OK: true})
+}
+
+// kvRunStdin performs a `kv set <key> --stdin` write: same argv shape as
+// cliKVRun minus the value positional, with the value on the subprocess's
+// stdin. It cannot route through Config.CLIRunner (which takes no stdin), so
+// it calls the delegate directly.
+func (s *Server) kvRunStdin(w http.ResponseWriter, r *http.Request, serverName, appName, accessory string, flagArgs []string, key, value string) {
+	args := []string{"kv", "set",
+		"--host", s.serverHost(serverName),
+		"--app", appName,
+		"--accessory", accessory,
+		"--json",
+	}
+	if u := s.serverUser(serverName); u != "" {
+		args = append(args, "--user", u)
+	}
+	args = append(args, flagArgs...)
+	args = append(args, "--", key)
+	if _, err := cli.RunWithStdin(r.Context(), value, args...); err != nil {
+		writeError(w, err.Error())
+		return
+	}
+	writeData(w, kvWriteResponse{Key: key, Accessory: accessory, OK: true})
 }
 
 // handleKVDelete removes a key. DELETE, editor.

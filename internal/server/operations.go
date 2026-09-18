@@ -15,7 +15,7 @@ import (
 )
 
 func executeOperation(ctx context.Context, command operation.Command, emit func(operation.Stream, string)) (int, error) {
-	result, err := cli.RunStream(ctx, command.Args, command.Timeout, func(event cli.StreamEvent) {
+	result, err := cli.RunStreamStdin(ctx, command.Stdin, command.Args, command.Timeout, func(event cli.StreamEvent) {
 		stream := operation.StreamStdout
 		if event.Stream == cli.StreamStderr {
 			stream = operation.StreamStderr
@@ -192,8 +192,8 @@ func writeOperationError(w http.ResponseWriter, err error) {
 
 func validOperationStatus(status operation.Status) bool {
 	switch status {
-	case operation.StatusQueued, operation.StatusRunning, operation.StatusSucceeded,
-		operation.StatusFailed, operation.StatusCanceled, operation.StatusInterrupted:
+	case operation.StatusQueued, operation.StatusRunning, operation.StatusCancelRequested,
+		operation.StatusSucceeded, operation.StatusFailed, operation.StatusCanceled, operation.StatusInterrupted:
 		return true
 	default:
 		return false

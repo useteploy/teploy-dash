@@ -3,9 +3,11 @@ package operation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -262,7 +264,12 @@ func TestStartupRecoveryMarksOrphansInterrupted(t *testing.T) {
 	}
 }
 
-func TestStartupRecoveryResumesQueuedOperations(t *testing.T) {
+// A08: a persisted queued record is NEVER automatically executed after a
+// restart. The store's commit can fail after the rename is already visible
+// (directory open/sync error), so the caller may have been told the enqueue
+// failed while the record sits on disk — replaying it would run work nobody
+// believes was admitted. Recovery marks it interrupted for an explicit retry.
+func TestStartupRecoveryNeverReplaysQueuedOperations(t *testing.T) {
 	dir := t.TempDir()
 	store, err := openFileStore(dir, 100)
 	if err != nil {
@@ -275,49 +282,56 @@ func TestStartupRecoveryResumesQueuedOperations(t *testing.T) {
 	if err := store.saveOperation(queued); err != nil {
 		t.Fatal(err)
 	}
-	manager := newTestManager(t, dir, 100, func(context.Context, Command, func(Stream, string)) (int, error) { return 0, nil })
-	waitForStatus(t, manager, queued.ID, StatusSucceeded)
+	var runs atomic.Int32
+	manager := newTestManager(t, dir, 100, func(context.Context, Command, func(Stream, string)) (int, error) {
+		runs.Add(1)
+		return 0, nil
+	})
+	recovered, err := manager.Get(queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != StatusInterrupted || recovered.FinishedAt == nil {
+		t.Fatalf("recovered queued operation = %+v, want interrupted", recovered)
+	}
+	// Give any (wrongly) scheduled executor a moment, then assert silence.
+	time.Sleep(100 * time.Millisecond)
+	if got := runs.Load(); got != 0 {
+		t.Fatalf("executor ran %d times after recovery, want 0", got)
+	}
 }
 
-func TestStartupRecoveryResolvesManifestProjectInternally(t *testing.T) {
+// A09: a cancel_requested record — the caller was acknowledged a durable
+// cancellation intent, then the process died before the worker finished —
+// resolves as canceled on restart, never as executable queued work.
+func TestStartupRecoveryResolvesCancelRequested(t *testing.T) {
 	dir := t.TempDir()
 	store, err := openFileStore(dir, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	revision := strings.Repeat("a", 64)
-	queued := &Operation{
-		ID: "11111111111111111111111111111111",
-		Request: Request{
-			Kind: KindManifestApply, Server: "prod", App: "web", Mode: "dash-managed", ManifestRevision: revision,
-		},
-		Metadata: Metadata{Mode: "dash-managed"}, Target: "server:prod/app:web", Status: StatusQueued, Attempt: 1, CreatedAt: time.Now().UTC(),
+	canceling := &Operation{
+		ID: "abcdef0123456789abcdef0123456789", Request: deployRequest("web", "example/web:1"),
+		Target: "server:prod/app:web", Status: StatusCancelRequested, Attempt: 1, CreatedAt: time.Now().UTC(),
 	}
-	if err := store.saveOperation(queued); err != nil {
+	if err := store.saveOperation(canceling); err != nil {
 		t.Fatal(err)
 	}
-	commands := make(chan Command, 1)
-	manager, err := New(dir, Options{
-		MaxEvents: 100,
-		Resolver:  testResolver,
-		ProjectResolver: func(server, app, gotRevision string) (string, error) {
-			if server != "prod" || app != "web" || gotRevision != revision {
-				t.Fatalf("unexpected manifest resolution: %s/%s@%s", server, app, gotRevision)
-			}
-			return "/internal/manifests/prod/web/revisions/" + revision, nil
-		},
-		Executor: func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
-			commands <- command
-			return 0, nil
-		},
+	var runs atomic.Int32
+	manager := newTestManager(t, dir, 100, func(context.Context, Command, func(Stream, string)) (int, error) {
+		runs.Add(1)
+		return 0, nil
 	})
+	recovered, err := manager.Get(canceling.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForStatus(t, manager, queued.ID, StatusSucceeded)
-	command := <-commands
-	if command.Args[0] != "--project-dir" || command.Args[2] != "deploy" {
-		t.Fatalf("recovered command = %v", command.Args)
+	if recovered.Status != StatusCanceled {
+		t.Fatalf("recovered cancel_requested operation = %+v, want canceled", recovered)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := runs.Load(); got != 0 {
+		t.Fatalf("executor ran %d times after recovery, want 0", got)
 	}
 }
 
@@ -492,4 +506,117 @@ func TestCorruptEventHistoryIsolated(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("corrupt history for one operation disabled the service: %v", err)
 	}
+}
+
+// A09: cancellation is persisted as intent BEFORE it is acknowledged. A
+// worker that never observes the in-memory cancel (simulated by a manager
+// restart) must resolve the record as canceled, not replay it.
+func TestCancelPersistsIntent(t *testing.T) {
+	dir := t.TempDir()
+	release := make(chan struct{})
+	manager := newTestManager(t, dir, 100, func(ctx context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		<-release // keep the operation running until the test ends
+		return 0, ctx.Err()
+	})
+	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunning := func() {
+		t.Helper()
+		for {
+			current, err := manager.Get(op.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status == StatusRunning {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitForRunning()
+	canceled, err := manager.Cancel(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canceled.Status != StatusCancelRequested {
+		t.Fatalf("cancel acknowledged with status %q, want cancel_requested", canceled.Status)
+	}
+	// The persisted record carries the intent.
+	store, err := openFileStore(dir, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := store.loadOperations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := operations[op.ID].Status; got != StatusCancelRequested {
+		t.Fatalf("persisted status = %q, want cancel_requested", got)
+	}
+	close(release)
+
+	// Restart: recovery resolves the intent as canceled.
+	restarted := newTestManager(t, dir, 100, func(context.Context, Command, func(Stream, string)) (int, error) { return 0, nil })
+	resolved, err := restarted.Get(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Status != StatusCanceled {
+		t.Fatalf("post-restart status = %q, want canceled", resolved.Status)
+	}
+}
+
+// A14: repointing a server alias between admission and execution fails the
+// operation instead of redirecting the queued work at the new target.
+func TestExecuteRefusesRepointedTarget(t *testing.T) {
+	dir := t.TempDir()
+	current := map[string]string{"prod": "10.0.0.1"}
+	var mu sync.Mutex
+	resolver := func(name string) (Server, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		host, ok := current[name]
+		if !ok {
+			return Server{}, fmt.Errorf("server not found: %s", name)
+		}
+		return Server{Name: name, Host: host, User: "root"}, nil
+	}
+	block := make(chan struct{})
+	commands := make(chan Command, 1)
+	manager, err := New(dir, Options{
+		MaxEvents: 100,
+		Resolver:  resolver,
+		Executor: func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
+			commands <- command
+			<-block
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Occupy the target with a first operation...
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-commands
+	// ...admit a second operation against the same target while the first
+	// still holds it (the second's admission snapshot records 10.0.0.1)...
+	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ...then repoint the alias before the queued operation executes.
+	mu.Lock()
+	current["prod"] = "10.0.0.2"
+	mu.Unlock()
+	close(block)
+	finished := waitForStatus(t, manager, second.ID, StatusFailed)
+	if !strings.Contains(finished.Error, "repointed") {
+		t.Fatalf("repointed-target error = %q", finished.Error)
+	}
+	waitForStatus(t, manager, first.ID, StatusSucceeded)
 }

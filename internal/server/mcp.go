@@ -257,7 +257,7 @@ func (b mcpBackend) SetEnv(ctx context.Context, server, app, key, value string) 
 	if err != nil {
 		return "", err
 	}
-	if _, err := cli.EnvSet(srv.Host, srv.User, app, key, value); err != nil {
+	if _, err := cli.EnvSet(ctx, srv.Host, srv.User, app, key, value); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("set %s (applies on next deploy/restart)", key), nil

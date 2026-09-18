@@ -26,12 +26,13 @@ const (
 type Status string
 
 const (
-	StatusQueued      Status = "queued"
-	StatusRunning     Status = "running"
-	StatusSucceeded   Status = "succeeded"
-	StatusFailed      Status = "failed"
-	StatusCanceled    Status = "canceled"
-	StatusInterrupted Status = "interrupted"
+	StatusQueued          Status = "queued"
+	StatusRunning         Status = "running"
+	StatusCancelRequested Status = "cancel_requested"
+	StatusSucceeded       Status = "succeeded"
+	StatusFailed          Status = "failed"
+	StatusCanceled        Status = "canceled"
+	StatusInterrupted     Status = "interrupted"
 )
 
 func (s Status) Terminal() bool {
@@ -92,6 +93,13 @@ type Operation struct {
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 	HasSecrets     bool       `json:"has_secrets,omitempty"`
+	// AdmittedServer is the resolved host/user snapshot taken when the
+	// operation was admitted. Before execution the current resolution is
+	// compared against it; a server whose alias was repointed (or removed)
+	// between admission and execution fails the operation instead of
+	// silently redirecting queued work at the new target (A14). Nil on
+	// records written before the field existed — those skip the check.
+	AdmittedServer *Server `json:"admitted_server,omitempty"`
 	requestHash    string
 }
 
@@ -110,6 +118,9 @@ type Command struct {
 	Args    []string
 	Timeout time.Duration
 	Secrets []string
+	// Stdin, when set, is fed to the CLI process on its standard input —
+	// how secret values travel instead of the argv (A11).
+	Stdin string
 }
 
 type Server struct {

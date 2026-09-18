@@ -13,11 +13,11 @@ func TestCheckExit(t *testing.T) {
 		{"success", &Result{ExitCode: 0, Stdout: "ok"}, ""},
 		{"stderr surfaced", &Result{ExitCode: 1, Stderr: "deploy failed: image not found"}, "deploy failed: image not found"},
 		{"stdout fallback", &Result{ExitCode: 2, Stdout: "boom"}, "boom"},
-		{"generic fallback", &Result{ExitCode: 3}, "teploy rollback exited with code 3"},
+		{"generic fallback", &Result{ExitCode: 3}, "teploy exited with code 3"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkExit(tc.result, []string{"rollback"})
+			err := checkExit(tc.result)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("expected nil error, got %v", err)

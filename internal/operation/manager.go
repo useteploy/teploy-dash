@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -121,7 +122,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	if req.Kind == KindDeploy && req.Mode == "" {
 		req.Mode = "ad-hoc"
 	}
-	command, target, err := Build(req, m.resolver, m.projectResolver)
+	command, admitted, target, err := Build(req, m.resolver, m.projectResolver)
 	if err != nil {
 		return nil, false, err
 	}
@@ -149,6 +150,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		return nil, false, err
 	}
 	now := time.Now().UTC()
+	snapshot := admitted
 	op := &Operation{
 		ID:             id,
 		Request:        redactedRequest(req),
@@ -160,6 +162,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		Attempt:        attempt,
 		CreatedAt:      now,
 		HasSecrets:     len(command.Secrets) > 0,
+		AdmittedServer: &snapshot,
 		requestHash:    hash,
 	}
 
@@ -220,8 +223,21 @@ func (m *Manager) execute(ctx context.Context, id string, command Command) {
 		m.finish(id, StatusCanceled, -1, "operation canceled")
 		return
 	}
+	// Target identity check (A14): the server alias must still resolve to
+	// the host/user admitted with the operation. Repointing an alias between
+	// admission and execution must fail the operation for re-authorization,
+	// not redirect queued work at whatever the name points to now. Records
+	// from before the field existed (or with no resolver) skip the check.
+	if mismatch := m.checkTarget(op); mismatch != "" {
+		m.finish(id, StatusFailed, -1, mismatch)
+		return
+	}
 	if err := m.setRunning(id); err != nil {
-		m.finish(id, StatusFailed, -1, err.Error())
+		if errors.Is(err, errCancelRequested) {
+			m.finish(id, StatusCanceled, -1, "operation canceled")
+		} else {
+			m.finish(id, StatusFailed, -1, err.Error())
+		}
 		return
 	}
 	exitCode, err := m.executor(ctx, command, func(stream Stream, data string) {
@@ -246,11 +262,45 @@ func (m *Manager) execute(ctx context.Context, id string, command Command) {
 	m.finish(id, StatusSucceeded, exitCode, "")
 }
 
+// checkTarget compares the operation's admitted server snapshot with the
+// current resolution of its server name. Empty message means the target is
+// unchanged (or the check does not apply).
+func (m *Manager) checkTarget(op *Operation) string {
+	if op.AdmittedServer == nil || m.resolver == nil {
+		return ""
+	}
+	current, err := m.resolver(op.Request.Server)
+	if err != nil {
+		return fmt.Sprintf("server %q could not be resolved since admission (%v); verify the server configuration and retry", op.Request.Server, err)
+	}
+	if current.Host != op.AdmittedServer.Host || userOf(current) != userOf(*op.AdmittedServer) {
+		return fmt.Sprintf("server %q was repointed since admission (admitted %s, now %s); explicit re-authorization required — retry the operation", op.Request.Server, op.AdmittedServer.Host, current.Host)
+	}
+	return ""
+}
+
+func userOf(srv Server) string {
+	if srv.User == "" {
+		return "root"
+	}
+	return srv.User
+}
+
+// errCancelRequested reports setRunning refusing to start an operation whose
+// cancellation was durably requested while it waited for the target lock.
+var errCancelRequested = errors.New("operation cancel requested")
+
 func (m *Manager) setRunning(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	op := m.operations[id]
-	if op == nil || op.Status != StatusQueued {
+	if op == nil {
+		return nil
+	}
+	if op.Status == StatusCancelRequested {
+		return errCancelRequested
+	}
+	if op.Status != StatusQueued {
 		return nil
 	}
 	now := time.Now().UTC()
@@ -394,6 +444,12 @@ func (m *Manager) Unsubscribe(id string, channel <-chan struct{}) {
 	}
 }
 
+// Cancel requests cancellation of an operation. The intent is PERSISTED
+// before the cancellation is acknowledged (A09): a crash before the worker
+// reaches a terminal state leaves a cancel_requested record that recovery
+// resolves as canceled, never as queued work to replay. The in-memory cancel
+// still fires so a live worker stops promptly; "canceled" as a final status
+// is the worker's observation, and already-applied remote changes may remain.
 func (m *Manager) Cancel(id string) (*Operation, error) {
 	m.mu.Lock()
 	op := m.operations[id]
@@ -405,8 +461,18 @@ func (m *Manager) Cancel(id string) (*Operation, error) {
 		m.mu.Unlock()
 		return nil, ErrNotCancelable
 	}
+	next := cloneOperation(op)
+	next.Status = StatusCancelRequested
+	if err := m.store.saveOperation(next); err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("persist cancellation intent: %w", err)
+	}
+	m.operations[id] = next
+	if err := m.appendEventLocked(id, EventStatus, string(StatusCancelRequested)); err != nil {
+		log.Printf("[operation] cancel-intent event persist failed for %s: %v", id, err)
+	}
 	cancel := m.cancels[id]
-	copy := cloneOperation(op)
+	copy := cloneOperation(next)
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -432,43 +498,42 @@ func (m *Manager) Retry(id string) (*Operation, error) {
 	return retry, err
 }
 
+// recover reconciles persisted records with a fresh process. NOTHING is
+// automatically replayed (A08): the store's commit is temp+sync+rename with
+// a directory sync after the rename, so an enqueue can FAIL after the queued
+// record is already visible (dir-open/sync error). The caller was told the
+// work was not queued; executing it after a restart would deploy something
+// nobody believes was admitted. Queued and running records therefore surface
+// as interrupted for an explicit, re-authorized retry; cancel_requested
+// records resolve as canceled (A09).
 func (m *Manager) recover() error {
 	m.mu.Lock()
-	type queuedTask struct {
-		id      string
-		ctx     context.Context
-		command Command
-	}
-	var queued []queuedTask
+	defer m.mu.Unlock()
 	for id, op := range m.operations {
-		if op.Status == StatusQueued && !op.HasSecrets {
-			command, target, err := Build(op.Request, m.resolver, m.projectResolver)
-			if err == nil && target == op.Target {
-				ctx, cancel := context.WithCancel(context.Background())
-				m.cancels[id] = cancel
-				queued = append(queued, queuedTask{id: id, ctx: ctx, command: command})
-				continue
+		switch op.Status {
+		case StatusQueued, StatusRunning:
+			now := time.Now().UTC()
+			op.Status = StatusInterrupted
+			op.Error = "dashboard restarted before operation completed; verify remote state and retry"
+			op.FinishedAt = &now
+			if err := m.store.saveOperation(op); err != nil {
+				return err
+			}
+			if err := m.appendEventLocked(id, EventStatus, string(StatusInterrupted)); err != nil {
+				return err
+			}
+		case StatusCancelRequested:
+			now := time.Now().UTC()
+			op.Status = StatusCanceled
+			op.Error = "canceled before the dashboard restarted"
+			op.FinishedAt = &now
+			if err := m.store.saveOperation(op); err != nil {
+				return err
+			}
+			if err := m.appendEventLocked(id, EventStatus, string(StatusCanceled)); err != nil {
+				return err
 			}
 		}
-		if op.Status != StatusRunning && op.Status != StatusQueued {
-			continue
-		}
-		now := time.Now().UTC()
-		op.Status = StatusInterrupted
-		op.Error = "dashboard restarted before operation completed"
-		op.FinishedAt = &now
-		if err := m.store.saveOperation(op); err != nil {
-			m.mu.Unlock()
-			return err
-		}
-		if err := m.appendEventLocked(id, EventStatus, string(StatusInterrupted)); err != nil {
-			m.mu.Unlock()
-			return err
-		}
-	}
-	m.mu.Unlock()
-	for _, task := range queued {
-		go m.execute(task.ctx, task.id, task.command)
 	}
 	return nil
 }

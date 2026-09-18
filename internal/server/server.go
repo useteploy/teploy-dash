@@ -233,6 +233,9 @@ func New(config Config) *Server {
 			return executeOperation(ctx, command, emit)
 		}
 	}
+	// A11/UPSTREAM-1: template variables ride the CLI's --var-stdin contract
+	// when the installed CLI has it (probed once per process).
+	operation.SetVarStdinSupport(cli.VarStdinSupported)
 	s.operations, s.operationInitErr = operation.New(config.DataDir, operation.Options{
 		MaxEvents: config.OperationMaxEvents,
 		Resolver:  resolver,
@@ -1374,7 +1377,7 @@ func (s *Server) cliAppRun(serverName, appName string, parts ...string) (*cli.Re
 	if err != nil {
 		return result, err
 	}
-	return result, cli.CheckExit(result, args)
+	return result, cli.CheckExit(result)
 }
 
 // ── App Actions ──────────────────────────────────────────────────────────
@@ -1477,7 +1480,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid env var name")
 			return
 		}
-		result, err := cli.EnvSet(s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value)
+		result, err := cli.EnvSet(r.Context(), s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -2739,7 +2742,7 @@ func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 		}
 		// Pass the password over stdin (--token reads it there) instead of on
 		// the argv, where it would be visible in the host's process list.
-		result, err := cli.RunWithStdin(body.Password, "registry", "login", body.Server, "--username", body.Username, "--token")
+		result, err := cli.RunWithStdin(r.Context(), body.Password, "registry", "login", body.Server, "--username", body.Username, "--token")
 		if err != nil {
 			writeError(w, err.Error())
 			return
