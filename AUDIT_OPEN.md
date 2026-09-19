@@ -710,3 +710,14 @@ build` ok; `node --check` on both frontend bundles. One environment note:
 TestRunStreamEmitsBothStreamsAndCancelsProcessGroup still self-skips on
 hosts failing the group-kill preflight (unchanged from pass 7; CI runs
 Linux). No push performed.
+
+## 2026-09-19 reported UI regressions — fixed
+
+- Deployment cards now key by server + app name. Live fleet has two `lullmail`
+  deployments; app-name-only keys broke Alpine rendering. Fleet API failures
+  now show an error and Retry instead of an empty-success view.
+- Proxy rows use their list position as the rendering key because Caddy route
+  IDs are optional (all 203 live deploy-ovh entries have empty IDs).
+- Operations now explains its purpose even when history is nonempty.
+- Validation: Go suite; Chromium rendered all 45 fleet apps (including both
+  lullmail instances), 203 blank-ID proxy rows, and an injected API error.

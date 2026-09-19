@@ -407,6 +407,7 @@ document.addEventListener('alpine:init', () => {
     serverList: [],
     search: '',
     loading: true,
+    loadError: null,
     deployingToGroup: null,
     deploying: false,
     deployForm: { app: '', image: '', domain: '', server: '', port: 80 },
@@ -417,19 +418,21 @@ document.addEventListener('alpine:init', () => {
 
     async load() {
       this.loading = true;
+      this.loadError = null;
       try {
         const [apps, groups, servers] = await Promise.all([
-          api.get('/api/apps').catch(() => []),
-          api.get('/api/groups').catch(() => []),
+          api.get('/api/apps'),
+          api.get('/api/groups'),
           // /api/servers is viewer-readable; /api/config/servers is admin-only
           // and left a 403-catch producing an empty dropdown for editors.
-          api.get('/api/servers').catch(() => ({})),
+          api.get('/api/servers'),
         ]);
         this.apps = apps || [];
         this.groups = groups || [];
         this.serverList = Object.keys(servers || {});
       } catch (e) {
-        showToast(e.message, 'error');
+        this.loadError = `Could not load deployments: ${e.message}`;
+        showToast(this.loadError, 'error');
       }
       this.loading = false;
     },

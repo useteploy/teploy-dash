@@ -210,7 +210,11 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading">
+      <template x-if="loadError">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="!loading && !loadError">
         <div>
           <!-- Groups with their apps -->
           <template x-for="group in groupedApps()" :key="group.name">
@@ -277,7 +281,7 @@
                   </div>
                 </template>
                 <!-- Direct app cards -->
-                <template x-for="app in group.directApps" :key="app.name">
+                <template x-for="app in group.directApps" :key="JSON.stringify([app.server, app.name])">
                   <div class="card" style="position: relative;" @click="openApp(app)">
                     <div class="card-title">
                       <span class="status-dot" :class="app.status"></span>
@@ -371,7 +375,7 @@
           </template>
 
           <div class="card-grid">
-            <template x-for="app in projectApps" :key="app.name">
+            <template x-for="app in projectApps" :key="JSON.stringify([app.server, app.name])">
               <div class="card" style="position: relative;" @click="openApp(app)">
                 <div class="card-title">
                   <span class="status-dot" :class="app.status"></span>
@@ -1345,7 +1349,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      <template x-for="route in proxy.routes" :key="route.id">
+                      <template x-for="(route, index) in proxy.routes" :key="index">
                         <tr>
                           <td style="font-family: var(--mono); font-size: 12px;" x-text="(route.domains || []).join(', ') || '-'"></td>
                           <td style="font-family: var(--mono); font-size: 12px;" x-text="(route.upstreams || []).join(', ') || '-'"></td>
@@ -1452,7 +1456,7 @@
   <template x-if="$store.router.page === 'operations'">
     <div x-data="operationsPage">
       <div class="page-header">
-        <h1 class="page-title">Operations</h1>
+        <div><h1 class="page-title">Operations</h1><p style="color: var(--text-muted); margin-top: 6px;">Jobs started through Dash: deploys, rollbacks, restarts, and more. Open a job for its progress and logs.</p></div>
         <div class="header-actions">
           <select class="form-input" style="width:auto;" aria-label="Filter by status" x-model="statusFilter" @change="load()">
             <option value="">All statuses</option>
