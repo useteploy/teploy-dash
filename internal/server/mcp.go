@@ -109,6 +109,13 @@ func (b mcpBackend) AppLogs(ctx context.Context, server, app string, lines int) 
 	if err != nil {
 		return "", err
 	}
+	// F055: Logs runs the plain delegate, where a NON-ZERO EXIT is carried
+	// in Result.ExitCode with a nil Go error. Without checking it, an SSH
+	// failure or missing app returned its stderr as a SUCCESSFUL log
+	// payload — misleading for agents and users alike.
+	if err := cli.CheckExit(result); err != nil {
+		return "", err
+	}
 	out := result.Stdout
 	if strings.TrimSpace(out) == "" {
 		out = result.Stderr

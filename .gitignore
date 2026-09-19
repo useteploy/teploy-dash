@@ -10,6 +10,13 @@
 # Local data
 /var/teploy-dash/
 
+# Runtime credential stores accidentally written into the source tree by a
+# test run from the repo root (F069) — tests must use t.TempDir(); this
+# entry only keeps the accidental artifact out of tracking.
+internal/server/users.json
+internal/server/auth.json
+internal/server/mcp-tokens.json
+
 # Environment
 .env
 

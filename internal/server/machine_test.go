@@ -270,7 +270,9 @@ func TestCapabilitiesProbesAndCachesCLIContract(t *testing.T) {
 		case "version":
 			return &cli.Result{Stdout: "teploy v0.2.0\n"}, nil
 		case "app list --help", "server status --help":
-			return &cli.Result{Stdout: "usage"}, nil
+			// F072: support is established by the --json FLAG being
+			// advertised, not by help merely exiting zero.
+			return &cli.Result{Stdout: "usage\n  --json   machine output"}, nil
 		default:
 			return nil, errors.New("unexpected command: " + command)
 		}
@@ -301,5 +303,36 @@ func TestCapabilitiesProbesAndCachesCLIContract(t *testing.T) {
 		if calls[command] != 1 {
 			t.Fatalf("%s called %d times, want cached single probe", command, calls[command])
 		}
+	}
+}
+
+// F072: help exiting zero WITHOUT the --json flag advertises no machine
+// output — the old probe credited mere command existence.
+func TestCapabilitiesProbeRequiresJSONFlag(t *testing.T) {
+	s := New(Config{
+		DataDir: t.TempDir(), NoAuth: true,
+		CLIInstalled: func() bool { return true },
+		CLIRunner: func(_ context.Context, args ...string) (*cli.Result, error) {
+			command := strings.Join(args, " ")
+			switch command {
+			case "version":
+				return &cli.Result{Stdout: "teploy v0.1.0\n"}, nil
+			case "app list --help", "server status --help":
+				return &cli.Result{Stdout: "usage (no json flag here)"}, nil
+			default:
+				return nil, errors.New("unexpected command: " + command)
+			}
+		},
+	})
+	response := httptest.NewRecorder()
+	s.handleCapabilities(response, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
+	var envelope struct {
+		Data capabilities `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.Features.AppListJSON || envelope.Data.Features.ServerStatusJSON {
+		t.Fatalf("--json-less help advertised as machine-capable: %#v", envelope.Data.Features)
 	}
 }

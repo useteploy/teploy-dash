@@ -74,6 +74,13 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 	return value
 }
 
+// probeCommand reports whether the command's help output advertises the
+// machine --json flag (F072): a zero help exit alone only proved the
+// command EXISTS — an older CLI without --json was advertised as
+// supporting machine output, and the later fallback had to discover the
+// truth per call. A non-zero exit that is not a recognizable
+// "unsupported command" is surfaced as a probe error rather than a clean
+// "unsupported".
 func (s *Server) probeCommand(ctx context.Context, value *capabilities, name string, args ...string) bool {
 	result, err := s.runCLI(ctx, args...)
 	if err != nil {
@@ -81,7 +88,7 @@ func (s *Server) probeCommand(ctx context.Context, value *capabilities, name str
 		return false
 	}
 	if result.ExitCode == 0 {
-		return true
+		return strings.Contains(result.Stdout, "--json") || strings.Contains(result.Stderr, "--json")
 	}
 	if !cli.UnsupportedCommand(result) {
 		value.Errors = append(value.Errors, capabilityError{Probe: name, Message: commandFailure(args, result).Error()})
