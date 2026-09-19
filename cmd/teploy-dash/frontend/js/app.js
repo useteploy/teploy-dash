@@ -4,9 +4,18 @@
 // Replaces the old inline spinners; driven by every api/rawFetch call below.
 const progressBar = {
   inflight: 0,
+  generation: 0, // F064: a newer request's start() invalidates older hide timers
+  hideTimer: null,
+  resetTimer: null,
   _el() { return document.getElementById('load-bar'); },
   start() {
     this.inflight++;
+    // F064: cancel a pending hide/reset from a previous completion — a new
+    // request beginning inside the 220ms window used to have its bar hidden
+    // (and width zeroed) by the OLD timers while it was loading.
+    this.generation++;
+    clearTimeout(this.hideTimer);
+    clearTimeout(this.resetTimer);
     if (this.inflight !== 1) return; // only kick off on the first in-flight req
     const el = this._el();
     if (!el) return;
@@ -23,9 +32,13 @@ const progressBar = {
     const el = this._el();
     if (!el) return;
     el.style.width = '100%'; // snap to the right edge — loading complete
-    setTimeout(() => {
+    const generation = this.generation;
+    this.hideTimer = setTimeout(() => {
+      if (this.inflight || generation !== this.generation) return;
       el.style.opacity = '0';
-      setTimeout(() => { el.style.width = '0%'; }, 300);
+      this.resetTimer = setTimeout(() => {
+        if (!this.inflight && generation === this.generation) el.style.width = '0%';
+      }, 300);
     }, 220);
   },
 };
@@ -110,8 +123,18 @@ function showToast(message, type = 'info') {
 }
 
 // ── Theme ──
+// F064: storage access can throw (locked-down browsers, disabled storage) —
+// a throw here used to abort Alpine initialization; unexpected stored
+// values normalize to dark.
+function readTheme() {
+  try {
+    const saved = localStorage.getItem('teploy-theme');
+    return saved === 'light' ? 'light' : 'dark';
+  } catch { return 'dark'; }
+}
+
 function initTheme() {
-  const saved = localStorage.getItem('teploy-theme') || 'dark';
+  const saved = readTheme();
   document.documentElement.setAttribute('data-theme', saved);
   return saved;
 }
@@ -120,7 +143,7 @@ function toggleTheme() {
   const current = document.documentElement.getAttribute('data-theme');
   const next = current === 'dark' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
-  localStorage.setItem('teploy-theme', next);
+  try { localStorage.setItem('teploy-theme', next); } catch {}
   return next;
 }
 
@@ -150,9 +173,16 @@ function trapDialogFocus(e) {
 }
 
 // ── Auth ──
+// F063: a failed logout must not navigate as though the session ended —
+// the server is the authority; only an acknowledged sign-out does.
 async function logout() {
-  await fetch('/api/logout', {method: 'POST'}).catch(() => {});
-  location.href = '/login';
+  try {
+    const response = await fetch('/api/logout', {method: 'POST', credentials: 'same-origin', cache: 'no-store'});
+    if (!response.ok) throw new Error(`sign-out failed (HTTP ${response.status})`);
+    location.replace('/login');
+  } catch (e) {
+    showToast(`${e.message}. Your session may still be active — retry before walking away.`, 'error');
+  }
 }
 
 // randomID generates resource IDs without crypto.randomUUID, which exists
@@ -710,8 +740,13 @@ document.addEventListener('alpine:init', () => {
       await this.reload();
     },
 
+    // F059: clear EVERYTHING resource-bound when identity changes — not
+    // just the visible panels. Previously the retained KV tab could display
+    // app A's revealed values under app B, a secret draft typed for A could
+    // be submitted to B, and the KV scope/accessory carried over.
     activateResource(params) {
       this.resource = Object.freeze({server: params.server, name: params.name});
+      this.tab = 'general';
       this.app = null;
       this.envVars = [];
       this.deployLog = [];
@@ -719,6 +754,28 @@ document.addEventListener('alpine:init', () => {
       this.drift = null;
       this.stats = [];
       this.health = null;
+      this.newEnvKey = '';
+      this.newEnvValue = '';
+      this.resetKvScope(); // bumps kvGeneration: in-flight KV reads for the old app are dropped
+      this.kvAccessory = 'nucleus';
+      this.kvPattern = '*';
+      this.newKvKey = '';
+      this.newKvValue = '';
+      this.newKvTtl = '';
+      this.kvSaving = false;
+      this.actionLoading = false;
+      this.roleLoaded = false;
+      this.loading = true;
+      this.statsLoading = false;
+      this.driftLoading = false;
+      this.healthLoading = false;
+    },
+
+    // F059: scrub secret-bearing state when the component unmounts.
+    destroy() {
+      this.kvValues = {};
+      this.newEnvValue = '';
+      this.newKvValue = '';
     },
 
     async reload() {
@@ -732,13 +789,16 @@ document.addEventListener('alpine:init', () => {
     // Resource usage per container. Like drift, a failure here (older bundled
     // CLI without `stats --app`) hides the panel rather than breaking the page.
     async loadStats() {
+      const target = this.resource;
       this.statsLoading = true;
       try {
-        this.stats = (await api.get(`${this.appPath()}/stats`)) || [];
+        const value = await api.get(`${this.appPath()}/stats`);
+        if (this.resource !== target) return; // F058: late response for a previous app
+        this.stats = value || [];
       } catch (e) {
-        this.stats = [];
+        if (this.resource === target) this.stats = [];
       }
-      this.statsLoading = false;
+      if (this.resource === target) this.statsLoading = false;
     },
 
     // Docker reports a stopped container as all-zero rather than omitting it;
@@ -751,13 +811,16 @@ document.addEventListener('alpine:init', () => {
     // than blocking it. A failure here must not break the detail view — an
     // older bundled CLI simply has no `drift --app`.
     async loadDrift() {
+      const target = this.resource;
       this.driftLoading = true;
       try {
-        this.drift = await api.get(`${this.appPath()}/drift`);
+        const value = await api.get(`${this.appPath()}/drift`);
+        if (this.resource !== target) return; // F058
+        this.drift = value;
       } catch (e) {
-        this.drift = { unavailable: true, error: e.message };
+        if (this.resource === target) this.drift = { unavailable: true, error: e.message };
       }
-      this.driftLoading = false;
+      if (this.resource === target) this.driftLoading = false;
     },
 
     // On-demand only — deliberately NOT in init(). Unlike drift and stats,
@@ -769,16 +832,19 @@ document.addEventListener('alpine:init', () => {
     // answer, not a transport failure, so it renders as a result rather than
     // an error banner.
     async loadHealth() {
+      const target = this.resource;
       this.healthLoading = true;
       try {
-        this.health = await api.get(`${this.appPath()}/health`);
+        const value = await api.get(`${this.appPath()}/health`);
+        if (this.resource !== target) return; // F058
+        this.health = value;
       } catch (e) {
         // The backend returns an unhealthy VERDICT as a normal payload, so
         // anything landing here is a transport/CLI failure — an older bundled
         // CLI with no `health --app`, or an unreachable server.
-        this.health = { healthy: false, error: e.message };
+        if (this.resource === target) this.health = { healthy: false, error: e.message };
       }
-      this.healthLoading = false;
+      if (this.resource === target) this.healthLoading = false;
     },
 
     appPath() {
@@ -799,27 +865,40 @@ document.addEventListener('alpine:init', () => {
       if (this.resource === target) this.loading = false;
     },
 
+    // F058: every panel loader captures the resource identity at request
+    // time and drops late responses — a delayed answer for app A used to
+    // populate app B's panels after same-type navigation (only loadStatus
+    // was guarded), and old rows fed wrong-resource action paths.
     async loadEnv() {
+      const target = this.resource;
       try {
-        this.envVars = await api.get(`${this.appPath()}/env`);
+        const value = await api.get(`${this.appPath()}/env`);
+        if (this.resource !== target) return;
+        this.envVars = value || [];
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.resource === target) showToast(e.message, 'error');
       }
     },
 
     async loadLog() {
+      const target = this.resource;
       try {
-        this.deployLog = await api.get(`${this.appPath()}/log`);
+        const value = await api.get(`${this.appPath()}/log`);
+        if (this.resource !== target) return;
+        this.deployLog = value || [];
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.resource === target) showToast(e.message, 'error');
       }
     },
 
     async loadAccessories() {
+      const target = this.resource;
       try {
-        this.accessories = await api.get(`${this.appPath()}/accessories`);
+        const value = await api.get(`${this.appPath()}/accessories`);
+        if (this.resource !== target) return;
+        this.accessories = value || [];
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.resource === target) showToast(e.message, 'error');
       }
     },
 

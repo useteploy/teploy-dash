@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <title>teploy dash</title>
-  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('teploy-theme') || 'dark');</script>
+  <script>try{var t=localStorage.getItem('teploy-theme');t=t==='light'?'light':'dark';}catch(e){t='dark'}document.documentElement.setAttribute('data-theme',t);</script>
   <link rel="stylesheet" href="/css/style.css">
   <script defer src="/js/alpine.js"></script>
   <script src="/js/app.js"></script>
@@ -92,7 +92,7 @@
 
 <!-- Global CLI-missing banner: shown when the teploy binary isn't on this host.
      Most actions require it; this surfaces the problem up front. -->
-<div class="cli-banner" x-data="cliStatusBanner" x-init="init()" x-show="!loading && !installed" x-cloak>
+<div class="cli-banner" x-data="cliStatusBanner" x-show="!loading && !installed" x-cloak>
   <strong>teploy CLI not installed on this host.</strong>
   Most actions (deploy, rollback, logs, env) won't work.
   <a href="https://teploy.dev" style="color: white; text-decoration: underline;">Install instructions</a>
@@ -2032,7 +2032,7 @@
       <!-- Links Tab: custom service shortcuts. The same list the Home grid
            renders; "Header" pins one to the top-right icon row. -->
       <template x-if="!loading && tab === 'links'">
-        <div x-data="linksSettings" x-init="init()">
+        <div x-data="linksSettings">
           <p class="subtitle" style="margin: 0 0 16px;">
             Shortcuts to services you run alongside Teploy — Forgejo, Proxmox, TrueNAS, anything with a URL.
             Home and Header are independent: a link can be a card on Home, an icon in the top-right of
