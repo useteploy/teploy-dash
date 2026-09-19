@@ -79,14 +79,31 @@ detect() {
 #
 
 fetch_url() {
-  if [ "$TEPLOY_DASH_VERSION" = "latest" ]; then
-    TAG=$(curl -sL -o /dev/null -w '%{url_effective}' \
-      "https://github.com/$REPO/releases/latest" \
-      | sed 's#.*/tag/##')
+  if [ "$TEPLOY_DASH_VERSION" = latest ]; then
+    # F068: discovery gets the same fail/timeout discipline as asset
+    # downloads, and the redirect must land on a release tag of THIS repo —
+    # anything else (error page, off-repo redirect) must not become a tag
+    # string that is later interpolated into download URLs.
+    effective=$(curl -fsSL --proto '=https' --proto-redir '=https' \
+      --connect-timeout 10 --max-time 30 --retry 2 \
+      -o /dev/null -w '%{url_effective}' \
+      "https://github.com/$REPO/releases/latest") \
+      || die "could not resolve latest release"
+    case "$effective" in
+      "https://github.com/$REPO/releases/tag/"*) TAG=${effective##*/} ;;
+      *) die "latest release did not resolve to a release tag" ;;
+    esac
     [ -n "$TAG" ] || die "could not determine latest release"
   else
     TAG="$TEPLOY_DASH_VERSION"
   fi
+  case "$TAG" in
+    v[0-9]*) ;;
+    *) die "expected a version release tag (vX.Y.Z)" ;;
+  esac
+  case "$TAG" in
+    *[!A-Za-z0-9._+-]*) die "invalid release tag" ;;
+  esac
   STRIPPED_TAG="${TAG#v}"
   URL="https://github.com/$REPO/releases/download/$TAG/teploy-dash_${STRIPPED_TAG}_${OS}_${ARCHIVE_ARCH}.tar.gz"
   log "Downloading $URL"
@@ -104,13 +121,18 @@ install_binary() {
   # A61: both assets come from the SAME resolved tag, and the archive is
   # verified against the release's checksum before anything is extracted —
   # verifying only the installer script (the documented bootstrap) said
-  # nothing about the bytes it later installed.
-  curl -fL --connect-timeout 10 --max-time 180 --retry 2 \
-    -o "$TMP/teploy-dash.tar.gz" "$URL" || die "archive download failed"
-  curl -fL --connect-timeout 10 --max-time 60 --retry 2 \
+  # nothing about the bytes it later installed. F001: the archive is saved
+  # under its release filename so `sha256sum -c` verifies the file that was
+  # actually downloaded (the previous teploy-dash.tar.gz name made every
+  # normal release install fail at the checksum step).
+  archive_file="$(basename "$URL")"
+  curl -fL --proto '=https' --proto-redir '=https' \
+    --connect-timeout 10 --max-time 180 --retry 2 \
+    -o "$TMP/$archive_file" "$URL" || die "archive download failed"
+  curl -fL --proto '=https' --proto-redir '=https' \
+    --connect-timeout 10 --max-time 60 --retry 2 \
     -o "$TMP/checksums.txt" "https://github.com/$REPO/releases/download/$TAG/checksums.txt" \
     || die "checksum download failed"
-  archive_file="$(basename "$URL")"
   awk -v f="$archive_file" '$2 == f {print; n++} END {if (n != 1) exit 1}' \
     "$TMP/checksums.txt" > "$TMP/selected.sha256" || die "missing or duplicate checksum for $archive_file"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -119,7 +141,7 @@ install_binary() {
     require shasum
     (cd "$TMP" && shasum -a 256 -c selected.sha256) || die "checksum mismatch"
   fi
-  tar -xzf "$TMP/teploy-dash.tar.gz" -C "$TMP" teploy-dash
+  tar -xzf "$TMP/$archive_file" -C "$TMP" teploy-dash
   [ -f "$TMP/teploy-dash" ] && [ ! -L "$TMP/teploy-dash" ] || die "archive missing teploy-dash binary"
 
   $SUDO install -m 0755 "$TMP/teploy-dash" "$TEPLOY_DASH_PREFIX/teploy-dash"
@@ -139,7 +161,6 @@ install_service() {
   fi
 
   need_sudo
-  TMP_SERVICE_ENV=$(mktemp)
   log "Creating teploy-dash service account and directories"
   if ! id -u teploy-dash >/dev/null 2>&1; then
     $SUDO useradd --system --home /var/lib/teploy-dash --shell /usr/sbin/nologin teploy-dash
@@ -148,6 +169,10 @@ install_service() {
   $SUDO chown teploy-dash:teploy-dash /var/lib/teploy-dash
 
   if [ ! -f /etc/teploy-dash/teploy-dash.env ]; then
+    # F068: the temp credential file is created only in the branch that
+    # uses it — an existing service environment previously left an empty
+    # mktemp file behind on every installer run.
+    TMP_SERVICE_ENV=$(mktemp)
     PASS=$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | cut -c1-16)
     # A62: credentials are created privately from the outset (umask 077 in
     # the installer's temp dir, installed 0600) — tee-then-chmod left a
@@ -174,7 +199,12 @@ EnvironmentFile=-/etc/teploy-dash/teploy-dash.env
 ExecStart=${TEPLOY_DASH_PREFIX}/teploy-dash --port 3456 --host 127.0.0.1 --data /var/lib/teploy-dash
 Restart=always
 RestartSec=5s
-TimeoutStopSec=30s
+# F023: the application's own shutdown sequence (HTTP drain 15s + a shared
+# 120s worker/join budget + slack) can legitimately exceed 30s when a
+# deploy or restore verification is in flight; SIGKILL mid-drain is exactly
+# the data-loss path the graceful sequence exists to avoid. Keep the
+# supervisor budget above the application budget.
+TimeoutStopSec=180s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -223,8 +253,15 @@ if [ "$OS" = "linux" ] && [ -z "$TEPLOY_DASH_NO_SERVICE" ] && command -v systemc
   echo
   echo "  By default the dashboard reads CLI deployment state from /deployments/."
   echo "  Override with --deployments /path or set up the teploy CLI on this host."
+  echo
+  # F068: the generated unit binds loopback only — printing the hostname URL
+  # invited operators to an address nothing listens on.
+  echo "  UI:      http://127.0.0.1:3456 (loopback only)"
+  echo "  Remote access: SSH tunnel (ssh -L 3456:127.0.0.1:3456 <host>) or a"
+  echo "  reverse proxy with explicit auth; do not remove the loopback bind"
+  echo "  without one."
 else
   echo "  Run:     TEPLOY_DASH_PASSWORD=\$(openssl rand -base64 24) teploy-dash"
+  echo "  UI:      http://127.0.0.1:3456"
 fi
 echo
-echo "  UI:      http://$(hostname):3456"
