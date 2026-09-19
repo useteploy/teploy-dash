@@ -26,14 +26,14 @@ func (m *mockStore) SaveCheck(c store.CheckResult) error {
 func (m *mockStore) GetChecks(string, time.Time, int) ([]store.CheckResult, error) {
 	return nil, nil
 }
-func (m *mockStore) GetStats(string, time.Time) (*store.UptimeStats, error) { return nil, nil }
-func (m *mockStore) ListRestoreTests() ([]store.RestoreTest, error)         { return nil, nil }
-func (m *mockStore) GetRestoreTest(string) (*store.RestoreTest, error)      { return nil, nil }
-func (m *mockStore) SaveRestoreTest(store.RestoreTest) error                { return nil }
+func (m *mockStore) GetStats(string, time.Time) (*store.UptimeStats, error)        { return nil, nil }
+func (m *mockStore) ListRestoreTests() ([]store.RestoreTest, error)                { return nil, nil }
+func (m *mockStore) GetRestoreTest(string) (*store.RestoreTest, error)             { return nil, nil }
+func (m *mockStore) SaveRestoreTest(store.RestoreTest) error                       { return nil }
 func (m *mockStore) SaveRestoreTestResult(string, store.RestoreTest) (bool, error) { return true, nil }
-func (m *mockStore) DeleteRestoreTest(string) error                         { return nil }
-func (m *mockStore) Close() error                                           { return nil }
-func (m *mockStore) Cleanup() error                                         { return nil }
+func (m *mockStore) DeleteRestoreTest(string) error                                { return nil }
+func (m *mockStore) Close() error                                                  { return nil }
+func (m *mockStore) Cleanup() error                                                { return nil }
 
 // newNoopAlerter returns a Dispatcher with no channels configured so
 // Send() short-circuits to a no-op. Sufficient for verifying the

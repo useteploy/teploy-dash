@@ -32,8 +32,8 @@ import (
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
 	"github.com/useteploy/teploy-dash/internal/remote"
-	sshclient "github.com/useteploy/teploy-dash/internal/ssh"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
+	sshclient "github.com/useteploy/teploy-dash/internal/ssh"
 	"github.com/useteploy/teploy-dash/internal/state"
 	"github.com/useteploy/teploy-dash/internal/store"
 )

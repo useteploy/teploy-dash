@@ -2,8 +2,9 @@
 
 Unresolved findings for this repository from the ChatGPT-led audit series
 (2026-09-09 through 2026-09-11 passes 1-5; register: teploy-neutron-lullmail
-expanded audit — the 2026-09-17 source-code audit, pass 6, and the 2026-09-17
-round-2 audit, pass 7, registered below). Fields are quoted from the audit
+expanded audit — the 2026-09-17 source-code audit, pass 6, the 2026-09-17
+round-2 audit, pass 7, and the 2026-09-18 round-3 audit, pass 8,
+registered below). Fields are quoted from the audit
 register; line references point at the review commits listed per item where
 recorded.
 
@@ -582,3 +583,130 @@ operation records. No push performed.
 - Gates at the closing docs commit: `go vet ./...` clean; `go test ./...`
   all 12 packages ok; `go test -race -count=1 ./...` all 12 packages ok;
   `make build` ok. No push performed.
+
+## 2026-09-19 round-3 source-code audit (pass 8)
+
+Register for the independent round-3 audit pinned at reviewed commit
+`2b8cad7b62f54600556558f2e0fc60900a2dc241` (74 findings, F001-F074; that
+report's IDs, not pass 6/7's). Verification-heavy round: every finding was
+checked against the current source before action; standing deferrals were
+kept, confirmed new defects were fixed (High first), and no new
+teploy-cli-owned defects were found (F024's explicit-targeting contract and
+F047's server-qualified AppRef ride the existing A15/A35 records; the two
+recorded UPSTREAM items were already fixed in the CLI and adopted).
+
+### Fixed (27)
+
+- F001 - installer checksum verifies the file it actually downloads (the
+  release basename, not teploy-dash.tar.gz), plus bounded/validated
+  latest-tag discovery, conditional temp env file, loopback UI guidance.
+- F002 - a principal-only (SSO-only) users.json is a valid store: zero
+  local users no longer locks every authenticated request out after
+  restart; setup mode requires no users AND no principals.
+- F003 - /api/auth/me answers one {mode, user} envelope in every mode,
+  including an explicit disabled-mode answer instead of a 401 the settings
+  page misread as viewer.
+- F004 - users.json and mcp-tokens.json persist via durable.Replace
+  (unique temp, sync, rename, dir sync); internal/store atomicWrite gains
+  the post-rename dir sync.
+- F007 - SSH cancellation covers NewSession and streaming for the client's
+  whole owned lifetime (watcher released in Close).
+- F008 - the ssh-agent socket's Signers/sign reads ride the handshake
+  deadline.
+- F009 - Client.Run captures through per-stream bounded writers with a
+  typed ErrOutputLimit.
+- F012 - shared ssh.NormalizeAddress for dial + reachability probe (explicit
+  ports no longer double-wrapped in :22; IPv6 shapes validated).
+- F013 - RunStreamStdin uses os/exec-owned writer adapters + immediate Run,
+  so WaitDelay bounds inherited-pipe drains (scan-before-Wait defeated it).
+- F014 - runBounded surfaces context.Canceled instead of normalizing the
+  group-kill exit into a nil-error result.
+- F015 - secret-stdin probes cache only VERIFIED outcomes; unverified
+  probes fail closed for secret-bearing writes (env/kv/template vars).
+- F016 - journal replay merges events+gaps in sequence order; zero/
+  duplicate/regressing sequences are framing damage (no underflow, no
+  sequence reuse after recovery).
+- F017 - unterminated final journal record repaired by appending the
+  newline (at load AND before the next append); storage read failures no
+  longer truncate the journal.
+- F018 - compaction targets a 75% watermark reserving the incoming record;
+  suffix sizing is single-pass.
+- F019 - failed admission closes the cached journal handle and removes the
+  orphan journal file.
+- F020 - age and count retention apply independently (negative max age no
+  longer disables the count bound).
+- F022 - Manager.Shutdown seals admission synchronously under its mutex;
+  straggler HTTP requests get 503 ErrShuttingDown; a timed-out HTTP drain
+  force-closes remaining connections.
+- F023 - monitor/restore schedulers count whole goroutine lifetimes before
+  launch; Stop(ctx) honors one shared 120s worker budget in main; the
+  installer unit allows 180s (was 30s vs a ~200s worst case).
+- F033 (ours half) - runCheck revalidates the generation after SaveCheck,
+  before touching the transition baseline or alerting. Store-side
+  revision CAS remains deferred (A19).
+- F035 - restore scheduling uses a resettable one-shot timer recomputed
+  after each completion (no startup-phased double runs).
+- F036 - RunNow returns typed ErrAlreadyRunning; HTTP 409 instead of the
+  stale record posing as the requested run's verdict.
+- F037 (partial) - region joins the restore-result identity compare in
+  both backends; SaveRestoreTestResult returns (applied, error) and the
+  runner neither alerts nor advances state off a dropped result. The
+  delete/recreate incarnation token remains deferred (A19-family).
+- F038 (ours half) - the restore upsert preserves the previous verdict
+  only when the target identity is unchanged (retarget clears it). The
+  config/result read-modify-write race stays deferred (A24-family
+  store-transaction split).
+- F040 (DB half) - NucleusStore.GetChecks surfaces row-decode errors
+  instead of silently skipping rows. Partial-error envelopes remain
+  deferred (A22).
+- F055 - the MCP app-logs tool applies CheckExit (non-zero CLI exit is a
+  tool error, not successful text).
+- F058 - every app-detail panel loader captures resource identity and
+  drops late responses (was: only loadStatus).
+- F059 - activateResource clears all resource-bound state (KV values/
+  scope/generation, drafts, tab, busy flags); destroy() scrubs secrets.
+- F063 - logout navigates only on an acknowledged sign-out; failures stay
+  visible and retryable.
+- F064 - theme storage access is throw-safe (bootstrap + toggle), progress
+  -bar timers generation-guarded, duplicate x-init="init()" removed.
+- F068 - discovery/instructions/temp-file edges fixed with F001.
+- F069 - internal/server/users.json (a synthetic bcrypt-cost-4 fixture
+  committed by accident with 2a44046; no test reads it) untracked and
+  gitignored with the other credential-store names. No rotation needed —
+  the hash was never a live credential.
+- F072 - machine-capability probes require --json in the help output, not
+  merely a zero exit.
+
+### Deferred (mapped to the standing list)
+
+F005 (A06 residual), F006 (A06/A09 origin config), F010/F011/F030/F031
+(A31 protocol redesign; F032's core landed earlier as A53), F021 (dash-03
+pending-persistence design), F024/F025/F026/F039 (A15/A13/A19 residuals),
+F027/F028/F029 (A34/A37 residuals), F033 store-CAS + F034 (A19/A23),
+F037 incarnation tokens + F038 store-transaction split (A19/A24 family),
+F041/F042 (A22/A39 residuals), F043 (A40/A44), F044/F045/F046/F047/F048
+(A35/A36/A37 family), F049/F050/F051/F052/F053 (A28/A18 residual + design
+work), F054/F056 (A21 residual), F057 (A43), F060 (A47), F061/F062
+(A51-family), F065/F066 (A50), F067 (A51/A63 residual), F070 (A22
+residual refactor), F071 (P3 API consistency), F073 (deployment topology
+— single-instance constraint documented), F074 (P3 metric contract).
+
+### Residuals inside fixed findings
+
+- F007: the full fake-SSH-peer regression (handshake completes, session
+  open stalls, cancellation must close the transport promptly) is not yet
+  an executed test — the ownership change is structural and unit-covered
+  only at the address/capture level.
+- F022/F023: the complete Lifetime barrier for EVERY admission surface
+  (straggler handlers calling monitor Reload after Stop, manifest store
+  joins) remains design work; the manager seal + shared budget + joined
+  schedulers close the paths that could touch a closed store.
+
+### Round-3 gates
+
+`go vet ./...` clean (after gofmt); `go test ./... -count=1` all 12
+packages ok; `go test ./... -race -count=1` all 12 packages ok; `make
+build` ok; `node --check` on both frontend bundles. One environment note:
+TestRunStreamEmitsBothStreamsAndCancelsProcessGroup still self-skips on
+hosts failing the group-kill preflight (unchanged from pass 7; CI runs
+Linux). No push performed.

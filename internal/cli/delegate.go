@@ -58,9 +58,9 @@ var errLineTooLong = fmt.Errorf("teploy output line exceeds %d bytes", maxStream
 // Wait defeats the normal-exit WaitDelay, because Wait has not observed
 // the exit yet.
 type lineWriter struct {
-	emit   func(string)
-	fail   func() // cancels the child (cmd.Cancel)
-	failed error
+	emit    func(string)
+	fail    func() // cancels the child (cmd.Cancel)
+	failed  error
 	pending []byte
 }
 

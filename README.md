@@ -332,7 +332,7 @@ so the direct role claim is available here and takes precedence over groups.
 | POST | `/api/monitors/{id}/test` | Run a check immediately. |
 | GET / POST | `/api/restore-tests` | List / create scheduled backup verifications. |
 | GET / DELETE | `/api/restore-tests/{id}` | Detail / delete. |
-| POST | `/api/restore-tests/{id}/run` | Verify the latest backup now (restores into a scratch container via `teploy accessory verify-backup`). |
+| POST | `/api/restore-tests/{id}/run` | Verify the latest backup now (restores into a scratch container via `teploy accessory verify-backup`). Returns HTTP 409 when a run for this test is already in flight — retry when it completes. |
 | GET / POST | `/api/notifications` | Read / write alert config. |
 | GET | `/api/sso` | List SSO principals (admin). |
 | POST | `/api/sso/revoke` | Revoke all sessions of one SSO principal `{subject}` (admin). |
