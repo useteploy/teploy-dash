@@ -108,6 +108,11 @@ type Manager struct {
 	// operations record WHY (bounded shutdown, not a user cancel). Guarded
 	// by mu.
 	shuttingDown bool
+	// admissionClosed is set at the START of Shutdown, under mu, before any
+	// wait begins (F022). Enqueue refuses new work once set; because
+	// admission and the runners WaitGroup increment (admitToTarget) both
+	// happen under m.mu, no Add can race a Wait that already observed zero.
+	admissionClosed bool
 	// recordErr/eventErr record the latest persistence failure per channel
 	// (A39/A47): operation records and event journals are separate files, so
 	// one failing must not be masked by the other succeeding. Events are
@@ -262,6 +267,14 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	}
 
 	m.mu.Lock()
+	// F022: admission is sealed under the same mutex that guards worker
+	// accounting — Shutdown sets this before any wait, so work can never be
+	// admitted after the process began joining (or touch stores during
+	// closure).
+	if m.admissionClosed {
+		m.mu.Unlock()
+		return nil, false, ErrShuttingDown
+	}
 	if idempotencyKey != "" {
 		if id, ok := m.idempotency[idempotencyKey]; ok {
 			existing := m.operations[id]
@@ -331,6 +344,12 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	}
 	if err := m.store.saveOperation(op); err != nil {
 		m.noteRecordErrLocked(err)
+		// F019: the record is the commit point and it did not commit — the
+		// initial journal entry is a definite orphan (recovery enumerates
+		// records, never event files). Drop the cached append handle and the
+		// file so repeated storage failures leak neither descriptors nor
+		// history files invisible to retention.
+		m.store.discardJournal(id)
 		m.mu.Unlock()
 		return nil, false, fmt.Errorf("persist operation record: %w", err)
 	}
@@ -729,7 +748,18 @@ func (m *Manager) Health() Health {
 // records for recovery to mark interrupted) and waits a fixed grace for the
 // terminal states to persist. Callers stop the HTTP server first so no new
 // work is admitted while draining.
+//
+// F022: admission is closed FIRST, synchronously and under the manager
+// mutex, before any waiting begins. Enqueue checks the same flag under the
+// same mutex, and admitToTarget's runners.Add also runs under it — so once
+// Shutdown returns from setting the flag, no new worker can appear behind
+// the WaitGroup wait below (the pre-fix race could Add after Wait observed
+// zero, stranding admitted work against the closing store).
 func (m *Manager) Shutdown(ctx context.Context) {
+	m.mu.Lock()
+	m.admissionClosed = true
+	m.mu.Unlock()
+
 	drained := make(chan struct{})
 	go func() {
 		m.runners.Wait()

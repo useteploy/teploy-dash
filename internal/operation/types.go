@@ -162,6 +162,12 @@ var (
 	// (A12/A27 remainder). Bounded queues keep a runaway client (or a stuck
 	// target) from admitting unbounded work; the caller should back off.
 	ErrAdmissionBudget = errors.New("target admission budget exceeded — too many operations already queued for this target")
+	// ErrShuttingDown reports that admission was closed by Shutdown (F022):
+	// the manager seals admission before joining workers so no operation can
+	// be added to (or be omitted from) the join — a request that outlives
+	// the HTTP drain timeout gets a clean, retryable refusal instead of
+	// racing the closing store.
+	ErrShuttingDown = errors.New("server is shutting down; retry after restart")
 )
 
 // Actor attributes an operation to the principal that admitted it (A27

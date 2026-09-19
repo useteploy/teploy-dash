@@ -2,6 +2,7 @@ package operation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -529,4 +530,227 @@ func TestConcurrentTargetsReplayAndCancel(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("operations did not all reach terminal states")
+}
+
+// ── Round-3 audit (F016/F017/F018/F019/F020/F022) ──────────────────────────
+
+// F016: a journal with a sequence hole must replay chronologically (gap
+// marker INSIDE the hole, not appended after the tail), and the next
+// emitted sequence must be the true high-water + 1 — the old replay order
+// made the next sequence collide with an already-persisted event.
+func TestJournalHoleReplayOrderAndNextSequence(t *testing.T) {
+	dir := t.TempDir()
+	manager := newJournalManager(t, dir, Options{}, func(_ context.Context, _ Command, emit func(Stream, string)) (int, error) {
+		emit(StreamStdout, "post-hole")
+		return 0, nil
+	})
+	// Hand-craft a journal with a hole at 2 and a manager that has already
+	// admitted the operation (sequence 1 exists from admission).
+	op, _, err := manager.Enqueue(Request{Kind: KindDeploy, Server: "prod", App: "web"}, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, op.ID, StatusSucceeded)
+	store := manager.store
+	journalPath := store.journalPath(op.ID)
+	raw, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected status events, got %d lines", len(lines))
+	}
+	// Rewrite: keep 1, drop 2, keep 3+ (simulate a lost middle record).
+	var rebuilt []string
+	rebuilt = append(rebuilt, lines[0])
+	rebuilt = append(rebuilt, lines[2:]...)
+	if err := os.WriteFile(journalPath, []byte(strings.Join(rebuilt, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := newJournalManager(t, dir, Options{}, func(_ context.Context, _ Command, emit func(Stream, string)) (int, error) {
+		return 0, nil
+	})
+	events, err := restarted.EventsAfter(op.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last uint64
+	sawGap := false
+	for _, e := range events {
+		if e.Sequence <= last {
+			t.Fatalf("non-monotonic replay at %d (last %d)", e.Sequence, last)
+		}
+		last = e.Sequence
+		if e.Type == EventGap {
+			sawGap = true
+		}
+	}
+	if !sawGap {
+		t.Fatal("hole not surfaced as a gap event")
+	}
+	// A follow-up run under the restarted manager must not reuse a sequence.
+	op2, _, err := restarted.Enqueue(Request{Kind: KindDeploy, Server: "prod", App: "web2"}, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, restarted, op2.ID, StatusSucceeded)
+	ev2, err := restarted.EventsAfter(op2.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last2 := uint64(0)
+	for _, e := range ev2 {
+		if e.Sequence <= last2 && e.OperationID == op2.ID {
+			t.Fatalf("reused sequence %d within one operation", e.Sequence)
+		}
+		if e.OperationID == op2.ID {
+			last2 = e.Sequence
+		}
+	}
+}
+
+// F016: a persisted REGRESSING sequence is damage, not an underflowing hole
+// count — and truncation repairs it at the damage offset.
+func TestJournalRegressingSequenceIsDamage(t *testing.T) {
+	dir := t.TempDir()
+	id := "op" + strings.Repeat("b", 12)
+	s, err := openFileStore(dir, journalConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range []uint64{1, 4, 2} {
+		e := Event{Sequence: seq, OperationID: id, Type: EventStatus, Data: "x"}
+		if err := s.appendEvent(id, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := s.loadEvents(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < len(events); i++ {
+		if events[i].Sequence <= events[i-1].Sequence {
+			t.Fatalf("replay not monotonic: %v", eventSequences(events))
+		}
+	}
+	// The damage gap must not claim a near-2^64 event count.
+	for _, e := range events {
+		if e.Type == EventGap && strings.Contains(e.Data, "1844674407370955") {
+			t.Fatalf("underflowed gap count: %s", e.Data)
+		}
+	}
+}
+
+func eventSequences(events []Event) []uint64 {
+	out := make([]uint64, len(events))
+	for i, e := range events {
+		out[i] = e.Sequence
+	}
+	return out
+}
+
+// F017: a valid final record without its terminating newline is repaired by
+// appending the newline, and a subsequent append yields two valid frames
+// instead of one concatenated corrupt line.
+func TestJournalUnterminatedTailRepairedBeforeAppend(t *testing.T) {
+	dir := t.TempDir()
+	id := "op" + strings.Repeat("c", 12)
+	s, err := openFileStore(dir, journalConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e1 := Event{Sequence: 1, OperationID: id, Type: EventStatus, Data: "one"}
+	line1, err := json.Marshal(e1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.journalPath(id), line1, 0600); err != nil { // no trailing newline
+		t.Fatal(err)
+	}
+	if err := s.appendEvent(id, Event{Sequence: 2, OperationID: id, Type: EventStatus, Data: "two"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.loadEvents(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Data != "one" || events[1].Data != "two" {
+		t.Fatalf("frames after repair: %+v", events)
+	}
+}
+
+// F018: after compaction the file plus the incoming record is back under
+// the cap, and repeated appends at the cap do not rewrite on every event.
+func TestJournalCompactionReservesIncomingRecord(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openFileStore(dir, journalConfig{MaxJournalBytes: 2048, MaxEvents: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "op" + strings.Repeat("d", 12)
+	for i := 0; i < 200; i++ {
+		e := Event{Sequence: uint64(i + 1), OperationID: id, Type: EventStdout,
+			Data: strings.Repeat("x", 120), CreatedAt: time.Now()}
+		if err := s.appendEvent(id, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(s.journalPath(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 2048 {
+		t.Fatalf("journal exceeds cap after compaction: %d > %d", info.Size(), 2048)
+	}
+	events, err := s.loadEvents(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("compaction dropped every event")
+	}
+	for i := 1; i < len(events); i++ {
+		if events[i].Sequence <= events[i-1].Sequence {
+			t.Fatalf("post-compaction replay not monotonic: %v", eventSequences(events))
+		}
+	}
+}
+
+// F020: count retention works with age retention DISABLED (negative max
+// age); age and count apply independently.
+func TestRetentionCountWorksWhenAgeDisabled(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openFileStore(dir, journalConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for i := 0; i < 5; i++ {
+		op := &Operation{ID: fmt.Sprintf("op%02d%s", i, strings.Repeat("e", 10)),
+			Status: StatusSucceeded, CreatedAt: now.Add(-time.Duration(i) * time.Hour)}
+		if err := s.saveOperation(op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed := s.sweepRetention(now, -time.Hour, 3)
+	if len(removed) != 2 {
+		t.Fatalf("count retention with age disabled removed %v, want 2 oldest", removed)
+	}
+}
+
+// F022: once Shutdown has begun, admission is sealed — Enqueue returns
+// ErrShuttingDown instead of adding work behind the join.
+func TestShutdownSealsAdmission(t *testing.T) {
+	dir := t.TempDir()
+	manager := newJournalManager(t, dir, Options{}, func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		return 0, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	manager.Shutdown(ctx)
+	_, _, err := manager.Enqueue(Request{Kind: KindDeploy, Server: "prod", App: "sealed"}, "", nil)
+	if !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("enqueue after shutdown: %v", err)
+	}
 }

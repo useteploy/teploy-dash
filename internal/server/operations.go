@@ -187,6 +187,10 @@ func writeOperationError(w http.ResponseWriter, err error) {
 		writeErrorStatus(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, operation.ErrAdmissionBudget):
 		writeErrorStatus(w, err.Error(), http.StatusTooManyRequests)
+	case errors.Is(err, operation.ErrShuttingDown):
+		// F022: admission closed by shutdown — a clean, retryable refusal
+		// for requests that outlived the HTTP drain.
+		writeErrorStatus(w, err.Error(), http.StatusServiceUnavailable)
 	case errors.Is(err, operation.ErrIdempotencyConflict), errors.Is(err, operation.ErrNotCancelable), errors.Is(err, operation.ErrNotRetryable):
 		writeErrorStatus(w, err.Error(), http.StatusConflict)
 	default:

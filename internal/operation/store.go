@@ -123,8 +123,10 @@ func (s *fileStore) saveOperation(op *Operation) error {
 // per-event rewrite, fsync, or directory sync. Events are advisory history:
 // the operation RECORD is the commit point (A25), so a crash may lose the
 // journal tail, which replay surfaces as a gap event rather than hiding.
-// When the tracked size would cross the byte cap the journal is compacted to
-// the retained suffix first, so the file stays bounded.
+// When the tracked size would cross the byte cap the journal is compacted
+// first (F018: to a LOWER watermark that reserves the incoming record, so
+// the post-compaction file plus the append is back under the cap and the
+// next append does not immediately cross it again).
 func (s *fileStore) appendEvent(id string, event Event) error {
 	line, err := json.Marshal(event)
 	if err != nil {
@@ -139,7 +141,7 @@ func (s *fileStore) appendEvent(id string, event Event) error {
 		return err
 	}
 	if j.size+int64(len(line)) > s.maxJournalBytes {
-		if err := s.compactLocked(id); err != nil {
+		if err := s.compactLocked(id, line); err != nil {
 			return err
 		}
 		j, err = s.journalLocked(id)
@@ -154,12 +156,17 @@ func (s *fileStore) appendEvent(id string, event Event) error {
 	return err
 }
 
-// journalLocked returns (opening if needed) the append handle for id.
+// journalLocked returns (opening if needed) the append handle for id. When
+// an existing journal does not end in '\n' (a valid final record from an
+// unclean shutdown), the newline is appended BEFORE the handle is reused —
+// otherwise the next event would concatenate a second JSON object onto that
+// record and corrupt the journal permanently (F017).
 func (s *fileStore) journalLocked(id string) (*openJournal, error) {
 	if j, ok := s.journals[id]; ok {
 		return j, nil
 	}
-	file, err := os.OpenFile(s.journalPath(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	path := s.journalPath(id)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -168,23 +175,71 @@ func (s *fileStore) journalLocked(id string) (*openJournal, error) {
 		file.Close()
 		return nil, err
 	}
-	j := &openJournal{file: file, size: info.Size()}
+	size := info.Size()
+	if size > 0 {
+		appended, err := ensureTrailingNewline(path, size)
+		if err != nil {
+			file.Close()
+			return nil, err
+		}
+		if appended {
+			size++
+		}
+	}
+	j := &openJournal{file: file, size: size}
 	s.journals[id] = j
 	return j, nil
 }
 
-// compactLocked rewrites the journal down to the longest suffix that fits both
-// the event-count and byte caps (always keeping at least the newest event).
-// The rewrite is the same temp+sync+rename atomicWrite records use; it runs
-// once per cap crossing, not per event.
-func (s *fileStore) compactLocked(id string) error {
+// ensureTrailingNewline appends '\n' to path when its last byte is not
+// already a newline. size is the current file size (caller just stat'ed).
+// Reports whether a newline was appended.
+func ensureTrailingNewline(path string, size int64) (bool, error) {
+	reader, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	var last [1]byte
+	_, rerr := reader.ReadAt(last[:], size-1)
+	cerr := reader.Close()
+	if rerr != nil || cerr != nil {
+		return false, errors.Join(rerr, cerr)
+	}
+	if last[0] == '\n' {
+		return false, nil
+	}
+	writer, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return false, err
+	}
+	_, werr := writer.Write([]byte{'\n'})
+	wcerr := writer.Close()
+	if err := errors.Join(werr, wcerr); err != nil {
+		return false, err
+	}
+	log.Printf("[operation] journal %s: appended missing final newline before write", filepath.Base(path))
+	return true, nil
+}
+
+// compactLocked rewrites the journal down to the longest suffix that fits
+// both the event-count cap and a byte budget derived from the cap's LOWER
+// watermark minus the incoming record (F018), always keeping the newest
+// event — including when that single event alone exceeds the budget (a
+// deliberate policy: the payload bound at ingestion is 16 KiB, so this only
+// arises for pathologically small configured caps, and dropping the newest
+// event would lose the live tail). The rewrite is the same
+// temp+sync+rename atomicWrite records use; it runs once per cap crossing,
+// not per event.
+func (s *fileStore) compactLocked(id string, incoming []byte) error {
 	events, _, err := s.scanLocked(id)
-	if err != nil && events == nil {
+	if err != nil {
 		return err
 	}
 	s.closeJournalLocked(id)
-	keep := retainedSuffix(events, s.maxEvents, s.maxJournalBytes)
+	budget := s.maxJournalBytes*3/4 - int64(len(incoming))
+	keep := retainedSuffix(events, s.maxEvents, budget)
 	var buf bytes.Buffer
+	buf.Grow(int(min64(int64(budget), s.maxJournalBytes)))
 	for _, event := range keep {
 		line, err := json.Marshal(event)
 		if err != nil {
@@ -196,9 +251,18 @@ func (s *fileStore) compactLocked(id string) error {
 	return atomicWrite(s.journalPath(id), buf.Bytes())
 }
 
+func min64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // retainedSuffix picks the longest suffix of events that has at most maxEvents
-// entries and encodes to at most maxBytes, always keeping the newest entry.
-func retainedSuffix(events []Event, maxEvents int, maxBytes int64) []Event {
+// entries and encodes to at most budget bytes, always keeping the newest
+// entry. Sizes are computed once (F018 — the previous re-serialization per
+// candidate suffix turned every compaction into quadratic work).
+func retainedSuffix(events []Event, maxEvents int, budget int64) []Event {
 	if len(events) <= 1 {
 		return events
 	}
@@ -206,21 +270,25 @@ func retainedSuffix(events []Event, maxEvents int, maxBytes int64) []Event {
 	if maxEvents > 0 && len(kept) > maxEvents {
 		kept = kept[len(kept)-maxEvents:]
 	}
-	for len(kept) > 1 {
-		var size int64
-		for _, event := range kept {
-			line, err := json.Marshal(event)
-			if err != nil {
-				continue
-			}
-			size += int64(len(line)) + 1
-		}
-		if size <= maxBytes {
-			break
-		}
-		kept = kept[1:]
+	if budget < 0 {
+		budget = 0
 	}
-	return kept
+	sizes := make([]int64, len(kept))
+	total := int64(0)
+	for i, event := range kept {
+		line, err := json.Marshal(event)
+		if err != nil {
+			continue
+		}
+		sizes[i] = int64(len(line)) + 1
+		total += sizes[i]
+	}
+	start := 0
+	for start < len(kept)-1 && total > budget {
+		total -= sizes[start]
+		start++
+	}
+	return kept[start:]
 }
 
 // closeJournalLocked closes and forgets the append handle for id, if open.
@@ -239,6 +307,19 @@ func (s *fileStore) CloseJournal(id string) {
 	s.closeJournalLocked(id)
 }
 
+// discardJournal closes any cached append handle for id and REMOVES its
+// journal file (F019). Used when admission failed before its record
+// committed: the record is the commit point (A25) and recovery enumerates
+// records, never event files, so this journal is a definite orphan —
+// without this, repeated storage failures leaked both the descriptor (the
+// cached handle was never closed) and history files invisible to retention.
+func (s *fileStore) discardJournal(id string) {
+	s.mu.Lock()
+	s.closeJournalLocked(id)
+	s.mu.Unlock()
+	_ = os.Remove(s.journalPath(id))
+}
+
 func (s *fileStore) journalPath(id string) string {
 	return filepath.Join(s.eventsDir, id+".jsonl")
 }
@@ -247,22 +328,45 @@ func (s *fileStore) journalPath(id string) string {
 // inserted wherever history is known to be missing: a sequence hole, or a
 // torn/corrupt tail (unclean shutdown or external damage) — the file is
 // truncated at the damage point so future appends continue from a clean end.
+// F016: real events and gap markers are merged in SEQUENCE order, so the
+// replay view is chronological and the manager's next-sequence derivation
+// cannot rewind (a hole at 2 used to append the gap marker after the real
+// tail, making the next emitted sequence collide with an existing one).
 // A missing journal is an empty history, not an error.
 func (s *fileStore) loadEvents(id string) ([]Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	events, gaps, err := s.scanLocked(id)
+	if err != nil {
+		return nil, err
+	}
 	if len(gaps) > 0 {
 		events = append(events, gaps...)
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].Sequence < events[j].Sequence
+		})
 	}
-	return events, err
+	return events, nil
 }
 
 // scanLocked reads the journal once, detecting holes and tail damage. It
-// returns the parsed events plus gap markers for position-aware callers, and
-// truncates the file at the damage offset when the tail is corrupt so the
-// journal never grows behind a dead line (a gap marker is emitted once per
-// load; appends after truncation extend the clean prefix).
+// returns the parsed events plus gap markers, and truncates the file at the
+// damage offset when the tail is corrupt so the journal never grows behind
+// a dead line (a gap marker is emitted once per load; appends after
+// truncation extend the clean prefix).
+//
+// F016: sequence numbers must be strictly increasing in an append-only
+// journal. A zero, duplicate, or regressing sequence is treated as damage
+// at that offset (it can only arise from external interference or the
+// ordering bug this fixes) — without the check, a regressing sequence made
+// the hole arithmetic underflow and the next append reuse an existing ID.
+//
+// F017: framing damage (unparseable record, wrong operation, oversized
+// line) is distinct from a storage READ failure. Only the former truncates;
+// an I/O error returns without touching the file — repairing a transient
+// read failure by deleting bytes would destroy good history. A valid final
+// record without its terminating newline is repaired by appending the
+// newline (never by concatenating the next record onto it).
 func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 	path := s.journalPath(id)
 	file, err := os.Open(path)
@@ -273,6 +377,11 @@ func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 		return nil, nil, err
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	size := info.Size()
 
 	var events []Event
 	var gaps []Event
@@ -288,7 +397,7 @@ func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 			continue
 		}
 		var event Event
-		if err := json.Unmarshal(line, &event); err != nil || event.OperationID != id {
+		if err := json.Unmarshal(line, &event); err != nil || event.OperationID != id || event.Sequence == 0 || event.Sequence <= lastSeq {
 			damage = fmt.Sprintf("journal corrupt at byte %d", offset)
 			break
 		}
@@ -304,7 +413,25 @@ func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 		offset += int64(len(line)) + 1
 	}
 	if err := scanner.Err(); err != nil {
-		damage = fmt.Sprintf("journal unreadable at byte %d (%v)", offset, err)
+		if errors.Is(err, bufio.ErrTooLong) {
+			// An oversized record is framing damage (payloads are bounded at
+			// ingestion, so this is external); truncation at the record's
+			// start offset is the same repair as any other corrupt frame.
+			damage = fmt.Sprintf("journal record exceeds the size limit at byte %d", offset)
+		} else {
+			// Storage read failure: do NOT truncate (F017).
+			return nil, nil, fmt.Errorf("reading journal %s at byte %d: %w", path, offset, err)
+		}
+	}
+	if damage == "" && offset == size+1 {
+		// The final record parsed cleanly but had no terminating newline
+		// (F017). Append one so the next event append cannot concatenate a
+		// second JSON object onto this record — which would corrupt the
+		// journal permanently on its next read.
+		if err := appendNewlineLocked(path); err != nil {
+			return nil, nil, fmt.Errorf("repairing unterminated journal %s: %w", path, err)
+		}
+		log.Printf("[operation] journal %s: appended missing final newline", id)
 	}
 	if damage != "" {
 		s.closeJournalLocked(id)
@@ -317,6 +444,18 @@ func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 		})
 	}
 	return events, gaps, nil
+}
+
+// appendNewlineLocked appends a single '\n' to the journal file. Caller must
+// hold s.mu (the repair runs inside scanLocked).
+func appendNewlineLocked(path string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write([]byte{'\n'})
+	cerr := f.Close()
+	return errors.Join(werr, cerr)
 }
 
 // Health probes whether the record and journal directories are still usable
@@ -360,7 +499,10 @@ func (s *fileStore) deleteOperation(id string) error {
 // sweepRetention deletes terminal operations past the retention caps and
 // returns their ids. maxAge removes terminal operations older than the cutoff;
 // maxCount bounds the total record count by removing the oldest terminal
-// operations first. Non-terminal operations are never touched.
+// operations first. Non-terminal operations are never touched. F020: the two
+// policies apply INDEPENDENTLY — the count pass previously filtered its
+// candidates through the age predicate, so configuring age retention off
+// (negative) silently disabled the count bound too.
 func (s *fileStore) sweepRetention(now time.Time, maxAge time.Duration, maxCount int) []string {
 	type candidate struct {
 		id        string
@@ -391,17 +533,19 @@ func (s *fileStore) sweepRetention(now time.Time, maxAge time.Duration, maxCount
 		})
 	}
 	var removed []string
+	removedSet := make(map[string]bool)
 	for _, rec := range records {
 		if rec.terminal && maxAge > 0 && now.Sub(rec.createdAt) > maxAge {
 			if err := s.deleteOperation(rec.id); err == nil {
 				removed = append(removed, rec.id)
+				removedSet[rec.id] = true
 			}
 		}
 	}
 	if maxCount > 0 {
 		var terminal []candidate
 		for _, rec := range records {
-			if rec.terminal && now.Sub(rec.createdAt) <= maxAge {
+			if rec.terminal {
 				terminal = append(terminal, rec)
 			}
 		}
@@ -411,12 +555,18 @@ func (s *fileStore) sweepRetention(now time.Time, maxAge time.Duration, maxCount
 			}
 			return terminal[i].createdAt.Before(terminal[j].createdAt)
 		})
+		remaining := len(records) - len(removed)
 		for _, rec := range terminal {
-			if len(records)-len(removed) <= maxCount {
+			if remaining <= maxCount {
 				break
+			}
+			if removedSet[rec.id] {
+				continue
 			}
 			if err := s.deleteOperation(rec.id); err == nil {
 				removed = append(removed, rec.id)
+				removedSet[rec.id] = true
+				remaining--
 			}
 		}
 	}
