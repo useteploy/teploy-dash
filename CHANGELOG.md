@@ -4,14 +4,46 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+- **Readiness vs liveness probes.** `/healthz` is a cheap, dependency-free
+  liveness check (a broken store should not get the process restarted);
+  `/readyz` reports readiness: store reachable, operation persistence not
+  degraded. `ready` and `degraded` answer 200 (degraded stays in rotation);
+  `unavailable` answers 503. Both are auth-exempt like `/api/health`.
+- **Per-target admission budgets for operations.**
+  `TEPLOY_DASH_MAX_QUEUED_PER_TARGET` (default 50) bounds how many
+  non-finished operations may be queued for one server+app; excess
+  enqueues are rejected with HTTP 429 instead of accumulating without
+  bound. Idempotent replays of already-queued work still pass.
+- **Actor attribution on operations.** Every operation records which
+  principal admitted it (`actor.kind` local/sso/mcp, subject, label):
+  the signed-in session for UI paths, the API token for MCP mutations, the
+  retrying principal for retries. Records predating the field carry none.
+- **SSO admin surface.** Settings > SSO lists the OIDC identities known to
+  the instance (with last sign-in) and revokes their sessions; Settings >
+  Users gains a per-account "Revoke sessions" button.
+
 ### Changed
+- **Log streaming is SSE-only.** The log viewer path moved from the
+  hand-written WebSocket to `/api/logs/{server}/{app}`
+  (`text/event-stream`, same-origin enforced); the hand-rolled RFC 6455
+  upgrade and frame writer are deleted.
+- **Shutdown joins in-flight operations.** On SIGTERM/SIGINT the operation
+  runners drain first (bounded); stragglers are force-canceled with an
+  explicit "dashboard shutting down" attribution and a persist grace,
+  replacing the hard exit that killed CLI children mid-write.
+- **Accessibility basics.** Explicit label associations on the main flows'
+  controls, focus traps + Escape on the monitor and restore-test dialogs,
+  a skip link, current-page landmarks on the nav, and live regions on
+  toasts and login/setup errors. Verified statically; a real-browser
+  accessibility pass remains open.
 - **The bundled teploy CLI is 0.1.33, up from 0.1.27.** Dash shells out to this
   binary for deploy and rollback, so every app it deployed inherited the
   stale-image defect: teploy skipped `docker pull` whenever the tag was already
   in the server's local cache, so a floating tag could serve a build older than
   the registry indefinitely. 0.1.33 pulls every tag and caches only
-  digest-pinned references. 0.1.31 had already fixed the other half, taking the
-  deploy version from the image rather than git HEAD — at 0.1.27 dash had
+  digest-pinned references. 0.1.31 had already fixed the other half, taking
+  the deploy version from the image rather than git HEAD — at 0.1.27 dash had
   neither, which is the combination that let a container be named after a
   commit its image did not contain.
 

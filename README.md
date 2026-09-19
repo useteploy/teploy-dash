@@ -214,6 +214,7 @@ return 404.
 | `TEPLOY_DASH_OPERATION_JOURNAL_BYTES` | `4194304` | Per-operation event-journal cap in bytes. When crossed, the journal is compacted to the retained tail (oldest events dropped, marked as a gap on replay). |
 | `TEPLOY_DASH_OPERATION_HISTORY_DAYS` | `30` | Retention age for finished operations: records and event journals older than this are deleted at startup. `0` keeps the default; set a huge value to effectively disable. |
 | `TEPLOY_DASH_MAX_OPERATIONS` | `5000` | Maximum retained operation records (oldest finished operations are removed first, live ones are never removed). |
+| `TEPLOY_DASH_MAX_QUEUED_PER_TARGET` | `50` | Per-target admission budget: how many non-finished operations may be queued for one server+app before further enqueues are rejected with HTTP 429 (never silently dropped). Idempotent replays of already-queued work still pass. |
 | `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
 | `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
 
@@ -248,7 +249,9 @@ sign-in is recorded in `users.json` as a principal keyed by
 name. Roles stay IdP-authoritative (refreshed on every sign-in, read live by
 active sessions), and an administrator can list (`GET /api/sso`) or revoke
 (`POST /api/sso/revoke`) a principal's sessions without touching the IdP;
-revocation forces a fresh sign-in.
+revocation forces a fresh sign-in. Both surfaces are in the UI:
+Settings > SSO lists the identities (with last sign-in) and
+Settings > Users has a per-account Revoke sessions button.
 
 #### Self-hosted identity providers
 
@@ -300,6 +303,8 @@ so the direct role claim is available here and takes precedence over groups.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Liveness probe (auth-exempt). |
+| GET | `/healthz` | Liveness probe, dependency-free (auth-exempt). Restarting cannot help a broken dependency, so this stays green through store outages. |
+| GET | `/readyz` | Readiness probe (auth-exempt): `ready` (200) / `degraded` (200 — serving with impaired persistence or operation service) / `unavailable` (503 — store unreachable or auth-store outage). Use for load-balancer health checks. |
 | GET | `/status`, `/api/status` | Public status page + JSON (auth-exempt; 404 unless `--public-status`). Exposes only name/up-down/24h-uptime. |
 | GET | `/api/cli/status` | Whether the `teploy` CLI is on `$PATH` and its version. |
 | GET | `/api/apps` | Fleet app list across all configured servers. |

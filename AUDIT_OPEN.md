@@ -11,8 +11,11 @@ Open items: 0 P2 improvements, 14 deferred findings (design/architecture),
 2 upstream (teploy-cli) items, plus recorded residuals inside partially-fixed
 findings (2026-09-17 pass 6). Round-2 (pass 7) deferrals are folded into the
 same deferral list below. The 2026-09-18 hardening session closed the dash-04
-journal/retention item and the A02/A08 identity cluster; see the resolution
-log.
+journal/retention item and the A02/A08 identity cluster; a second 2026-09-18
+session closed the A12/A27 admission-budget + actor-attribution remainder,
+the A39/A47 readiness contract, the A24/A32/A33 WebSocket replacement, and
+the SSO admin UI, and landed the A49/A58 accessibility basics. See the
+resolution log.
 
 ## useteploy__teploy-dash-04 - P2 - FIXED 2026-09-18 (commit bb519ce)
 
@@ -175,15 +178,17 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
 
 ### Deferred (design/architecture, with rationale)
 
-- A02 - FIXED 2026-09-18 (commit 478337e): the epoch-based
-  issuance/revocation redesign landed. Every session carries its principal
-  key + AuthEpoch; issuance captures the epoch inside the same locked
-  critical section that verified credentials (local) or persisted the
-  principal row (OIDC), and validation re-checks the epoch unconditionally
-  on every request — issue -> revoke -> old token rejected is gate-tested
-  for both identity kinds, plus an explicit concurrent login/revoke/request
-  race test under -race. Admin revoke operations:
-  POST /api/users/{u}/revoke-sessions and POST /api/sso/revoke.
+- A02 - FIXED 2026-09-18 (commit 478337e; admin UI in the residual cluster
+  session): the epoch-based issuance/revocation redesign landed. Every
+  session carries its principal key + AuthEpoch; issuance captures the
+  epoch inside the same locked critical section that verified credentials
+  (local) or persisted the principal row (OIDC), and validation re-checks
+  the epoch unconditionally on every request — issue -> revoke -> old token
+  rejected is gate-tested for both identity kinds, plus an explicit
+  concurrent login/revoke/request race test under -race. Admin revoke
+  operations: POST /api/users/{u}/revoke-sessions and POST /api/sso/revoke;
+  both now have UI surfaces (Settings > Users "Revoke sessions", and
+  Settings > SSO listing principals with last sign-in).
 - A08 - FIXED 2026-09-18 (commit 478337e, residual): OIDC identity is the
   issuer-namespaced subject oidc:<sha256(issuer)[:16]>:<sub>, persisted as
   a principal row in users.json (additive; pre-principal installs load an
@@ -199,11 +204,14 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
   restricting env/KV/log reads to editors intentionally changes the
   documented viewer contract and needs an approved role matrix + migration.
   Baseline security headers landed.
-- A12 - CORE LANDED 2026-09-18 (commit bb519ce): same-target operations
-  execute in durable FIFO admission order (per-target runner queue +
-  persisted AdmissionSeq). Still deferred: admission budgets (queue-depth
-  caps per principal) and the monitor outbox scheduler restructure; the
-  generation fence (pass 4/5) covers the common interleavings.
+- A12 - CORE LANDED 2026-09-18 (commit bb519ce); REMAINDER LANDED in the
+  residual cluster session: admission budgets bound non-terminal operations
+  per target (server+app — the FIFO-runner granularity;
+  TEPLOY_DASH_MAX_QUEUED_PER_TARGET, default 50; excess enqueues rejected
+  with 429, idempotent replays of queued work still pass). Still deferred:
+  per-PRINCIPAL budget carving (needs the role/policy matrix) and the
+  monitor outbox scheduler restructure; the generation fence (pass 4/5)
+  covers the common interleavings.
 - A19 (residual) - MCP idempotency keys scoped per token: additive protocol
   change; requires client coordination.
 - A21 (residual) - strict per-tool DTO decoding and full JSON-RPC envelope
@@ -214,15 +222,22 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
   and process-group handling across all helpers is a refactor with no
   measured need.
 - A23 - upstream, see UPSTREAM-1.
-- A24 - hand-written WebSocket: replacing it (maintained implementation or
-  SSE-only) changes the frontend log path; the SSE fallback already exists
-  and same-origin is enforced. Defer with the frontend log-viewer rework.
+- A24 - FIXED in the residual cluster session (2026-09-18): log streaming
+  is SSE-only at /api/logs/{server}/{app} (same-origin enforced,
+  unauthenticated requests get the JSON 401); the hand-written RFC 6455
+  transport (ws.go, wsLineWriter, the /ws/ prefix and its gate
+  special-cases) is deleted. The SSE fallback path WAS the surviving
+  transport, so the WS branch was pure dead risk.
 - A26 (residual) - FIXED 2026-09-18 via useteploy__teploy-dash-04 (commit
   bb519ce): journal persistence, byte+age retention, and replay-gap events
-  landed; persistence-degraded readiness remains with the A39/A47
-  health-contract work.
+  landed; persistence-degraded readiness landed with the A39/A47 work in
+  the residual cluster session.
 - A27 - CORE LANDED 2026-09-18 (commit bb519ce): FIFO admission ordering
-  (see A12). Still deferred: actor attribution fields and
+  (see A12). REMAINDER LANDED in the residual cluster session: operations
+  carry an Actor {kind: local|sso|mcp, subject, label} recording which
+  principal admitted them (sessions project from the request; MCP tokens
+  ride the tool context; retries attribute to the retrying principal with
+  RetryOf lineage; nil on pre-existing records). Still deferred:
   alias-fingerprint admission checks (API + schema change needing client
   coordination).
 - A28 - manifest revision leases + validation work budget: cross-service
@@ -238,10 +253,16 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
 - A37 - fleet observation envelope (stale/partial/errors): protocol + UI
   redesign; the fleet cache already preserves last-known state and logs
   per-server failures.
-- A39 (residual) - readiness vs liveness separation, component-health
-  reporting, and bounded Shutdown/Wait joins across monitor/restore/
-  operation runners. run()-error propagation, listener-failure exit,
-  require-Nucleus check, and DSN redaction landed.
+- A39 (residual) - FIXED in the residual cluster session (2026-09-18):
+  readiness vs liveness separation landed (/healthz cheap liveness;
+  /readyz readiness — store reachable via Ping on both backends, operation
+  persistence degradation reported per channel with journal-dir probe;
+  ready/degraded stay 200, unavailable is 503), and the last unjoined
+  background work is joined (operation target runners drain bounded, then
+  force-cancel with an explicit shutdown attribution and a fixed persist
+  grace, wired between HTTP shutdown and store close). Component health
+  covers store + operation persistence; monitor/restore runner joins had
+  already landed (pass-7 A46).
 - A40 - durable bounded alert outbox + SMTP TLS/auth policy: reliability
   subsystem; current delivery is best-effort by design.
 - A42 (residual) - explicit auth-mode/capability view (/api/auth/me
@@ -252,8 +273,16 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
 - A47 (residual) - router replace() for renames and uniform component
   lifetime patterns (AbortController, route-generation guards): frontend
   refactor.
-- A49 - accessibility pass (Low): keyboard/focus/labels/dialog management
-  across the SPA; needs real browser testing.
+- A49 - PARTIALLY FIXED in the residual cluster session (2026-09-18):
+  mechanical basics landed — explicit label/for association across the
+  main flows (deploy forms, server settings, monitor + restore dialogs,
+  user/token forms), aria-labels on standalone controls, dialog focus
+  traps (role=dialog/aria-modal, initial focus, Tab wrap, Escape) on both
+  modals, skip link, aria-current nav, live regions on toasts and
+  login/setup errors; visible :focus outlines were already present.
+  REMAINS DEFERRED: a real-browser pass (keyboard walkthrough, screen
+  reader, contrast audit) — the landed work is verified statically
+  (label/id resolution checked mechanically), not interactively.
 - A50 (residual) - browser-contract tests, govulncheck in CI, reviewed
   toolchain pin (1.24 is past end of support; latest supported series at
   audit date is 1.27.x), action/image digest pinning. Race tests, gofmt
@@ -423,12 +452,14 @@ dash side was ours to do.
   budgeting (bcrypt concurrency cap): needs an origin config surface and
   load measurements; the lockout/NAT and setup gaps are fixed.
 - A12 - CORE LANDED 2026-09-18 (commit bb519ce): durable FIFO admission
-  sequence + per-target ordered execution (same as pass-6 A12/A27). Still
-  deferred: admission budgets and idempotency-key namespacing (client
-  coordination).
-- A13 - idempotency keys namespaced per principal and wired into UI/MCP +
-  actor-attribution fields: additive API + operation-schema change needing
-  client coordination.
+  sequence + per-target ordered execution (same as pass-6 A12/A27).
+  Admission budgets LANDED in the residual cluster session (per-target,
+  TEPLOY_DASH_MAX_QUEUED_PER_TARGET). Still deferred: idempotency-key
+  namespacing per principal (client coordination).
+- A13 - actor-attribution fields LANDED in the residual cluster session
+  (see pass-6 A27). Still deferred: idempotency keys namespaced per
+  principal and wired into UI/MCP — additive API + operation-schema change
+  needing client coordination.
 - A15 (residual) - routing env/kv/lock mutations through the operation
   queue and unifying template-vs-app lock targets: single-mutation-boundary
   redesign; the env/kv direct paths are single SSH round trips with typed
@@ -454,8 +485,9 @@ dash side was ours to do.
   remaining hardening rides the A22/A31 envelope work.
 - A31 - remote-read observation envelope, exact container identity,
   stderr surfacing: protocol redesign across remote/machine.
-- A32/A33 - WebSocket replacement and full stream framing/revocation: same
-  deferral as pass-6 A24 (SSE fallback exists and is same-origin-checked).
+- A32/A33 - FIXED in the residual cluster session (2026-09-18): SSE-only
+  log streaming, hand-written WebSocket deleted (same resolution as pass-6
+  A24 above).
 - A37 - groups optimistic concurrency + composite app identity: the
   groups.json schema is shared with the CLI; coordinated migration
   (same as pass-6 A35).
@@ -466,14 +498,17 @@ dash side was ours to do.
   and tested behavior.
 - A44 - durable bounded alert outbox with retries: reliability subsystem
   (same as pass-6 A40).
-- A47 (residual) - readiness vs liveness endpoints and degraded-persistence
-  reporting: health-contract redesign (same as pass-6 A39 residual).
+- A47 (residual) - FIXED in the residual cluster session (2026-09-18):
+  readiness vs liveness endpoints and degraded-persistence reporting
+  landed (same resolution as pass-6 A39 above).
 - A51 - frontend load/empty/partial/stale state model: UI-state redesign;
   the loaders with user-facing impact (fleet, links, notifications, detail
   identity) got targeted honesty fixes in this pass.
 - A55 - monitor selection as a canonical URL route: frontend routing
   refactor (same as pass-6 A47 residual).
-- A58 - accessibility pass: same as pass-6 A49.
+- A58 - PARTIALLY FIXED in the residual cluster session (2026-09-18):
+  mechanical basics landed, real-browser verification remains deferred
+  (same resolution as pass-6 A49 above).
 - A60 - browser/installer/CLI-contract CI, action/image digest pinning:
   same as pass-6 A50 residual.
 
@@ -520,3 +555,30 @@ operation records. No push performed.
   all 12 packages ok; `go test -race -count=1 ./...` all 12 packages ok
   (two consecutive race runs clean); `make build` ok. README documents the
   new endpoints and retention env vars. No push performed.
+
+## Resolution log (2026-09-18 residual-cluster session)
+
+- Admission + attribution (commit a866cca): pass-6 A12/A27 remainder and
+  pass-7 A12/A13 actor half — per-target admission budgets
+  (TEPLOY_DASH_MAX_QUEUED_PER_TARGET, default 50; HTTP 429 on excess,
+  idempotent replays pass) and Actor attribution on operations
+  (local/sso/mcp; MCP tokens via mcp.WithToken context; retries attribute
+  to the retrying principal). Tests in internal/operation/manager_test.go
+  and internal/server/operations_test.go.
+- Health contract (commit b8b2ecd): pass-6 A39 residual and pass-7 A47
+  residual — /healthz + /readyz (store Ping both backends, per-channel
+  persistence degradation with journal probe, degraded stays in rotation,
+  unavailable 503), bounded operation-runner shutdown joins wired in main.
+  Tests in internal/server/probes_test.go and manager_test.go.
+- Transport (commit 73b5ef3): pass-6 A24 and pass-7 A32/A33 — SSE-only
+  /api/logs/{server}/{app}, ws.go deleted, gate /ws/ special-cases
+  removed, EventSource frontend. Tests in internal/server/logs_test.go.
+- SSO admin surface (commit 38497af): Settings > SSO + per-user Revoke
+  sessions against the landed revocation API; principalView carries
+  last_sign_in.
+- Accessibility basics (commit 050a4a4): pass-6 A49 / pass-7 A58 partial —
+  labels, dialog focus traps, skip link, live regions; static verification
+  only, interactive browser pass remains deferred (recorded above).
+- Gates at the closing docs commit: `go vet ./...` clean; `go test ./...`
+  all 12 packages ok; `go test -race -count=1 ./...` all 12 packages ok;
+  `make build` ok. No push performed.
