@@ -302,24 +302,29 @@ func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 // edits made while the run was in flight survive, and a deleted test stays
 // deleted (zero rows affected). The WHERE clause also requires the identity
 // columns to match the run's target (A24): a retargeted or recreated test
-// never inherits the old target's verification result.
-func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) error {
+// never inherits the old target's verification result. F037: region is part
+// of the identity, and zero affected rows are reported as applied=false
+// (dropped) rather than masquerading as success.
+func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
 	var lastRunMs int64
 	if !result.LastRunAt.IsZero() {
 		lastRunMs = result.LastRunAt.UnixMilli()
 	}
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE restore_tests
 		 SET last_run_ms = $1, last_ok = $2, last_detail = $3,
 		     last_metric = $4, last_date = $5, last_duration_ms = $6
-		 WHERE id = $7 AND server = $8 AND app = $9 AND accessory = $10 AND bucket = $11`,
+		 WHERE id = $7 AND server = $8 AND app = $9 AND accessory = $10 AND bucket = $11 AND region = $12`,
 		lastRunMs, result.LastOK, result.LastDetail, result.LastMetric,
 		result.LastDate, result.LastDurationMs, id,
-		result.Server, result.App, result.Accessory, result.Bucket,
+		result.Server, result.App, result.Accessory, result.Bucket, result.Region,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *NucleusStore) DeleteRestoreTest(id string) error {
@@ -373,7 +378,10 @@ func (s *NucleusStore) GetChecks(monitorID string, since time.Time, limit int) (
 		var responseMs int64
 		err := rows.Scan(&r.MonitorID, &r.Status, &r.StatusCode, &responseMs, &r.Message, &r.CheckedAt)
 		if err != nil {
-			continue
+			// F040: a row that cannot be decoded is a storage failure, not a
+			// silently smaller history — a partial read used to look like a
+			// complete (shorter) one.
+			return nil, fmt.Errorf("decode check row for %s: %w", monitorID, err)
 		}
 		r.ResponseTime = time.Duration(responseMs) * time.Millisecond
 		results = append(results, r)

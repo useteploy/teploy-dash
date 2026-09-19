@@ -235,9 +235,9 @@ func (s *FileStore) DeleteRestoreTest(id string) error {
 // SaveRestoreTestResult applies only the Last* fields of `result` onto the
 // stored configuration (A15): config edits made while the run was in flight
 // survive, and a deleted test stays deleted.
-func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) error {
+func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) (bool, error) {
 	if !ValidID(id) {
-		return fmt.Errorf("invalid restore test id %q", id)
+		return false, fmt.Errorf("invalid restore test id %q", id)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -246,20 +246,23 @@ func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // deleted mid-run: do not resurrect
+			return false, nil // deleted mid-run: do not resurrect
 		}
-		return err
+		return false, err
 	}
 	var stored RestoreTest
 	if err := json.Unmarshal(data, &stored); err != nil {
-		return fmt.Errorf("reading stored restore test: %w", err)
+		return false, fmt.Errorf("reading stored restore test: %w", err)
 	}
 	// A24: a result only applies to the configuration that produced it. If
 	// the test was retargeted (or deleted and recreated) while the run was
 	// in flight, the stored identity no longer matches and the result is
-	// dropped rather than attributed to the new target.
-	if stored.Server != result.Server || stored.App != result.App || stored.Accessory != result.Accessory || stored.Bucket != result.Bucket {
-		return nil
+	// dropped rather than attributed to the new target. F037: region is
+	// part of the identity — the same bucket name in a different region is
+	// a different target.
+	if stored.Server != result.Server || stored.App != result.App || stored.Accessory != result.Accessory ||
+		stored.Bucket != result.Bucket || stored.Region != result.Region {
+		return false, nil
 	}
 	stored.LastRunAt = result.LastRunAt
 	stored.LastOK = result.LastOK
@@ -269,9 +272,9 @@ func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) error {
 	stored.LastDurationMs = result.LastDurationMs
 	out, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
-	return atomicWrite(path, out, 0644)
+	return true, atomicWrite(path, out, 0644)
 }
 
 func (s *FileStore) SaveCheck(result CheckResult) error {

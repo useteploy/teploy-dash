@@ -271,8 +271,12 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 
 	// A run against the CURRENT configuration applies its result.
 	run := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", LastOK: true, LastDetail: "ok", LastMetric: "checksum", LastRunAt: time.Now()}
-	if err := s.SaveRestoreTestResult("t1", run); err != nil {
+	applied, err := s.SaveRestoreTestResult("t1", run)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("matching-target result not applied")
 	}
 	got, err := s.GetRestoreTest("t1")
 	if err != nil {
@@ -290,8 +294,24 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", LastOK: false, LastDetail: "stale", LastRunAt: time.Now()}
-	if err := s.SaveRestoreTestResult("t1", stale); err != nil {
+	applied, err = s.SaveRestoreTestResult("t1", stale)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if applied {
+		t.Fatal("retargeted result reported as applied")
+	}
+	// F037: a region-only change is also a retarget.
+	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "NEW", Region: "eu-west-1", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	sameBucketOtherRegion := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "NEW", Region: "us-east-1", LastOK: true, LastRunAt: time.Now()}
+	applied, err = s.SaveRestoreTestResult("t1", sameBucketOtherRegion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied {
+		t.Fatal("region-only retarget inherited the old region's result")
 	}
 	got, _ = s.GetRestoreTest("t1")
 	if got.Bucket != "NEW" {
@@ -305,8 +325,8 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 	if err := s.DeleteRestoreTest("t1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveRestoreTestResult("t1", run); err != nil {
-		t.Fatal(err)
+	if applied, err := s.SaveRestoreTestResult("t1", run); err != nil || applied {
+		t.Fatalf("deleted-mid-run save: applied=%v err=%v", applied, err)
 	}
 	if _, err := s.GetRestoreTest("t1"); err == nil {
 		t.Error("deleted restore test resurrected by its own result")

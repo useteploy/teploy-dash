@@ -95,7 +95,13 @@ type Store interface {
 	// stored configuration. A run completing after a config edit must not
 	// overwrite the edit, and a run completing after a delete must not
 	// resurrect the test (A15). A missing id is a no-op.
-	SaveRestoreTestResult(id string, result RestoreTest) error
+	//
+	// F037: the first return reports whether the result was APPLIED.
+	// applied=false with a nil error means the stored configuration's target
+	// identity no longer matches the run's (retargeted, or deleted and
+	// recreated): the result was intentionally dropped, and the caller must
+	// neither alert off it nor present it as current.
+	SaveRestoreTestResult(id string, result RestoreTest) (bool, error)
 	DeleteRestoreTest(id string) error
 
 	// Check results

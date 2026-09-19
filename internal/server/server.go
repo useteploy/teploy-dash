@@ -3676,12 +3676,17 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		}
 		// Preserve the last result across config edits: the client only
 		// round-trips config fields, and an upsert that zeroed the result
-		// columns would show "never run" after every edit.
+		// columns would show "never run" after every edit. F038: a RETARGETED
+		// test (server/app/accessory/bucket/region changed) keeps none of the
+		// old target's verdict — a newly selected target must not display
+		// "backup verified" before it has ever been checked.
 		t := store.RestoreTest{
 			ID: body.ID, Server: body.Server, App: body.App, Accessory: body.Accessory,
 			Bucket: body.Bucket, Region: body.Region, IntervalHours: body.IntervalHours, Enabled: body.Enabled,
 		}
-		if prev, err := s.store.GetRestoreTest(t.ID); err == nil && prev != nil {
+		if prev, err := s.store.GetRestoreTest(t.ID); err == nil && prev != nil &&
+			prev.Server == t.Server && prev.App == t.App && prev.Accessory == t.Accessory &&
+			prev.Bucket == t.Bucket && prev.Region == t.Region {
 			t.LastRunAt = prev.LastRunAt
 			t.LastOK = prev.LastOK
 			t.LastDetail = prev.LastDetail

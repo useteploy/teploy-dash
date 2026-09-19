@@ -220,9 +220,9 @@ type failingResultStore struct {
 	calls int
 }
 
-func (f *failingResultStore) SaveRestoreTestResult(id string, result store.RestoreTest) error {
+func (f *failingResultStore) SaveRestoreTestResult(id string, result store.RestoreTest) (bool, error) {
 	f.calls++
-	return errors.New("disk full")
+	return false, errors.New("disk full")
 }
 
 // F036: a second RunNow while one is in flight returns the UNCHANGED record

@@ -379,9 +379,18 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 	// long run was in flight must survive, and a deleted test must not be
 	// resurrected by its own completion. A26: a failed save makes the run
 	// visibly unpersisted — no alert is sent off a state nobody can see.
-	if err := r.store.SaveRestoreTestResult(t.ID, t); err != nil {
+	// F037: an intentionally DROPPED result (the target changed since the
+	// run started) is equally unpersisted — it must not drive the
+	// transition baseline or send an alert attributed to the new target.
+	applied, err := r.store.SaveRestoreTestResult(t.ID, t)
+	if err != nil {
 		log.Printf("[restoretest] Failed to save result for %s: %v (result not persisted, no alert sent)", t.ID, err)
 		t.LastDetail = fmt.Sprintf("%s [result could not be persisted: %v]", t.LastDetail, err)
+		return t, nil
+	}
+	if !applied {
+		log.Printf("[restoretest] Result for %s dropped (target changed since the run started); not persisted, no alert sent", t.ID)
+		t.LastDetail = fmt.Sprintf("%s [result dropped: the test's target changed since this run started]", t.LastDetail)
 		return t, nil
 	}
 
