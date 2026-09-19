@@ -79,6 +79,9 @@ func run() error {
 	opJournalBytes := envInt64("TEPLOY_DASH_OPERATION_JOURNAL_BYTES", 0)
 	opHistoryDays := envInt64("TEPLOY_DASH_OPERATION_HISTORY_DAYS", 0)
 	opMaxOperations := int(envInt64("TEPLOY_DASH_MAX_OPERATIONS", 0))
+	// Per-target admission budget (A12/A27): how many non-terminal operations
+	// may be queued for one server before further enqueues are rejected.
+	opMaxQueued := int(envInt64("TEPLOY_DASH_MAX_QUEUED_PER_TARGET", 0))
 
 	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
 	// nor a saved auth.json exist, the server starts in setup mode so the user
@@ -187,6 +190,7 @@ func run() error {
 		OperationMaxJournalBytes: opJournalBytes,
 		OperationMaxHistoryAge:   time.Duration(opHistoryDays) * 24 * time.Hour,
 		OperationMaxOperations:   opMaxOperations,
+		OperationMaxQueued:       opMaxQueued,
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.

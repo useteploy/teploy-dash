@@ -59,7 +59,7 @@ func TestPersistenceAndMonotonicBoundedEvents(t *testing.T) {
 		return 0, nil
 	}
 	manager := newTestManager(t, dir, 5, executor)
-	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "persist-key")
+	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "persist-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,15 +111,15 @@ func TestIdempotencyReplayAndConflict(t *testing.T) {
 			return -1, ctx.Err()
 		}
 	})
-	first, replayed, err := manager.Enqueue(deployRequest("web", "example/web:1"), "same-key")
+	first, replayed, err := manager.Enqueue(deployRequest("web", "example/web:1"), "same-key", nil)
 	if err != nil || replayed {
 		t.Fatalf("first enqueue: replayed=%v err=%v", replayed, err)
 	}
-	second, replayed, err := manager.Enqueue(deployRequest("web", "example/web:1"), "same-key")
+	second, replayed, err := manager.Enqueue(deployRequest("web", "example/web:1"), "same-key", nil)
 	if err != nil || !replayed || second.ID != first.ID {
 		t.Fatalf("idempotent replay: first=%s second=%s replayed=%v err=%v", first.ID, second.ID, replayed, err)
 	}
-	_, _, err = manager.Enqueue(deployRequest("web", "example/web:2"), "same-key")
+	_, _, err = manager.Enqueue(deployRequest("web", "example/web:2"), "same-key", nil)
 	if !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting key error = %v", err)
 	}
@@ -149,11 +149,11 @@ func TestPerTargetSerialization(t *testing.T) {
 		return 0, nil
 	}
 	manager := newTestManager(t, t.TempDir(), 100, executor)
-	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := manager.Enqueue(Request{Kind: KindRollback, Server: "prod", App: "web"}, "")
+	second, _, err := manager.Enqueue(Request{Kind: KindRollback, Server: "prod", App: "web"}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestCancellation(t *testing.T) {
 		<-ctx.Done()
 		return -1, ctx.Err()
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,12 +211,12 @@ func TestSetRunningPersistFailureFailsBeforeExecution(t *testing.T) {
 	manager := newTestManager(t, dir, 100, executor)
 	// Hold the per-target lock with the first operation so the second parks
 	// before its running transition, deterministically.
-	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-started
-	second, _, err := manager.Enqueue(deployRequest("web", "example/web:2"), "")
+	second, _, err := manager.Enqueue(deployRequest("web", "example/web:2"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestSecretRedactionInRecordsEventsAndErrors(t *testing.T) {
 	op, _, err := manager.Enqueue(Request{
 		Kind: KindTemplateInstall, Server: "prod", Template: "postgres", Domain: "db.example.com",
 		Vars: map[string]string{"PASSWORD": secret},
-	}, "secret-key")
+	}, "secret-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestSecretRedactionInRecordsEventsAndErrors(t *testing.T) {
 			t.Fatalf("secret leaked in %s persistence", subdir)
 		}
 	}
-	if _, err := manager.Retry(op.ID); !errors.Is(err, ErrNotRetryable) {
+	if _, err := manager.Retry(op.ID, nil); !errors.Is(err, ErrNotRetryable) {
 		t.Fatalf("secret-bearing retry error = %v", err)
 	}
 }
@@ -390,7 +390,7 @@ func TestReplayAfterSequence(t *testing.T) {
 		emit(StreamStdout, "two")
 		return 0, nil
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestRejectedEnqueueNeverExecutesAfterRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(eventsDir, 0700) })
 
-	if _, _, err := manager.Enqueue(deployRequest("web", "img:1"), ""); err == nil {
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil); err == nil {
 		os.Chmod(eventsDir, 0700)
 		t.Fatal("expected enqueue to fail when the initial event cannot persist")
 	}
@@ -459,7 +459,7 @@ func TestOversizedEscapingEventStaysLoadable(t *testing.T) {
 		emit(StreamStdout, chatty)
 		return 0, nil
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestCorruptEventHistoryIsolated(t *testing.T) {
 	manager := newTestManager(t, dir, 100, func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
 		return 0, nil
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestCancelPersistsIntent(t *testing.T) {
 		<-release // keep the operation running until the test ends
 		return 0, ctx.Err()
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,14 +605,14 @@ func TestExecuteRefusesRepointedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Occupy the target with a first operation...
-	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "")
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-commands
 	// ...admit a second operation against the same target while the first
 	// still holds it (the second's admission snapshot records 10.0.0.1)...
-	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "")
+	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,4 +626,185 @@ func TestExecuteRefusesRepointedTarget(t *testing.T) {
 		t.Fatalf("repointed-target error = %q", finished.Error)
 	}
 	waitForStatus(t, manager, first.ID, StatusSucceeded)
+}
+
+// ── Admission budget (A12/A27 remainder) ──────────────────────────────────
+
+// The per-target budget rejects (never silently drops) enqueues once the
+// target already holds the cap in non-terminal operations, and admits again
+// once they reach terminal states. An idempotent replay of an already-queued
+// request must still succeed — it is not new work.
+func TestAdmissionBudgetRejectsAndReleases(t *testing.T) {
+	dir := t.TempDir()
+	release := make(chan struct{})
+	var commands atomic.Int32
+	manager, err := New(dir, Options{
+		Resolver: testResolver,
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			commands.Add(1)
+			<-release
+			return 0, nil
+		},
+		MaxQueuedPerTarget: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := &Actor{Kind: "local", Subject: "dana", Label: "dana"}
+	// Fill the budget for prod/web: one running (executor holds it) + one
+	// queued. Target granularity is server+app, same as the FIFO runner.
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", actor); err != nil {
+		t.Fatal(err)
+	}
+	<-waitForCommands(t, &commands, 1)
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:2"), "idem-key", actor); err != nil {
+		t.Fatal(err)
+	}
+	// Budget exhausted: a third enqueue for the same target is rejected.
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:3"), "", actor); !errors.Is(err, ErrAdmissionBudget) {
+		t.Fatalf("error = %v, want ErrAdmissionBudget", err)
+	}
+	// A different target (other app, same server) is unaffected.
+	if _, _, err := manager.Enqueue(deployRequest("api", "img:1"), "", actor); err != nil {
+		t.Fatalf("other target rejected: %v", err)
+	}
+	// Replay of an already-queued request is not new work — it returns the
+	// queued operation even at the cap.
+	replayed, ok, err := manager.Enqueue(deployRequest("web", "img:2"), "idem-key", actor)
+	if err != nil || !ok {
+		t.Fatalf("idempotent replay at budget cap: replayed=%v err=%v", ok, err)
+	}
+	if replayed.Status != StatusQueued && replayed.Status != StatusRunning {
+		t.Fatalf("replayed op status = %s", replayed.Status)
+	}
+	// Drain: budget frees as operations terminate.
+	close(release)
+	for _, op := range manager.List("", "", 0) {
+		waitForStatus(t, manager, op.ID, StatusSucceeded)
+	}
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:2"), "", actor); err != nil {
+		t.Fatalf("enqueue after drain rejected: %v", err)
+	}
+}
+
+func waitForCommands(t *testing.T, counter *atomic.Int32, want int32) chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if counter.Load() >= want {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	return done
+}
+
+// The budget survives a restart (it is computed from persisted records, not
+// in-memory state): a manager reopened over a dir full of non-terminal —
+// i.e. now interrupted — records frees its budget because interrupted is
+// terminal. The load-path behavior under a full budget is therefore
+// recoverable by definition; this pins it.
+func TestAdmissionBudgetCountsNonTerminalOnly(t *testing.T) {
+	dir := t.TempDir()
+	manager := newTestManager(t, dir, 5, func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		return 0, nil
+	})
+	actor := &Actor{Kind: "sso", Subject: "oidc:abc:def", Label: "Erin"}
+	for i := 0; i < 3; i++ {
+		if _, _, err := manager.Enqueue(deployRequest(fmt.Sprintf("app%d", i), "img:1"), "", actor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, op := range manager.List("", "", 0) {
+		waitForStatus(t, manager, op.ID, StatusSucceeded)
+	}
+	// All terminal: no budget consumed.
+	manager.mu.Lock()
+	depth := 0
+	for _, o := range manager.operations {
+		if o.Target != "" && !o.Status.Terminal() {
+			depth++
+		}
+	}
+	manager.mu.Unlock()
+	if depth != 0 {
+		t.Fatalf("non-terminal depth after drain = %d, want 0", depth)
+	}
+}
+
+// ── Actor attribution (A27 remainder) ─────────────────────────────────────
+
+// The actor is persisted with the record, served by Get/List, and reloaded
+// from disk; a retry is attributed to the retrying actor with lineage kept
+// in RetryOf.
+func TestActorAttributionPersistedAndReloaded(t *testing.T) {
+	dir := t.TempDir()
+	var runs atomic.Int32
+	manager, err := New(dir, Options{
+		Resolver: testResolver,
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			if runs.Add(1) == 1 {
+				return 1, errors.New("first run fails so the op is retryable")
+			}
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enqueuer := &Actor{Kind: "local", Subject: "dana", Label: "dana"}
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", enqueuer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := op.Actor; got == nil || got.Kind != "local" || got.Subject != "dana" || got.Label != "dana" {
+		t.Fatalf("enqueue response actor = %+v", got)
+	}
+	waitForStatus(t, manager, op.ID, StatusFailed)
+	retrier := &Actor{Kind: "mcp", Subject: "mcp-token/tok1", Label: "ci-bot"}
+	retry, err := manager.Retry(op.ID, retrier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.RetryOf != op.ID {
+		t.Fatalf("retry lineage: retry_of = %s, want %s", retry.RetryOf, op.ID)
+	}
+	waitForStatus(t, manager, retry.ID, StatusSucceeded)
+
+	// Reopen from disk: attribution must survive the restart.
+	reopened, err := New(dir, Options{
+		Resolver: testResolver,
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := reopened.Get(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Actor == nil || loaded.Actor.Subject != "dana" || loaded.Actor.Kind != "local" {
+		t.Fatalf("reloaded actor = %+v", loaded.Actor)
+	}
+	loadedRetry, err := reopened.Get(retry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedRetry.Actor == nil || loadedRetry.Actor.Kind != "mcp" || loadedRetry.Actor.Label != "ci-bot" {
+		t.Fatalf("reloaded retry actor = %+v", loadedRetry.Actor)
+	}
+	// Unattributed callers (nil actor) keep a nil field, not a zero struct.
+	plain, _, err := reopened.Enqueue(deployRequest("solo", "img:9"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Actor != nil {
+		t.Fatalf("nil actor must stay nil, got %+v", plain.Actor)
+	}
 }

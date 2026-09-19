@@ -81,6 +81,10 @@ type Config struct {
 	OperationMaxJournalBytes int64
 	OperationMaxHistoryAge   time.Duration
 	OperationMaxOperations   int
+	// OperationMaxQueued bounds non-terminal operations per target before
+	// enqueues are rejected (A12/A27 remainder; 0 = package default,
+	// negative disables).
+	OperationMaxQueued int
 	// CLI/read hooks keep machine-contract handling testable without changing
 	// production behavior.
 	CLIRunner          func(context.Context, ...string) (*cli.Result, error)
@@ -242,10 +246,11 @@ func New(config Config) *Server {
 	// when the installed CLI has it (probed once per process).
 	operation.SetVarStdinSupport(cli.VarStdinSupported)
 	s.operations, s.operationInitErr = operation.New(config.DataDir, operation.Options{
-		MaxEvents:       config.OperationMaxEvents,
-		MaxJournalBytes: config.OperationMaxJournalBytes,
-		MaxHistoryAge:   config.OperationMaxHistoryAge,
-		MaxOperations:   config.OperationMaxOperations,
+		MaxEvents:          config.OperationMaxEvents,
+		MaxJournalBytes:    config.OperationMaxJournalBytes,
+		MaxHistoryAge:      config.OperationMaxHistoryAge,
+		MaxOperations:      config.OperationMaxOperations,
+		MaxQueuedPerTarget: config.OperationMaxQueued,
 		Resolver:        resolver,
 		ProjectResolver: func(server, app, revision string) (string, error) {
 			if s.manifests == nil {

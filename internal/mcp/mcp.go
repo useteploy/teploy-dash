@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,6 +54,23 @@ type Handler struct {
 // NewHandler builds the MCP handler over a token store and tool set.
 func NewHandler(tokens *TokenStore, tools []Tool, version string) *Handler {
 	return &Handler{tokens: tokens, tools: tools, version: version}
+}
+
+// tokenCtxKey carries the verified token on the context handed to Tool.Run,
+// so mutating backends can attribute their operations to the API principal
+// that requested them (A27) without widening every Tool signature.
+type tokenCtxKey struct{}
+
+// WithToken attaches a verified token to a tool-invocation context.
+func WithToken(ctx context.Context, tok Token) context.Context {
+	return context.WithValue(ctx, tokenCtxKey{}, tok)
+}
+
+// TokenFromContext returns the verified token for the current tool call, if
+// any (absent when a tool runs outside the HTTP handler — e.g. tests).
+func TokenFromContext(ctx context.Context) (Token, bool) {
+	tok, ok := ctx.Value(tokenCtxKey{}).(Token)
+	return tok, ok
 }
 
 // ServeHTTP implements the /api/mcp endpoint. Auth is enforced here (bearer
@@ -244,7 +262,7 @@ func (h *Handler) callTool(r *http.Request, name string, args map[string]interfa
 			return toolError(fmt.Sprintf("token %q is read-only; %s is not permitted", tok.Name, name))
 		}
 		log.Printf("[mcp] token=%q tool=%s", tok.Name, name)
-		out, err := t.Run(r.Context(), args)
+		out, err := t.Run(WithToken(r.Context(), tok), args)
 		if err != nil {
 			return toolError(err.Error())
 		}

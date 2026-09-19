@@ -111,7 +111,11 @@ type Operation struct {
 	// order (A12/A27 core); persisting it makes the admission order durable
 	// and gives listings a total order alongside CreatedAt.
 	AdmissionSeq uint64 `json:"admission_seq,omitempty"`
-	requestHash  string
+	// Actor records which principal admitted the operation (A27 remainder).
+	// Nil on records written before the field existed and on internal callers
+	// with no principal to attribute.
+	Actor       *Actor `json:"actor,omitempty"`
+	requestHash string
 }
 
 type Metadata struct {
@@ -153,4 +157,21 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key was already used for a different request")
 	ErrNotCancelable       = errors.New("operation is not cancelable")
 	ErrNotRetryable        = errors.New("operation is not retryable")
+	// ErrAdmissionBudget reports that the target's admission budget is
+	// exhausted: too many non-terminal operations are already queued for it
+	// (A12/A27 remainder). Bounded queues keep a runaway client (or a stuck
+	// target) from admitting unbounded work; the caller should back off.
+	ErrAdmissionBudget = errors.New("target admission budget exceeded — too many operations already queued for this target")
 )
+
+// Actor attributes an operation to the principal that admitted it (A27
+// remainder). It is deliberately NOT part of Request: the request hash keys
+// idempotency, and who queued a request must not change its identity — only
+// record it. Kind is "local" (password account), "sso" (OIDC principal), or
+// "mcp" (API token). A nil Actor (records predating the field, or internal
+// callers with no principal) means unknown.
+type Actor struct {
+	Kind    string `json:"kind"`
+	Subject string `json:"subject,omitempty"`
+	Label   string `json:"label,omitempty"`
+}

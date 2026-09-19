@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/useteploy/teploy-dash/internal/operation"
 )
 
@@ -302,4 +304,84 @@ func TestInstantTogglesStaySynchronous(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A12/A27 remainder: the enqueued operation records WHICH principal admitted
+// it — the session identity travels onto the operation's actor, and the
+// admission-budget rejection maps to 429.
+func TestOperationAPIAttributesActorFromSession(t *testing.T) {
+	server := operationTestServer(t, true)
+	bcryptCost = bcrypt.MinCost
+	t.Cleanup(func() { bcryptCost = bcrypt.DefaultCost })
+	if err := server.gate.createUser("dana", "danapass123", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, server.gate, "dana", "danapass123")
+
+	body := bytes.NewBufferString(`{"kind":"deploy","server":"prod","app":"web","image":"example/web:1"}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/operations", body)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("enqueue status = %d body=%s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Data operation.Operation `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.Actor == nil {
+		t.Fatal("operation carries no actor")
+	}
+	if envelope.Data.Actor.Kind != "local" || envelope.Data.Actor.Subject != "dana" || envelope.Data.Actor.Label != "dana" {
+		t.Fatalf("actor = %+v, want local/dana", envelope.Data.Actor)
+	}
+}
+
+func TestOperationAdmissionBudgetMapsTo429(t *testing.T) {
+	blocker := make(chan struct{})
+	config := Config{
+		DataDir: t.TempDir(), NoAuth: true,
+		OperationResolver: func(name string) (operation.Server, error) {
+			return operation.Server{Name: name, Host: name + ".example", User: "deploy"}, nil
+		},
+		OperationExecutor: func(_ context.Context, _ operation.Command, _ func(operation.Stream, string)) (int, error) {
+			<-blocker
+			return 0, nil
+		},
+		OperationMaxQueued: 1,
+	}
+	server := New(config)
+	post := func(image string) *httptest.ResponseRecorder {
+		body := bytes.NewBufferString(`{"kind":"deploy","server":"prod","app":"web","image":"` + image + `"}`)
+		rec := httptest.NewRecorder()
+		server.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/operations", body))
+		return rec
+	}
+	if rec := post("img:1"); rec.Code != http.StatusAccepted {
+		t.Fatalf("first enqueue status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	// Wait until the first op is running (holding the target's budget).
+	deadline := time.Now().Add(3 * time.Second)
+	running := false
+	for time.Now().Before(deadline) && !running {
+		for _, op := range server.operations.List("", "", 0) {
+			if op.Status == operation.StatusRunning {
+				running = true
+			}
+		}
+		if !running {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	if !running {
+		t.Fatal("first operation never started running")
+	}
+	rec := post("img:2")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("budget-exceeded status = %d body=%s, want 429", rec.Code, rec.Body.String())
+	}
+	close(blocker)
 }

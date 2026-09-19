@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/useteploy/teploy-dash/internal/operation"
 )
 
 // Role names. Canonical across Teploy's self-hosted tools, matching
@@ -142,6 +144,22 @@ func withUser(r *http.Request, si *sessionInfo) *http.Request {
 func currentUser(r *http.Request) (*sessionInfo, bool) {
 	si, ok := r.Context().Value(userCtxKey).(*sessionInfo)
 	return si, ok
+}
+
+// actorFromRequest projects the authenticated session onto an operation
+// Actor (A27): which principal enqueued the work. Local sessions key on the
+// username; SSO sessions on the issuer-namespaced subject. Nil when the
+// request carries no session (internal callers).
+func actorFromRequest(r *http.Request) *operation.Actor {
+	si, ok := currentUser(r)
+	if !ok {
+		return nil
+	}
+	kind := "sso"
+	if si.local {
+		kind = "local"
+	}
+	return &operation.Actor{Kind: kind, Subject: si.sub, Label: si.user}
 }
 
 // ── User store ────────────────────────────────────────────────────────────

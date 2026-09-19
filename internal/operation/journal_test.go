@@ -41,7 +41,7 @@ func TestJournalAppendOnlyFullReplayBoundedWindow(t *testing.T) {
 		}
 		return 0, nil
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestJournalCompactionBoundsFileSize(t *testing.T) {
 		}
 		return 0, nil
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,13 +162,13 @@ func TestJournalTornTailTruncatedAndGapped(t *testing.T) {
 		emit(StreamStdout, "two")
 		return 0, nil
 	})
-	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	op, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, manager, op.ID, StatusSucceeded)
 	// A second healthy operation proves isolation.
-	healthy, _, err := manager.Enqueue(deployRequest("api", "img:2"), "")
+	healthy, _, err := manager.Enqueue(deployRequest("api", "img:2"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestLiveRetentionWhenCountExceeded(t *testing.T) {
 	})
 	var ids []string
 	for i := 0; i < 3; i++ {
-		op, _, err := manager.Enqueue(deployRequest(fmt.Sprintf("app%d", i), "img:1"), "")
+		op, _, err := manager.Enqueue(deployRequest(fmt.Sprintf("app%d", i), "img:1"), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -381,7 +381,7 @@ func TestFIFOAdmissionOrderPerTarget(t *testing.T) {
 	const n = 5
 	var ops []*Operation
 	for i := 0; i < n; i++ {
-		op, _, err := manager.Enqueue(deployRequest("web", fmt.Sprintf("img:%d", i)), "")
+		op, _, err := manager.Enqueue(deployRequest("web", fmt.Sprintf("img:%d", i)), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -434,11 +434,11 @@ func TestFIFODoesNotSerializeTargets(t *testing.T) {
 		running.Add(-1)
 		return 0, nil
 	})
-	first, _, err := manager.Enqueue(deployRequest("web", "img:1"), "")
+	first, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := manager.Enqueue(Request{Kind: KindDeploy, Server: "staging", App: "web", Image: "img:2"}, "")
+	second, _, err := manager.Enqueue(Request{Kind: KindDeploy, Server: "staging", App: "web", Image: "img:2"}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +475,7 @@ func TestConcurrentTargetsReplayAndCancel(t *testing.T) {
 		go func(target int) {
 			defer wg.Done()
 			for i := 0; i < 3; i++ {
-				op, _, err := manager.Enqueue(Request{Kind: KindDeploy, Server: fmt.Sprintf("srv%d", target), App: "web", Image: "img:1"}, "")
+				op, _, err := manager.Enqueue(Request{Kind: KindDeploy, Server: fmt.Sprintf("srv%d", target), App: "web", Image: "img:1"}, "", nil)
 				if err != nil {
 					t.Errorf("enqueue: %v", err)
 					return

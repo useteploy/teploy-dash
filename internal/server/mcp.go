@@ -51,12 +51,17 @@ func (b mcpBackend) resolveServer(name string) (remote.ServerConn, error) {
 
 // enqueueMutation routes an MCP mutation through the operation service so it
 // shares the UI's validation, journal, queue, cancellation, and idempotency
-// instead of calling the CLI directly (A19).
-func (b mcpBackend) enqueueMutation(req operation.Request) (string, error) {
+// instead of calling the CLI directly (A19). The verified token rides the
+// context (WithToken) and becomes the operation's actor (A27).
+func (b mcpBackend) enqueueMutation(ctx context.Context, req operation.Request) (string, error) {
 	if b.s.operations == nil {
 		return "", fmt.Errorf("operation service unavailable")
 	}
-	op, _, err := b.s.operations.Enqueue(req, "")
+	var actor *operation.Actor
+	if tok, ok := mcp.TokenFromContext(ctx); ok {
+		actor = &operation.Actor{Kind: "mcp", Subject: "mcp-token/" + tok.ID, Label: tok.Name}
+	}
+	op, _, err := b.s.operations.Enqueue(req, "", actor)
 	if err != nil {
 		return "", err
 	}
@@ -205,14 +210,14 @@ func (b mcpBackend) Deploy(ctx context.Context, server, app, image, domain strin
 	// Route through the operation service exactly like the UI's deploy form:
 	// validated target, journaled, queued, cancelable (A19). The returned
 	// payload is the queued operation, not a completed deploy.
-	return b.enqueueMutation(operation.Request{
+	return b.enqueueMutation(ctx, operation.Request{
 		Kind: operation.KindDeploy, Mode: "ad-hoc",
 		Server: server, App: app, Image: image, Domain: domain, Port: port,
 	})
 }
 
 func (b mcpBackend) Rollback(ctx context.Context, server, app string) (string, error) {
-	return b.enqueueMutation(operation.Request{
+	return b.enqueueMutation(ctx, operation.Request{
 		Kind: operation.KindRollback, Server: server, App: app,
 	})
 }
@@ -223,7 +228,7 @@ func (b mcpBackend) AppAction(ctx context.Context, server, app, action string) (
 		// Container lifecycle goes through the operation service — the same
 		// path the UI buttons use (A19). The old direct-SSH mutations had no
 		// journal, validation, or cancellation.
-		return b.enqueueMutation(operation.Request{
+		return b.enqueueMutation(ctx, operation.Request{
 			Kind: operation.KindAppLifecycle, Server: server, App: app, Action: action,
 		})
 	default:

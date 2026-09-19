@@ -17,6 +17,12 @@ import (
 
 const defaultMaxEvents = 1000
 
+// defaultMaxQueuedPerTarget bounds how many non-terminal operations may be
+// admitted for one target before further enqueues are rejected (A12/A27
+// remainder). Because same-target execution is strictly FIFO, non-terminal
+// count IS queue depth (one running + the rest waiting).
+const defaultMaxQueuedPerTarget = 50
+
 // maxEventDataBytes bounds one event's payload before it is persisted. JSON
 // escaping of control characters can expand a raw line ~6x in its encoded
 // form, and the event reader scans with a 1 MiB limit — an unbounded log
@@ -46,8 +52,14 @@ type Options struct {
 	// MaxOperations bounds the total retained operation count by deleting
 	// the oldest terminal operations first (0 = package default; negative
 	// disables the count bound). Non-terminal operations are never deleted.
-	MaxOperations   int
-	Resolver        Resolver
+	MaxOperations int
+	// MaxQueuedPerTarget bounds the number of non-terminal operations
+	// admitted per target before enqueues are rejected with
+	// ErrAdmissionBudget (0 = package default; negative disables the bound).
+	// Non-terminal operations are never deleted or dropped — they are
+	// refused at admission (A12/A27 remainder).
+	MaxQueuedPerTarget int
+	Resolver           Resolver
 	ProjectResolver ProjectResolver
 	Executor        Executor
 }
@@ -84,9 +96,11 @@ type Manager struct {
 	maxEvents       int
 	maxHistoryAge   time.Duration
 	maxOperations   int
-	admissionSeq    uint64
-	retireMu        sync.Mutex
-	lastSweep       time.Time
+	// maxQueuedPerTarget is the per-target admission budget (A12/A27).
+	maxQueuedPerTarget int
+	admissionSeq       uint64
+	retireMu           sync.Mutex
+	lastSweep          time.Time
 }
 
 func New(dataDir string, options Options) (*Manager, error) {
@@ -101,6 +115,9 @@ func New(dataDir string, options Options) (*Manager, error) {
 	}
 	if options.MaxOperations == 0 {
 		options.MaxOperations = defaultMaxOperations
+	}
+	if options.MaxQueuedPerTarget == 0 {
+		options.MaxQueuedPerTarget = defaultMaxQueuedPerTarget
 	}
 	if options.Executor == nil {
 		return nil, fmt.Errorf("operation executor is required")
@@ -131,10 +148,11 @@ func New(dataDir string, options Options) (*Manager, error) {
 		subscribers:     make(map[string]map[chan struct{}]struct{}),
 		resolver:        options.Resolver,
 		projectResolver: options.ProjectResolver,
-		executor:        options.Executor,
-		maxEvents:       options.MaxEvents,
-		maxHistoryAge:   options.MaxHistoryAge,
-		maxOperations:   options.MaxOperations,
+		executor:           options.Executor,
+		maxEvents:          options.MaxEvents,
+		maxHistoryAge:      options.MaxHistoryAge,
+		maxOperations:      options.MaxOperations,
+		maxQueuedPerTarget: options.MaxQueuedPerTarget,
 	}
 	for id, op := range operations {
 		if op.Metadata.Mode == "" {
@@ -172,11 +190,11 @@ func New(dataDir string, options Options) (*Manager, error) {
 	return m, nil
 }
 
-func (m *Manager) Enqueue(req Request, idempotencyKey string) (*Operation, bool, error) {
-	return m.enqueue(req, idempotencyKey, "", 1)
+func (m *Manager) Enqueue(req Request, idempotencyKey string, actor *Actor) (*Operation, bool, error) {
+	return m.enqueue(req, idempotencyKey, "", 1, actor)
 }
 
-func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt int) (*Operation, bool, error) {
+func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt int, actor *Actor) (*Operation, bool, error) {
 	if len(idempotencyKey) > 255 || strings.ContainsAny(idempotencyKey, "\r\n") {
 		return nil, false, fmt.Errorf("invalid idempotency key")
 	}
@@ -205,6 +223,22 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 			return copy, true, nil
 		}
 	}
+	// Admission budget (A12/A27 remainder): same-target execution is FIFO,
+	// so the count of non-terminal operations for the target is exactly its
+	// queue depth. Reject (never drop silently) once it is at the cap —
+	// an idempotent replay of an already-queued request still passes above.
+	if m.maxQueuedPerTarget > 0 {
+		depth := 0
+		for _, o := range m.operations {
+			if o.Target == target && !o.Status.Terminal() {
+				depth++
+			}
+		}
+		if depth >= m.maxQueuedPerTarget {
+			m.mu.Unlock()
+			return nil, false, ErrAdmissionBudget
+		}
+	}
 	id, err := newID()
 	if err != nil {
 		m.mu.Unlock()
@@ -226,6 +260,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		HasSecrets:     len(command.Secrets) > 0,
 		AdmittedServer: &snapshot,
 		AdmissionSeq:   m.admissionSeq,
+		Actor:          actor,
 		requestHash:    hash,
 	}
 
@@ -613,7 +648,10 @@ func (m *Manager) Cancel(id string) (*Operation, error) {
 	return copy, nil
 }
 
-func (m *Manager) Retry(id string) (*Operation, error) {
+// Retry re-admits a failed/canceled/interrupted operation. The retry is
+// attributed to the actor that re-authorized it (not the original enqueuer) —
+// RetryOf preserves the lineage.
+func (m *Manager) Retry(id string, actor *Actor) (*Operation, error) {
 	m.mu.Lock()
 	op := m.operations[id]
 	if op == nil {
@@ -627,7 +665,7 @@ func (m *Manager) Retry(id string) (*Operation, error) {
 	req := cloneRequest(op.Request)
 	attempt := op.Attempt + 1
 	m.mu.Unlock()
-	retry, _, err := m.enqueue(req, "", id, attempt)
+	retry, _, err := m.enqueue(req, "", id, attempt, actor)
 	return retry, err
 }
 

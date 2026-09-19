@@ -133,7 +133,9 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		op, err := s.operations.Retry(id)
+		// The retry is re-authorized by the caller, so it is attributed to
+		// them; RetryOf on the new record preserves the lineage.
+		op, err := s.operations.Retry(id, actorFromRequest(r))
 		if err != nil {
 			writeOperationError(w, err)
 			return
@@ -149,7 +151,7 @@ func (s *Server) enqueueOperation(w http.ResponseWriter, r *http.Request, reques
 	if !s.operationsAvailable(w) {
 		return
 	}
-	op, replayed, err := s.operations.Enqueue(request, r.Header.Get("Idempotency-Key"))
+	op, replayed, err := s.operations.Enqueue(request, r.Header.Get("Idempotency-Key"), actorFromRequest(r))
 	if err != nil {
 		writeOperationError(w, err)
 		return
@@ -183,6 +185,8 @@ func writeOperationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, operation.ErrNotFound):
 		writeErrorStatus(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, operation.ErrAdmissionBudget):
+		writeErrorStatus(w, err.Error(), http.StatusTooManyRequests)
 	case errors.Is(err, operation.ErrIdempotencyConflict), errors.Is(err, operation.ErrNotCancelable), errors.Is(err, operation.ErrNotRetryable):
 		writeErrorStatus(w, err.Error(), http.StatusConflict)
 	default:
