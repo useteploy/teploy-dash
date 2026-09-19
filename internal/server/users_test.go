@@ -697,3 +697,100 @@ func TestChangePasswordCASConflict(t *testing.T) {
 		t.Fatalf("unconditional reset failed: %v", err)
 	}
 }
+
+// F002: an SSO-only credential store (zero local users, persisted OIDC
+// principals — what an install whose first sign-in was via SSO looks like
+// after a restart) is a VALID store, not an authentication outage. Only a
+// store with neither users nor principals fails the load.
+func TestLoadUsersPrincipalOnlyStoreIsValid(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "auth.json")
+	usersFile := filepath.Join(dir, "users.json")
+	store := `{"users":[],"oidc_principals":[{"subject":"oidc:abc:def","role":"admin","auth_epoch":1}]}`
+	if err := os.WriteFile(usersFile, []byte(store), 0600); err != nil {
+		t.Fatal(err)
+	}
+	g := newAuthGate("", "", credFile)
+	if g.initErr != nil {
+		t.Fatalf("principal-only store must load, got initErr: %v", g.initErr)
+	}
+	if g.setupRequired {
+		t.Fatal("principal-only store must not open first-run setup")
+	}
+	if len(g.oidcPrincipals) != 1 {
+		t.Fatalf("principal not loaded: %+v", g.oidcPrincipals)
+	}
+}
+
+// F002's other edge: an install that once had principals must not re-open
+// first-run account claiming when OIDC is (no longer) configured — with no
+// users and no usable sign-in path the gate fails closed, not open.
+func TestLoadUsersEmptyStoreFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "auth.json")
+	usersFile := filepath.Join(dir, "users.json")
+	if err := os.WriteFile(usersFile, []byte(`{"users":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	g := newAuthGate("", "", credFile)
+	if g.initErr == nil {
+		t.Fatal("empty store (no users, no principals) must be an outage, not setup mode")
+	}
+	if g.setupRequired {
+		t.Fatal("an existing-but-empty store must not open setup mode")
+	}
+}
+
+// F003: /api/auth/me answers one documented envelope in every mode. With
+// auth disabled it must answer explicitly (the settings page reads the mode)
+// instead of 401ing, and authenticated answers carry {mode, user}.
+func TestWhoamiEnvelope(t *testing.T) {
+	s := &Server{}
+	w := httptest.NewRecorder()
+	s.handleWhoami(w, httptest.NewRequest(http.MethodGet, "/api/auth/me", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("no-auth whoami: %d, want 200", w.Code)
+	}
+	var disabled struct {
+		Data struct {
+			Mode string `json:"mode"`
+			User any    `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Data.Mode != "disabled" || disabled.Data.User != nil {
+		t.Fatalf("no-auth envelope: %+v", disabled.Data)
+	}
+
+	g := newTestGate(t)
+	if err := g.createUser("dana", "danapass1", RoleEditor); err != nil {
+		t.Fatal(err)
+	}
+	authed := &Server{gate: g}
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: g.newSession("dana", RoleEditor)})
+	w2 := httptest.NewRecorder()
+	// Route through the gate so the session context is populated the same
+	// way production requests are.
+	g.wrap(http.HandlerFunc(authed.handleWhoami)).ServeHTTP(w2, req)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("authenticated whoami: %d", w2.Code)
+	}
+	var me struct {
+		Data struct {
+			Mode string `json:"mode"`
+			User struct {
+				Username string `json:"username"`
+				Role     string `json:"role"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me.Data.Mode != "local" || me.Data.User.Username != "dana" || me.Data.User.Role != RoleEditor {
+		t.Fatalf("authenticated envelope: %+v", me.Data)
+	}
+}

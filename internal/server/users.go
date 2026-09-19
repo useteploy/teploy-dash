@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -17,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/operation"
 )
 
@@ -260,9 +260,18 @@ func (g *authGate) loadUsers() error {
 			g.oidcPrincipals[p.Subject] = &p
 		}
 		g.epochCounter = f.EpochCounter
-		g.setupRequired = len(g.users) == 0
-		if len(g.users) == 0 {
-			return fmt.Errorf("no users configured in %s", g.usersFile)
+		// F002: a principal-only store is a valid SSO installation — an
+		// install whose first (and possibly only) sign-in was via OIDC has
+		// zero local users and at least one persisted principal. Zero local
+		// users is only a load failure when NOTHING can sign in (no users
+		// and no principals); whether SSO is actually configured is the
+		// constructor's call, because the gate learns its OIDC provider
+		// only after the store is loaded. Setup mode equally requires both
+		// sets to be empty, so an install that once had principals can
+		// never re-open first-run account claiming.
+		g.setupRequired = len(g.users) == 0 && len(g.oidcPrincipals) == 0
+		if g.setupRequired {
+			return fmt.Errorf("credential store %s has no users and no SSO principals", g.usersFile)
 		}
 		return nil
 	case errors.Is(err, fs.ErrNotExist):
@@ -335,14 +344,10 @@ func saveUsersFile(path string, users map[string]*dashUser, principals map[strin
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// F004: unique synced temporary + rename + directory sync — the fixed
+	// .tmp name acknowledged credential changes before they were durable
+	// and let concurrent savers clobber each other's temporary file.
+	return durable.Replace(path, data, 0600)
 }
 
 // cloneUsersLocked returns an independent copy of the live user map (new map,
@@ -726,14 +731,31 @@ func (g *authGate) listUsers() []userView {
 
 // handleWhoami reports the current user's identity and role so the frontend
 // can hide controls the user isn't allowed to use. Any authenticated user.
+//
+// F003/A05: the response is one documented envelope — {mode, user} — in every
+// operating mode. With auth disabled the endpoint answers explicitly instead
+// of 401ing (the settings page used to read that as "viewer" and hide admin
+// configuration that works fine in no-auth), and consumers no longer have to
+// guess a missing identity's meaning.
 func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
+	if s.gate == nil {
+		writeData(w, map[string]any{"mode": "disabled", "user": nil})
+		return
+	}
 	session, ok := currentUser(r)
 	if !ok {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	writeData(w, userView{Username: session.user, Role: session.role})
+	mode := "local"
+	if !session.local {
+		mode = "sso"
+	}
+	writeData(w, map[string]any{
+		"mode": mode,
+		"user": userView{Username: session.user, Role: session.role},
+	})
 }
 
 // handleLoginMethods reports which sign-in methods the login page should offer.

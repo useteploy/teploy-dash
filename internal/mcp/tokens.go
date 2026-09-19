@@ -23,6 +23,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/useteploy/teploy-dash/internal/durable"
 )
 
 // Token is one MCP access token. Only the SHA-256 of the secret is stored;
@@ -163,11 +165,10 @@ func (s *TokenStore) saveLocked(tokens []Token) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	// F004: durable unique-temp replacement (sync + rename + dir sync) — a
+	// revoked token could previously reappear after a crash, and the fixed
+	// .tmp name let concurrent saves clobber each other's temporary file.
+	return durable.Replace(s.path, data, 0600)
 }
 
 func hashToken(plaintext string) string {
