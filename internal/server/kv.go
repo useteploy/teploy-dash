@@ -328,8 +328,16 @@ func (s *Server) handleKVSet(w http.ResponseWriter, r *http.Request, serverName,
 	// A11 (UPSTREAM-1 adoption): when the CLI supports `kv set KEY --stdin`,
 	// the value travels on stdin instead of the argv. cliKVRun routes through
 	// the injected runner for testability, so the stdin payload goes where
-	// the runner can feed it.
-	if cli.KVStdinSupported() {
+	// the runner can feed it. F015: a probe that cannot establish an answer
+	// fails closed — a secret value must not silently take the argv
+	// transport because a transient probe failure was cached as
+	// "unsupported".
+	stdinSupported, probeErr := cli.KVStdinSupport()
+	if probeErr != nil {
+		writeErrorStatus(w, probeErr.Error()+"; retry the request rather than exposing the value on the process list", http.StatusBadGateway)
+		return
+	}
+	if stdinSupported {
 		flagArgs = append(flagArgs, "--stdin")
 		s.kvRunStdin(w, r, serverName, appName, accessory, flagArgs, body.Key, body.Value)
 		return

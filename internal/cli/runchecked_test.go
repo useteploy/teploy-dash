@@ -33,3 +33,26 @@ func TestCheckExit(t *testing.T) {
 		})
 	}
 }
+
+// F015: an unverified probe outcome is not cached and fails closed for the
+// secret-bearing call sites; a verified answer (either way) is cached.
+func TestSecretFlagProbeVerifiedCaching(t *testing.T) {
+	p := &secretFlagProbe{flag: "--stdin", args: []string{"env", "set"}}
+	// The real probe shells out to "teploy" — absent in tests, so the probe
+	// is unverified and MUST return an error, not a cached "unsupported".
+	supported, err := p.check()
+	if err == nil {
+		t.Fatal("unverified probe must surface an error")
+	}
+	if supported {
+		t.Fatal("unverified probe must not claim support")
+	}
+	if p.decided {
+		t.Fatal("unverified outcome must not be cached")
+	}
+	// A verified outcome is cached and returned on subsequent calls.
+	p.decided, p.supported = true, true
+	if s, err := p.check(); err != nil || !s {
+		t.Fatalf("cached verified answer: %v %v", s, err)
+	}
+}

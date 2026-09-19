@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -43,6 +42,76 @@ type StreamEvent struct {
 	Data   string
 }
 
+// maxStreamLine bounds one line accepted by the streaming reader (F013
+// keeps the previous scanner's 1 MiB token limit).
+const maxStreamLine = 1024 * 1024
+
+// errLineTooLong marks a streamed line exceeding maxStreamLine; like the
+// scanner error it replaces, it cancels the child and becomes the primary
+// error (A28).
+var errLineTooLong = fmt.Errorf("teploy output line exceeds %d bytes", maxStreamLine)
+
+// lineWriter reassembles logical lines from arbitrary Write chunks and
+// emits each complete line. os/exec owns the copy goroutines when it is
+// installed as cmd.Stdout/Stderr, which is what lets WaitDelay engage
+// (F013): waiting for externally managed pipe readers BEFORE calling
+// Wait defeats the normal-exit WaitDelay, because Wait has not observed
+// the exit yet.
+type lineWriter struct {
+	emit   func(string)
+	fail   func() // cancels the child (cmd.Cancel)
+	failed error
+	pending []byte
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	if w.failed != nil {
+		return 0, w.failed
+	}
+	consumed := 0
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		take := len(p)
+		if i >= 0 {
+			take = i
+		}
+		if len(w.pending)+take > maxStreamLine {
+			w.failed = errLineTooLong
+			if w.fail != nil {
+				w.fail()
+			}
+			return consumed, w.failed
+		}
+		w.pending = append(w.pending, p[:take]...)
+		consumed += take
+		p = p[take:]
+		if i < 0 {
+			break
+		}
+		line := bytes.TrimSuffix(w.pending, []byte{'\r'})
+		w.emit(string(line))
+		w.pending = w.pending[:0]
+		p = p[1:]
+		consumed++
+	}
+	return consumed, nil
+}
+
+// Flush emits a final unterminated line (the scanner previously delivered
+// it too). Returns the sticky failure, if any.
+func (w *lineWriter) Flush() error {
+	if w.failed != nil {
+		return w.failed
+	}
+	if len(w.pending) == 0 {
+		return nil
+	}
+	line := bytes.TrimSuffix(w.pending, []byte{'\r'})
+	w.pending = nil
+	w.emit(string(line))
+	return nil
+}
+
 // RunStream executes an allowlisted teploy argument vector and emits stdout and
 // stderr as they arrive. Cancellation terminates the subprocess process group,
 // including SSH or shell descendants spawned by the CLI. stdin (when non-empty)
@@ -65,49 +134,42 @@ func RunStreamStdin(ctx context.Context, stdin string, args []string, timeout ti
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("open teploy stdout: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("open teploy stderr: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("teploy command could not start: %w", err)
-	}
 
 	var stdoutBuffer, stderrBuffer lockedBuffer
-	var wg sync.WaitGroup
 	var callbackMu sync.Mutex
-	var scanErr error
-	var scanErrMu sync.Mutex
-	scan := func(stream Stream, scanner *bufio.Scanner, output *lockedBuffer) {
-		defer wg.Done()
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			output.WriteLine(line)
+	// Per-stream line writers installed as cmd.Stdout/Stderr: os/exec owns
+	// the copy goroutines, complete lines reach the bounded capture and the
+	// caller's callback in order, and a line over the budget cancels the
+	// child and becomes the primary error (A28 semantics preserved).
+	stdout := &lineWriter{
+		emit: func(line string) {
+			stdoutBuffer.WriteLine(line)
 			if onEvent != nil {
 				callbackMu.Lock()
-				onEvent(StreamEvent{Stream: stream, Data: line})
+				onEvent(StreamEvent{Stream: StreamStdout, Data: line})
 				callbackMu.Unlock()
 			}
-		}
-		if err := scanner.Err(); err != nil {
-			scanErrMu.Lock()
-			if scanErr == nil {
-				scanErr = fmt.Errorf("reading teploy %s output: %w", stream, err)
-			}
-			scanErrMu.Unlock()
-			_ = cmd.Cancel()
-		}
+		},
+		fail: func() { _ = cmd.Cancel() },
 	}
-	wg.Add(2)
-	go scan(StreamStdout, bufio.NewScanner(stdout), &stdoutBuffer)
-	go scan(StreamStderr, bufio.NewScanner(stderr), &stderrBuffer)
-	wg.Wait()
-	waitErr := cmd.Wait()
+	stderr := &lineWriter{
+		emit: func(line string) {
+			stderrBuffer.WriteLine(line)
+			if onEvent != nil {
+				callbackMu.Lock()
+				onEvent(StreamEvent{Stream: StreamStderr, Data: line})
+				callbackMu.Unlock()
+			}
+		},
+		fail: func() { _ = cmd.Cancel() },
+	}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+
+	// os/exec owns the pipe copy goroutines for writer-based output, so
+	// calling Run immediately lets WaitDelay bound the post-exit drain when
+	// a descendant inherits the pipes (F013).
+	waitErr := cmd.Run()
+	flushErr := errors.Join(stdout.Flush(), stderr.Flush())
 
 	result := &Result{Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}
 	if exitErr, ok := waitErr.(*exec.ExitError); ok {
@@ -116,8 +178,14 @@ func RunStreamStdin(ctx context.Context, stdin string, args []string, timeout ti
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
-	if scanErr != nil {
-		return result, scanErr
+	if stdout.failed != nil {
+		return result, stdout.failed
+	}
+	if stderr.failed != nil {
+		return result, stderr.failed
+	}
+	if flushErr != nil {
+		return result, flushErr
 	}
 	if waitErr != nil {
 		if _, ok := waitErr.(*exec.ExitError); !ok {
@@ -218,12 +286,19 @@ func runBounded(ctx context.Context, stdin string, args ...string) (*Result, err
 	case stderr.Err != nil:
 		return result, stderr.Err
 	}
-	if err != nil {
+	if ctx.Err() != nil {
+		// F014: an explicitly canceled request must surface its context
+		// error even when the group kill produced an ExitError — the old
+		// path normalized cancellation into an ordinary (nil-error) exit
+		// result, and callers that only check err went on to report
+		// success for work that never completed. Deadline expiration keeps
+		// the elapsed-time message (no argv, A11).
 		if ctx.Err() == context.DeadlineExceeded {
-			// No argv in the message — timeouts used to concatenate the full
-			// argument vector, which can carry secret values (A11).
 			return result, fmt.Errorf("teploy command timed out after %s", time.Since(started).Round(time.Second))
 		}
+		return result, ctx.Err()
+	}
+	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
 		} else {
@@ -398,10 +473,16 @@ func EnvList(server, user, app string) (interface{}, error) {
 // EnvSet sets an environment variable. When the installed CLI supports the
 // secret-stdin contract (`env set KEY --stdin`, UPSTREAM-1), the value
 // travels on the process's stdin instead of the argv, where it would be
-// visible to every local process (A11); the older CLI keeps the legacy argv
-// path so an upgrade boundary degrades instead of breaking.
+// visible to every local process (A11); an older CLI keeps the legacy argv
+// path so an upgrade boundary degrades instead of breaking. F015: a probe
+// that cannot establish an answer fails closed rather than silently
+// selecting the argv transport.
 func EnvSet(ctx context.Context, server, user, app, key, value string) (*Result, error) {
-	if EnvStdinSupported() {
+	supported, err := EnvStdinSupport()
+	if err != nil {
+		return nil, err
+	}
+	if supported {
 		args := []string{"env", "set", key, "--stdin", "--host", server, "--app", app}
 		args = append(args, userArgs(user)...)
 		return RunWithStdin(ctx, value, args...)
@@ -521,39 +602,72 @@ func IsInstalled() bool {
 //
 // The CLI's stdin contract (`env set KEY --stdin`, `kv set KEY --stdin`,
 // `template install --var-stdin`) removed secrets from the argv. Dash shells
-// out to whatever teploy is on PATH, so each call site probes once per
-// process whether the installed CLI knows the flag and falls back to the
-// legacy argv path when it doesn't — a hard requirement on the new flag
-// would break every install at the CLI upgrade boundary.
+// out to whatever teploy is on PATH, so each call site probes whether the
+// installed CLI knows the flag and falls back to the legacy argv path when a
+// VERIFIED probe says it doesn't — a hard requirement on the new flag would
+// break every install at the CLI upgrade boundary.
+//
+// F015: only verified probe outcomes are cached. A probe that could not run
+// (missing binary, timeout, non-zero help exit) is NOT cached as
+// "unsupported" — a transient failure previously selected the legacy argv
+// transport forever after, silently putting secret values back on the
+// process list. An unverified probe now fails closed for secret-bearing
+// writes: the operator retries, and no secret travels by argv.
 
-// probeFlag runs `teploy <args...> --help` and reports whether the flag
-// appears in its usage text.
-func probeFlag(flag string, args ...string) bool {
+// probeFlagVerified runs `teploy <args...> --help` and reports whether the
+// flag appears in its usage text. The second return is FALSE when the probe
+// itself failed (no verified answer).
+func probeFlagVerified(flag string, args ...string) (supported, verified bool) {
 	if !IsInstalled() {
-		return false
+		return false, false
 	}
 	result, err := Run(append(append([]string{}, args...), "--help")...)
 	if err != nil || result.ExitCode != 0 {
-		return false
+		return false, false
 	}
-	return strings.Contains(result.Stdout, flag) || strings.Contains(result.Stderr, flag)
+	return strings.Contains(result.Stdout, flag) || strings.Contains(result.Stderr, flag), true
+}
+
+// secretFlagProbe caches one flag probe's VERIFIED outcome; unverified
+// attempts are retried on the next call instead of being frozen.
+type secretFlagProbe struct {
+	flag      string
+	args      []string
+	mu        sync.Mutex
+	decided   bool
+	supported bool
+}
+
+func (p *secretFlagProbe) check() (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.decided {
+		return p.supported, nil
+	}
+	supported, verified := probeFlagVerified(p.flag, p.args...)
+	if !verified {
+		return false, fmt.Errorf("cannot verify whether the installed teploy CLI supports %s (probe did not complete)", p.flag)
+	}
+	p.decided, p.supported = true, supported
+	return supported, nil
 }
 
 var (
-	envStdinSupported    = sync.OnceValue(func() bool { return probeFlag("--stdin", "env", "set") })
-	kvStdinSupportedOnce = sync.OnceValue(func() bool { return probeFlag("--stdin", "kv", "set") })
-	varStdinSupported    = sync.OnceValue(func() bool { return probeFlag("--var-stdin", "template", "install") })
+	envStdinProbe = &secretFlagProbe{flag: "--stdin", args: []string{"env", "set"}}
+	kvStdinProbe  = &secretFlagProbe{flag: "--stdin", args: []string{"kv", "set"}}
+	varStdinProbe = &secretFlagProbe{flag: "--var-stdin", args: []string{"template", "install"}}
 )
 
-// EnvStdinSupported reports whether `teploy env set --stdin` is available.
-func EnvStdinSupported() bool { return envStdinSupported() }
+// EnvStdinSupport reports whether `teploy env set --stdin` is available. A
+// non-nil error means the probe could not establish an answer (F015).
+func EnvStdinSupport() (bool, error) { return envStdinProbe.check() }
 
-// KVStdinSupported reports whether `teploy kv set --stdin` is available.
-func KVStdinSupported() bool { return kvStdinSupportedOnce() }
+// KVStdinSupport reports whether `teploy kv set --stdin` is available.
+func KVStdinSupport() (bool, error) { return kvStdinProbe.check() }
 
-// VarStdinSupported reports whether `teploy template install --var-stdin` is
+// VarStdinSupport reports whether `teploy template install --var-stdin` is
 // available.
-func VarStdinSupported() bool { return varStdinSupported() }
+func VarStdinSupport() (bool, error) { return varStdinProbe.check() }
 
 // Version returns the CLI version.
 func Version() (string, error) {

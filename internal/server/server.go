@@ -244,8 +244,11 @@ func New(config Config) *Server {
 		}
 	}
 	// A11/UPSTREAM-1: template variables ride the CLI's --var-stdin contract
-	// when the installed CLI has it (probed once per process).
-	operation.SetVarStdinSupport(cli.VarStdinSupported)
+	// when the installed CLI has it. F015: the probe reports unverified
+	// states as errors, and Build fails closed for secret-bearing installs
+	// rather than caching a transient failure as "unsupported" (argv
+	// fallback only for a VERIFIED unsupported CLI).
+	operation.SetVarStdinSupport(cli.VarStdinSupport)
 	s.operations, s.operationInitErr = operation.New(config.DataDir, operation.Options{
 		MaxEvents:          config.OperationMaxEvents,
 		MaxJournalBytes:    config.OperationMaxJournalBytes,

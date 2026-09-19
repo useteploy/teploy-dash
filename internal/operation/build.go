@@ -32,7 +32,17 @@ func Build(req Request, resolve Resolver, projectResolvers ...ProjectResolver) (
 	case KindRemove:
 		return BuildRemove(req, resolve)
 	case KindTemplateInstall:
-		return BuildTemplateInstall(req, resolve, varStdinSupport())
+		// F015: probe only when variables exist — a varless install has no
+		// secret to protect, and an unverified probe must not fail it.
+		varStdin := false
+		if len(req.Vars) > 0 {
+			supported, err := varStdinSupport()
+			if err != nil {
+				return Command{}, Server{}, "", err
+			}
+			varStdin = supported
+		}
+		return BuildTemplateInstall(req, resolve, varStdin)
 	case KindAppLifecycle:
 		return BuildAppLifecycle(req, resolve)
 	case KindMaintenance:
@@ -48,11 +58,14 @@ func Build(req Request, resolve Resolver, projectResolvers ...ProjectResolver) (
 // --var-stdin. The manager injects the real probe (which shells out to
 // `teploy template install --help`); the package-level default keeps Build
 // usable standalone (tests, recovery tools) with the legacy argv path.
-var varStdinSupport = func() bool { return false }
+// F015: the second return is an error when the probe could not establish an
+// answer — Build fails closed for secret-bearing installs rather than
+// silently selecting the argv transport on a transient probe failure.
+var varStdinSupport = func() (bool, error) { return false, nil }
 
 // SetVarStdinSupport installs the CLI --var-stdin capability probe used by
 // Build. Wired by the server package at startup.
-func SetVarStdinSupport(probe func() bool) {
+func SetVarStdinSupport(probe func() (bool, error)) {
 	if probe != nil {
 		varStdinSupport = probe
 	}

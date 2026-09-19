@@ -120,3 +120,66 @@ func runStreamCancelAttempt(t *testing.T) bool {
 	}
 	return true
 }
+
+// F013 core, without the teploy binary: the same writer-adapter execution
+// shape bounds a child whose descendant holds the pipes.
+func TestWriterBasedRunBoundsInheritedPipes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 2 & exit 0")
+	configureProcessGroup(cmd)
+	cmd.Cancel = func() error { return terminateProcessGroup(cmd) }
+	cmd.WaitDelay = 50 * time.Millisecond
+	stdout := &lineWriter{emit: func(string) {}, fail: func() { _ = cmd.Cancel() }}
+	stderr := &lineWriter{emit: func(string) {}, fail: func() { _ = cmd.Cancel() }}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	start := time.Now()
+	err := cmd.Run()
+	elapsed := time.Since(start)
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("expected ErrWaitDelay, got %v", err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("inherited-pipe drain not bounded by WaitDelay: %s", elapsed)
+	}
+	if flushErr := errors.Join(stdout.Flush(), stderr.Flush()); flushErr != nil {
+		t.Fatalf("flush: %v", flushErr)
+	}
+}
+
+// F013: line reassembly across arbitrary chunks, CRLF trimming, final
+// partial lines, and the over-budget failure path.
+func TestLineWriterReassemblesLines(t *testing.T) {
+	var got []string
+	w := &lineWriter{emit: func(line string) { got = append(got, line) }}
+	for _, chunk := range []string{"hel", "lo\nwo", "rld\r\n", "a\nb\n", "tail"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatalf("write %q: %v", chunk, err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	want := []string{"hello", "world", "a", "b", "tail"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("lines = %v, want %v", got, want)
+	}
+}
+
+func TestLineWriterOverlongLineFails(t *testing.T) {
+	cancelled := false
+	w := &lineWriter{emit: func(string) {}, fail: func() { cancelled = true }}
+	big := strings.Repeat("x", maxStreamLine+1)
+	if _, err := w.Write([]byte(big)); err == nil {
+		t.Fatal("overlong line accepted")
+	}
+	if !cancelled {
+		t.Fatal("overlong line did not cancel the child")
+	}
+	if _, err := w.Write([]byte("more")); err == nil {
+		t.Fatal("writes continue after failure")
+	}
+}
