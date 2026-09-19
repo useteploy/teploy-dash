@@ -47,6 +47,25 @@ func NewFileStore(dir string) *FileStore {
 // InitErr reports a store-construction failure (e.g. unwritable data dir).
 func (s *FileStore) InitErr() error { return s.initErr }
 
+// Ping is the readiness probe (A39/A47): the data directory must still be
+// present and owner-writable. Metadata only — no probe files are written.
+func (s *FileStore) Ping() error {
+	if s.initErr != nil {
+		return s.initErr
+	}
+	info, err := os.Stat(s.dir)
+	if err != nil {
+		return fmt.Errorf("store directory %s: %w", s.dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("store path %s is not a directory", s.dir)
+	}
+	if info.Mode().Perm()&0200 == 0 {
+		return fmt.Errorf("store directory %s is not writable", s.dir)
+	}
+	return nil
+}
+
 func (s *FileStore) ListMonitors() ([]Monitor, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

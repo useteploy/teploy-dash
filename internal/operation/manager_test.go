@@ -808,3 +808,167 @@ func TestActorAttributionPersistedAndReloaded(t *testing.T) {
 		t.Fatalf("nil actor must stay nil, got %+v", plain.Actor)
 	}
 }
+
+// ── Health + bounded shutdown (A39/A47) ───────────────────────────────────
+
+// A persistence failure after the command's outcome is decided must surface
+// through Health() as degradation (it cannot change the outcome — it is
+// reported instead), and the marker clears once persistence succeeds again.
+func TestHealthReportsPersistDegradationAndRecovery(t *testing.T) {
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(dir, "operations", "records"), 0700)
+		_ = os.Chmod(filepath.Join(dir, "operations", "events"), 0700)
+	})
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	release := make(chan struct{})
+	manager, err := New(dir, Options{
+		Resolver: testResolver,
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			startedOnce.Do(func() { close(started) })
+			<-release
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if h := manager.Health(); h.PersistDegraded {
+		t.Fatalf("healthy manager reports degraded: %+v", h)
+	}
+	// Break the records directory so the terminal persist fails.
+	records := filepath.Join(dir, "operations", "records")
+	if err := os.Chmod(records, 0500); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if manager.Health().PersistDegraded {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	h := manager.Health()
+	if !h.PersistDegraded || h.RecordError == "" {
+		t.Fatalf("degraded manager not reported: %+v", h)
+	}
+	// The operation still reached a terminal outcome.
+	for _, op := range manager.List("", "", 0) {
+		if op.Status != StatusSucceeded {
+			t.Fatalf("op status = %s, want succeeded (outcome unchanged by persist failure)", op.Status)
+		}
+	}
+	// Repair: subsequent successful persistence clears the marker.
+	if err := os.Chmod(records, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:2"), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !manager.Health().PersistDegraded {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if h := manager.Health(); h.PersistDegraded {
+		t.Fatalf("degradation not cleared after recovery: %+v", h)
+	}
+	// A broken journal directory is reported through JournalError.
+	if err := os.Chmod(filepath.Join(dir, "operations", "events"), 0500); err != nil {
+		t.Fatal(err)
+	}
+	if h := manager.Health(); h.JournalError == "" {
+		t.Fatal("unwritable journal directory not reported")
+	}
+}
+
+// Shutdown drains runners when work finishes in time, and force-cancels
+// stragglers (with an explicit shutdown message) when it does not.
+func TestShutdownDrainsThenForceCancels(t *testing.T) {
+	dir := t.TempDir()
+	release := make(chan struct{})
+	var entered atomic.Int32
+	manager, err := New(dir, Options{
+		Resolver: testResolver,
+		Executor: func(ctx context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			entered.Add(1)
+			<-release
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && entered.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if entered.Load() == 0 {
+		t.Fatal("executor never started")
+	}
+
+	// Fast path: work finishes before the deadline — Shutdown returns
+	// without touching statuses.
+	close(release)
+	manager.Shutdown(context.Background())
+	for _, op := range manager.List("", "", 0) {
+		if op.Status != StatusSucceeded {
+			t.Fatalf("drained op status = %s, want succeeded", op.Status)
+		}
+	}
+}
+
+func TestShutdownForceCancelsStragglers(t *testing.T) {
+	dir := t.TempDir()
+	release := make(chan struct{})
+	var entered atomic.Int32
+	manager, err := New(dir, Options{
+		Resolver: testResolver,
+		// Ignores context cancellation, like a wedged CLI child.
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			entered.Add(1)
+			<-release
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, _, err := manager.Enqueue(deployRequest("web", "img:1"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && entered.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if entered.Load() == 0 {
+		t.Fatal("executor never started")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	begin := time.Now()
+	manager.Shutdown(ctx) // returns after force-cancel + grace despite the stuck executor
+	cancel()
+	if elapsed := time.Since(begin); elapsed > 7*time.Second {
+		t.Fatalf("shutdown not bounded: took %s", elapsed)
+	}
+
+	close(release) // let the executor return so the runner resolves the cancel
+	finished := waitForStatus(t, manager, queued.ID, StatusCanceled)
+	if !strings.Contains(finished.Error, "shutting down") {
+		t.Fatalf("cancel reason = %q, want shutdown attribution", finished.Error)
+	}
+	manager.Shutdown(context.Background())
+}

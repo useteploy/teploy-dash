@@ -101,6 +101,57 @@ type Manager struct {
 	admissionSeq       uint64
 	retireMu           sync.Mutex
 	lastSweep          time.Time
+	// runners tracks live target-worker goroutines so Shutdown can join
+	// them (A39/A47).
+	runners sync.WaitGroup
+	// shuttingDown marks the force-cancel phase of Shutdown so canceled
+	// operations record WHY (bounded shutdown, not a user cancel). Guarded
+	// by mu.
+	shuttingDown bool
+	// recordErr/eventErr record the latest persistence failure per channel
+	// (A39/A47): operation records and event journals are separate files, so
+	// one failing must not be masked by the other succeeding. Events are
+	// advisory and failures must not change a command's outcome, so they are
+	// logged — and surfaced through Health() for readiness reporting.
+	// Guarded by mu; each cleared by its own next success.
+	recordErr   string
+	recordErrAt time.Time
+	eventErr    string
+	eventErrAt  time.Time
+}
+
+// noteRecordErrLocked records an operation-record persistence failure for
+// Health(). Caller must hold m.mu.
+func (m *Manager) noteRecordErrLocked(err error) {
+	if err == nil {
+		return
+	}
+	m.recordErr = err.Error()
+	m.recordErrAt = time.Now().UTC()
+}
+
+// clearRecordErrLocked drops the record-channel degradation marker once a
+// record write succeeds again. Caller must hold m.mu.
+func (m *Manager) clearRecordErrLocked() {
+	m.recordErr = ""
+	m.recordErrAt = time.Time{}
+}
+
+// noteEventErrLocked records an event-journal persistence failure for
+// Health(). Caller must hold m.mu.
+func (m *Manager) noteEventErrLocked(err error) {
+	if err == nil {
+		return
+	}
+	m.eventErr = err.Error()
+	m.eventErrAt = time.Now().UTC()
+}
+
+// clearEventErrLocked drops the event-channel degradation marker once an
+// event append succeeds again. Caller must hold m.mu.
+func (m *Manager) clearEventErrLocked() {
+	m.eventErr = ""
+	m.eventErrAt = time.Time{}
 }
 
 func New(dataDir string, options Options) (*Manager, error) {
@@ -274,10 +325,12 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	// commit has happened.
 	initial := Event{Sequence: 1, OperationID: id, Type: EventStatus, Data: string(StatusQueued), CreatedAt: now}
 	if err := m.store.appendEvent(id, initial); err != nil {
+		m.noteEventErrLocked(err)
 		m.mu.Unlock()
 		return nil, false, fmt.Errorf("persist initial event: %w", err)
 	}
 	if err := m.store.saveOperation(op); err != nil {
+		m.noteRecordErrLocked(err)
 		m.mu.Unlock()
 		return nil, false, fmt.Errorf("persist operation record: %w", err)
 	}
@@ -307,6 +360,7 @@ func (m *Manager) admitToTarget(target string, j job) {
 	runner.queue = append(runner.queue, j)
 	if !runner.busy {
 		runner.busy = true
+		m.runners.Add(1)
 		go m.runTarget(target)
 	}
 }
@@ -314,6 +368,7 @@ func (m *Manager) admitToTarget(target string, j job) {
 // runTarget executes its target's jobs in admission order, one at a time,
 // until the queue drains.
 func (m *Manager) runTarget(target string) {
+	defer m.runners.Done()
 	for {
 		m.mu.Lock()
 		runner := m.targets[target]
@@ -333,7 +388,7 @@ func (m *Manager) execute(j job) {
 	// A cancellation that landed while the job was queued behind another
 	// operation resolves here, before any execution side effect.
 	if j.ctx.Err() != nil {
-		m.finish(j.id, StatusCanceled, -1, "operation canceled")
+		m.finish(j.id, StatusCanceled, -1, m.cancelReason())
 		return
 	}
 	m.mu.Lock()
@@ -367,7 +422,7 @@ func (m *Manager) execute(j job) {
 		m.emit(j.id, eventType, Redact(data, j.command.Secrets))
 	})
 	if j.ctx.Err() != nil {
-		m.finish(j.id, StatusCanceled, exitCode, "operation canceled")
+		m.finish(j.id, StatusCanceled, exitCode, m.cancelReason())
 		return
 	}
 	if err != nil || exitCode != 0 {
@@ -405,6 +460,18 @@ func userOf(srv Server) string {
 	return srv.User
 }
 
+// cancelReason distinguishes a user-requested cancellation from the
+// force-cancel of a bounded shutdown, so the terminal record says which.
+func (m *Manager) cancelReason() string {
+	m.mu.Lock()
+	shutdown := m.shuttingDown
+	m.mu.Unlock()
+	if shutdown {
+		return "canceled: dashboard shutting down"
+	}
+	return "operation canceled"
+}
+
 // errCancelRequested reports setRunning refusing to start an operation whose
 // cancellation was durably requested while it waited for its target turn.
 var errCancelRequested = errors.New("operation cancel requested")
@@ -426,8 +493,10 @@ func (m *Manager) setRunning(id string) error {
 	op.Status = StatusRunning
 	op.StartedAt = &now
 	if err := m.store.saveOperation(op); err != nil {
+		m.noteRecordErrLocked(err)
 		return fmt.Errorf("persist running state: %w", err)
 	}
+	m.clearRecordErrLocked()
 	_ = m.appendEventLocked(id, EventStatus, string(StatusRunning))
 	return nil
 }
@@ -452,7 +521,10 @@ func (m *Manager) finish(id string, status Status, exitCode int, message string)
 	// failed terminal write means a restart recovers this operation as
 	// interrupted and the operator loses the record of what happened.
 	if err := m.store.saveOperation(op); err != nil {
+		m.noteRecordErrLocked(err)
 		log.Printf("[operation] terminal state persist failed for %s: %v", id, err)
+	} else {
+		m.clearRecordErrLocked()
 	}
 	if err := m.appendEventLocked(id, EventStatus, string(status)); err != nil {
 		log.Printf("[operation] terminal event persist failed for %s: %v", id, err)
@@ -489,8 +561,10 @@ func (m *Manager) appendEventLocked(id string, eventType EventType, data string)
 	}
 	event := Event{Sequence: sequence, OperationID: id, Type: eventType, Data: data, CreatedAt: time.Now().UTC()}
 	if err := m.store.appendEvent(id, event); err != nil {
+		m.noteEventErrLocked(err)
 		return err
 	}
+	m.clearEventErrLocked()
 	events = append(events, event)
 	if len(events) > m.maxEvents {
 		events = events[len(events)-m.maxEvents:]
@@ -612,6 +686,88 @@ func (m *Manager) Unsubscribe(id string, channel <-chan struct{}) {
 	}
 }
 
+// Health is the readiness projection of the operation service (A39/A47):
+// whether persistence has degraded (advisory events or terminal records are
+// failing to write; commands still run), whether the journal directories are
+// writable, and how many operations are live.
+type Health struct {
+	PersistDegraded bool      `json:"persist_degraded"`
+	RecordError     string    `json:"record_error,omitempty"`
+	RecordErrorAt   time.Time `json:"record_error_at,omitempty"`
+	EventError      string    `json:"event_error,omitempty"`
+	EventErrorAt    time.Time `json:"event_error_at,omitempty"`
+	JournalError    string    `json:"journal_error,omitempty"`
+	LiveOperations  int       `json:"live_operations"`
+}
+
+func (m *Manager) Health() Health {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h := Health{
+		PersistDegraded: m.recordErr != "" || m.eventErr != "",
+		RecordError:     m.recordErr,
+		RecordErrorAt:   m.recordErrAt,
+		EventError:      m.eventErr,
+		EventErrorAt:    m.eventErrAt,
+	}
+	for _, op := range m.operations {
+		if !op.Status.Terminal() {
+			h.LiveOperations++
+		}
+	}
+	if err := m.store.Health(); err != nil {
+		h.JournalError = err.Error()
+	}
+	return h
+}
+
+// Shutdown joins in-flight target work, bounded by ctx (A39/A47): a deploy
+// can legitimately run for minutes, so shutdown first waits for the drain
+// until ctx expires, then force-cancels everything still live (queued work
+// resolves as canceled with an explicit shutdown message — strictly better
+// than the hard exit it replaces, which killed children mid-write and left
+// records for recovery to mark interrupted) and waits a fixed grace for the
+// terminal states to persist. Callers stop the HTTP server first so no new
+// work is admitted while draining.
+func (m *Manager) Shutdown(ctx context.Context) {
+	drained := make(chan struct{})
+	go func() {
+		m.runners.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		return
+	case <-ctx.Done():
+	}
+	m.mu.Lock()
+	m.shuttingDown = true
+	cancels := make([]context.CancelFunc, 0, len(m.cancels))
+	for _, cancel := range m.cancels {
+		cancels = append(cancels, cancel)
+	}
+	live := 0
+	for _, op := range m.operations {
+		if !op.Status.Terminal() {
+			live++
+		}
+	}
+	m.mu.Unlock()
+	if live > 0 {
+		log.Printf("[operation] shutdown: %d operation(s) still live after drain deadline; force-canceling", live)
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	grace := time.NewTimer(5 * time.Second)
+	defer grace.Stop()
+	select {
+	case <-drained:
+	case <-grace.C:
+		log.Printf("[operation] shutdown: workers did not exit after force-cancel; continuing shutdown anyway")
+	}
+}
+
 // Cancel requests cancellation of an operation. The intent is PERSISTED
 // before the cancellation is acknowledged (A09): a crash before the worker
 // reaches a terminal state leaves a cancel_requested record that recovery
@@ -632,9 +788,11 @@ func (m *Manager) Cancel(id string) (*Operation, error) {
 	next := cloneOperation(op)
 	next.Status = StatusCancelRequested
 	if err := m.store.saveOperation(next); err != nil {
+		m.noteRecordErrLocked(err)
 		m.mu.Unlock()
 		return nil, fmt.Errorf("persist cancellation intent: %w", err)
 	}
+	m.clearRecordErrLocked()
 	m.operations[id] = next
 	if err := m.appendEventLocked(id, EventStatus, string(StatusCancelRequested)); err != nil {
 		log.Printf("[operation] cancel-intent event persist failed for %s: %v", id, err)

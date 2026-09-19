@@ -59,6 +59,14 @@ func NewNucleusStore(url string) (*NucleusStore, error) {
 	return s, nil
 }
 
+// Ping is the readiness probe (A39/A47): a cheap round trip with its own
+// short deadline, independent of any caller's context.
+func (s *NucleusStore) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return s.pool.Ping(ctx)
+}
+
 func (s *NucleusStore) migrate(ctx context.Context) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS monitors (

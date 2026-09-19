@@ -297,6 +297,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
+// DrainOperations joins in-flight operation work, bounded by ctx (A39/A47):
+// first a graceful drain until ctx expires, then a force-cancel plus a fixed
+// grace so terminal states persist. Call after Shutdown so no new operations
+// are admitted while draining, and before closing the store.
+func (s *Server) DrainOperations(ctx context.Context) {
+	if s.operations == nil {
+		return
+	}
+	s.operations.Shutdown(ctx)
+}
+
 // refreshFleetAsync refreshes the fleet behind a request. Single-flighted, so a
 // burst of stale reads causes one sweep, not one per request. Uses a background
 // context: the refresh must outlive the request that triggered it, or a client
@@ -673,7 +684,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// Credential-store outage: refuse everything except the liveness
 		// probe. Serving logins against a stale/legacy fallback or opening
 		// setup mode would be worse than a clear 503.
-		if g.initErr != nil && r.URL.Path != "/api/health" {
+		if g.initErr != nil && r.URL.Path != "/api/health" && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" {
 			jsonError(w, "authentication store unavailable — check server logs", http.StatusServiceUnavailable)
 			return
 		}
@@ -686,8 +697,8 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		if inSetup {
 			// When SSO is configured, setup mode is never entered (New clears it),
 			// so this branch only runs for the local-account first-run flow.
-			switch r.URL.Path {
-			case "/api/health", "/setup", "/api/setup":
+		switch r.URL.Path {
+		case "/api/health", "/healthz", "/readyz", "/setup", "/api/setup":
 				// A06: setup is a state-changing route holding the bootstrap
 				// token — it gets the same same-origin requirement as every
 				// other mutation instead of bypassing the check below.
@@ -715,7 +726,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// sign the victim into an attacker-known account), so they get the
 		// same same-origin check as authenticated mutations (A05).
 		switch r.URL.Path {
-		case "/api/health", "/login", "/api/login", "/api/logout", "/api/login/methods",
+		case "/api/health", "/healthz", "/readyz", "/login", "/api/login", "/api/logout", "/api/login/methods",
 			"/api/setup",
 			"/status", "/api/status", "/api/mcp",
 			// The browser requests the tab icon before anyone has signed in; it
@@ -1223,6 +1234,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/capabilities", s.handleCapabilities)
 	s.mux.HandleFunc("/api/nav", s.handleNav)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
+	// Liveness/readiness probes (A39/A47): unauthenticated by design, like
+	// /api/health, so orchestrators can route without a session.
+	s.mux.HandleFunc("/healthz", s.handleHealthz)
+	s.mux.HandleFunc("/readyz", s.handleReadyz)
 
 	// MCP: bearer-authed AI-client endpoint + session-authed token management.
 	s.initMCP(s.config.Version)
@@ -3067,6 +3082,74 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		backend = "file"
 	}
 	writeJSON(w, map[string]string{"status": "ok", "backend": backend})
+}
+
+// handleHealthz is the LIVENESS probe (A39/A47): the process is up and the
+// HTTP loop answers. Deliberately dependency-free — a broken store must not
+// get the pod restarted when it could serve partial traffic instead.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleReadyz is the READINESS probe (A39/A47): dependencies are reachable
+// and persistence is not known-degraded. Unlike liveness, failing readiness
+// takes the instance out of rotation.
+//
+//	status "ready"      200 — store reachable, operation persistence healthy
+//	status "degraded"   200 — serving, but a subsystem is impaired (operation
+//	                         persistence failing, or the operation service
+//	                         failed to init); stays in rotation on purpose
+//	status "unavailable" 503 — the store is unreachable, or the auth store is
+//	                         in its fail-closed outage
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	status := "ready"
+	code := http.StatusOK
+	checks := map[string]interface{}{}
+	backend := s.config.Backend
+	if backend == "" {
+		backend = "file"
+	}
+	checks["backend"] = backend
+	if s.gate != nil && s.gate.initErr != nil {
+		status = "unavailable"
+		code = http.StatusServiceUnavailable
+		checks["auth"] = s.gate.initErr.Error()
+	}
+	if pinger, ok := s.store.(interface{ Ping() error }); ok {
+		if err := pinger.Ping(); err != nil {
+			status = "unavailable"
+			code = http.StatusServiceUnavailable
+			checks["store"] = err.Error()
+		} else {
+			checks["store"] = "ok"
+		}
+	} else if s.store == nil {
+		checks["store"] = "not configured"
+	} else {
+		checks["store"] = "unknown"
+	}
+	if s.operations != nil {
+		h := s.operations.Health()
+		if h.PersistDegraded || h.JournalError != "" {
+			if status == "ready" {
+				status = "degraded"
+			}
+		}
+		checks["operations"] = h
+	} else {
+		if status == "ready" {
+			status = "degraded"
+		}
+		checks["operations"] = map[string]string{"error": "operation service unavailable"}
+		if s.operationInitErr != nil {
+			checks["operations"] = map[string]string{"error": s.operationInitErr.Error()}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": status, "checks": checks})
 }
 
 // teployNav returns the cross-product dashboard switcher entries: the current

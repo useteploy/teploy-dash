@@ -319,6 +319,25 @@ func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 	return events, gaps, nil
 }
 
+// Health probes whether the record and journal directories are still usable
+// (present and owner-writable) for readiness reporting (A39/A47). It checks
+// metadata only — no probe files are written.
+func (s *fileStore) Health() error {
+	for _, dir := range []string{s.recordsDir, s.eventsDir} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("operation storage %s: %w", dir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("operation storage %s is not a directory", dir)
+		}
+		if info.Mode().Perm()&0200 == 0 {
+			return fmt.Errorf("operation storage %s is not writable", dir)
+		}
+	}
+	return nil
+}
+
 // deleteOperation removes an operation's record and journal entirely
 // (retention). In-memory state is the caller's responsibility.
 func (s *fileStore) deleteOperation(id string) error {

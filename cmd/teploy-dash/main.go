@@ -278,6 +278,12 @@ func run() error {
 
 	mon.Stop()
 	rst.Stop()
+	// A39/A47: join in-flight operation work (bounded) before the store
+	// closes — a hard exit used to kill CLI children mid-write and leave
+	// records for recovery to mark interrupted.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	srv.DrainOperations(drainCtx)
+	drainCancel()
 	st.Close()
 	return nil
 }
