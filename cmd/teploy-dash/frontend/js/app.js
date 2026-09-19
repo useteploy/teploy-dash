@@ -124,6 +124,31 @@ function toggleTheme() {
   return next;
 }
 
+// ── Accessibility helpers ──
+// trapDialogFocus keeps Tab/Shift+Tab inside an open dialog (A49/A58).
+// Attach with @keydown.tab on the dialog overlay; focus is kept within the
+// focusable controls it contains, wrapping at both ends. Mechanical by
+// design: no heuristics, just the wrap.
+function trapDialogFocus(e) {
+  const container = e.currentTarget;
+  if (!container) return;
+  const focusables = Array.from(container.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )).filter(el => el.offsetParent !== null);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  const outside = !container.contains(active);
+  if (e.shiftKey && (active === first || outside)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (active === last || outside)) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
 // ── Auth ──
 async function logout() {
   await fetch('/api/logout', {method: 'POST'}).catch(() => {});

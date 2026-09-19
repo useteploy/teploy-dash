@@ -13,6 +13,9 @@
 </head>
 <body x-data>
 
+<!-- Skip link: first tab stop, jumps past the nav chrome to the page (A49). -->
+<a class="skip-link" href="#main">Skip to content</a>
+
 <!-- Application header -->
 <nav class="navbar" aria-label="Primary navigation">
   <div class="brand-group">
@@ -36,14 +39,14 @@
   </div>
   </div>
   <ul class="navbar-nav">
-    <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
-    <li><a href="#" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'templates' }" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" @click.prevent="$store.router.navigate('operations')">Operations</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'settings' }" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" :aria-current="$store.router.page === 'homepage' ? 'page' : null" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
+    <li><a href="#" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" :aria-current="['projects', 'project-detail', 'app-detail'].includes($store.router.page) ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" :aria-current="$store.router.page === 'servers' || $store.router.page === 'server-detail' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" :aria-current="$store.router.page === 'operations' || $store.router.page === 'operation-detail' ? 'page' : null" @click.prevent="$store.router.navigate('operations')">Operations</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'settings' }" :aria-current="$store.router.page === 'settings' ? 'page' : null" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
   <div class="navbar-spacer"></div>
   <!-- Pinned service links. Same shortcut list as the Home grid; the ones
@@ -96,7 +99,7 @@
 </div>
 
 <!-- Content -->
-<div class="content">
+<div class="content" id="main" tabindex="-1">
 
   <!-- ═══ Homepage ═══ -->
   <template x-if="$store.router.page === 'homepage'">
@@ -198,7 +201,7 @@
       <div class="page-header">
         <h1 class="page-title">Deployments</h1>
         <div style="display: flex; gap: 12px; align-items: center; flex: 1; max-width: 500px; margin: 0 24px;">
-          <input type="text" class="search-input" placeholder="Search apps..." x-model="search" style="flex: 1;">
+          <input type="text" class="search-input" placeholder="Search apps..." aria-label="Search apps" x-model="search" style="flex: 1;">
         </div>
         <button class="btn" @click="createGroup">+ Group</button>
       </div>
@@ -225,22 +228,22 @@
                 <div class="table-wrap" style="padding: 20px; margin-bottom: 16px;">
                   <div class="form-row">
                     <div class="form-group">
-                      <label class="form-label">App name</label>
-                      <input class="form-input" placeholder="myapp" x-model="deployForm.app">
+                      <label class="form-label" :for="'grp-deploy-app-' + group.name">App name</label>
+                      <input class="form-input" :id="'grp-deploy-app-' + group.name" placeholder="myapp" x-model="deployForm.app">
                     </div>
                     <div class="form-group">
-                      <label class="form-label">Docker image</label>
-                      <input class="form-input" placeholder="nginx:latest" x-model="deployForm.image">
+                      <label class="form-label" :for="'grp-deploy-image-' + group.name">Docker image</label>
+                      <input class="form-input" :id="'grp-deploy-image-' + group.name" placeholder="nginx:latest" x-model="deployForm.image">
                     </div>
                     <div class="form-group">
-                      <label class="form-label">Domain</label>
-                      <input class="form-input" placeholder="myapp.example.com" x-model="deployForm.domain">
+                      <label class="form-label" :for="'grp-deploy-domain-' + group.name">Domain</label>
+                      <input class="form-input" :id="'grp-deploy-domain-' + group.name" placeholder="myapp.example.com" x-model="deployForm.domain">
                     </div>
                   </div>
                   <div class="form-row">
                     <div class="form-group">
-                      <label class="form-label">Server</label>
-                      <select class="form-input" x-model="deployForm.server">
+                      <label class="form-label" :for="'grp-deploy-server-' + group.name">Server</label>
+                      <select class="form-input" :id="'grp-deploy-server-' + group.name" x-model="deployForm.server">
                         <option value="">Select a server...</option>
                         <template x-for="s in serverList" :key="s">
                           <option :value="s" x-text="s"></option>
@@ -248,8 +251,8 @@
                       </select>
                     </div>
                     <div class="form-group">
-                      <label class="form-label">Container port</label>
-                      <input class="form-input" type="number" placeholder="80" x-model.number="deployForm.port">
+                      <label class="form-label" :for="'grp-deploy-port-' + group.name">Container port</label>
+                      <input class="form-input" type="number" :id="'grp-deploy-port-' + group.name" placeholder="80" x-model.number="deployForm.port">
                     </div>
                     <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
                       <button class="btn btn-primary" @click="doDeploy(group.name)" :disabled="deploying" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
@@ -331,34 +334,34 @@
           <!-- Inline deploy form -->
           <template x-if="deployingToProject">
             <div class="table-wrap" style="padding: 20px; margin-bottom: 16px;">
-              <div class="form-row">
-                <div class="form-group">
-                  <label class="form-label">App name</label>
-                  <input class="form-input" placeholder="myapp" x-model="deployForm.app">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Docker image</label>
-                  <input class="form-input" placeholder="nginx:latest" x-model="deployForm.image">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Domain</label>
-                  <input class="form-input" placeholder="myapp.example.com" x-model="deployForm.domain">
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="form-group">
-                  <label class="form-label">Server</label>
-                  <select class="form-input" x-model="deployForm.server">
-                    <option value="">Select a server...</option>
-                    <template x-for="s in serverList" :key="s">
-                      <option :value="s" x-text="s"></option>
-                    </template>
-                  </select>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Container port</label>
-                  <input class="form-input" type="number" placeholder="80" x-model.number="deployForm.port">
-                </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label class="form-label" for="proj-deploy-app">App name</label>
+                      <input class="form-input" id="proj-deploy-app" placeholder="myapp" x-model="deployForm.app">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="proj-deploy-image">Docker image</label>
+                      <input class="form-input" id="proj-deploy-image" placeholder="nginx:latest" x-model="deployForm.image">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="proj-deploy-domain">Domain</label>
+                      <input class="form-input" id="proj-deploy-domain" placeholder="myapp.example.com" x-model="deployForm.domain">
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label class="form-label" for="proj-deploy-server">Server</label>
+                      <select class="form-input" id="proj-deploy-server" x-model="deployForm.server">
+                        <option value="">Select a server...</option>
+                        <template x-for="s in serverList" :key="s">
+                          <option :value="s" x-text="s"></option>
+                        </template>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="proj-deploy-port">Container port</label>
+                      <input class="form-input" type="number" id="proj-deploy-port" placeholder="80" x-model.number="deployForm.port">
+                    </div>
                 <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
                   <button class="btn btn-primary" @click="doDeploy()" :disabled="deploying" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
                   <button class="btn" @click="deployingToProject = false">Cancel</button>
@@ -684,11 +687,15 @@
           <template x-if="tab === 'logs'">
             <div x-data="logViewer" @start-logs.window="connect()">
               <div class="log-controls">
-                <input type="text" class="process-input" :value="process" placeholder="web"
+                <label for="log-process" class="sr-only">Process name</label>
+                <input type="text" id="log-process" class="process-input" :value="process" placeholder="web"
+                  aria-label="Process name (container to tail)"
                   @keydown.enter="switchProcess($event.target.value)"
                   @change="switchProcess($event.target.value)"
                   style="width: 100px; font-size: 12px;">
-                <select x-model="lineCount" @change="connect()">
+                <label for="log-lines" class="sr-only">Tail length</label>
+                <select id="log-lines" x-model="lineCount" @change="connect()"
+                        aria-label="Number of tail lines">
                   <option value="50">50 lines</option>
                   <option value="100" selected>100 lines</option>
                   <option value="500">500 lines</option>
@@ -696,7 +703,7 @@
                 </select>
                 <button class="btn btn-sm" @click="togglePause()" x-text="paused ? 'Resume' : 'Pause'"></button>
                 <button class="btn btn-sm" @click="clear()">Clear</button>
-                <span class="ws-indicator" :class="connected ? 'connected' : 'disconnected'"></span>
+                <span class="ws-indicator" :class="connected ? 'connected' : 'disconnected'" aria-hidden="true"></span>
                 <span style="font-size: 12px; color: var(--text-muted);" x-text="connected ? 'Connected' : 'Disconnected'"></span>
               </div>
               <div class="log-viewer" x-ref="logContent"><template x-for="(line, i) in lines" :key="i"><span x-text="line"></span></template></div>
@@ -970,26 +977,31 @@
         </div>
       </template>
 
-      <!-- Create Monitor Dialog -->
-      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="closeDialog()" x-cloak>
-        <div class="dialog">
-          <h2 x-text="editingId ? 'Edit Monitor' : 'Add Monitor'">Add Monitor</h2>
+      <!-- Create Monitor Dialog. Focus is trapped while open (A49/A58):
+           Tab/Shift+Tab wrap inside the dialog, Escape closes, and the
+           dialog itself takes initial focus so keyboard users land in it. -->
+      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="closeDialog()"
+           @keydown.tab="trapDialogFocus($event)"
+           @keydown.escape.window="showCreateDialog && closeDialog()" x-cloak>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="monitor-dialog-title"
+             tabindex="-1" x-effect="showCreateDialog && $nextTick(() => $el.focus())">
+          <h2 id="monitor-dialog-title" x-text="editingId ? 'Edit Monitor' : 'Add Monitor'">Add Monitor</h2>
           <form @submit.prevent="createMonitor()">
             <div class="field">
-              <label>Name</label>
-              <input type="text" x-model="newMonitor.name" placeholder="My API" required>
+              <label for="monitor-name">Name</label>
+              <input type="text" id="monitor-name" x-model="newMonitor.name" placeholder="My API" required>
             </div>
             <div class="field">
-              <label>Type</label>
-              <select x-model="newMonitor.type">
+              <label for="monitor-type">Type</label>
+              <select id="monitor-type" x-model="newMonitor.type">
                 <option value="http">HTTP</option>
                 <option value="tcp">TCP</option>
                 <option value="ping">TCP ping (reachability)</option>
               </select>
             </div>
             <div class="field">
-              <label>Target</label>
-              <input type="text" x-model="newMonitor.target"
+              <label for="monitor-target">Target</label>
+              <input type="text" id="monitor-target" x-model="newMonitor.target"
                 :placeholder="newMonitor.type === 'http' ? 'https://example.com' : 'example.com:5432 (host:port)'" required>
             </div>
             <div class="field">
@@ -1002,8 +1014,8 @@
             </div>
             <div class="field-row">
               <div class="field">
-                <label>Check Interval</label>
-                <select x-model="newMonitor.interval">
+                <label for="monitor-interval">Check Interval</label>
+                <select id="monitor-interval" x-model="newMonitor.interval">
                   <option value="30000">30 seconds</option>
                   <option value="60000" selected>1 minute</option>
                   <option value="300000">5 minutes</option>
@@ -1011,8 +1023,8 @@
                 </select>
               </div>
               <div class="field">
-                <label>Timeout</label>
-                <select x-model="newMonitor.timeout">
+                <label for="monitor-timeout">Timeout</label>
+                <select id="monitor-timeout" x-model="newMonitor.timeout">
                   <option value="5000">5 seconds</option>
                   <option value="10000" selected>10 seconds</option>
                   <option value="30000">30 seconds</option>
@@ -1021,16 +1033,16 @@
             </div>
             <div class="field-row" x-show="newMonitor.type === 'http'">
               <div class="field">
-                <label>Method</label>
-                <select x-model="newMonitor.method">
+                <label for="monitor-method">Method</label>
+                <select id="monitor-method" x-model="newMonitor.method">
                   <option value="GET">GET</option>
                   <option value="HEAD">HEAD</option>
                   <option value="POST">POST</option>
                 </select>
               </div>
               <div class="field">
-                <label>Expected Status <span style="opacity:0.6">(optional)</span></label>
-                <input type="number" x-model="newMonitor.expected_status" placeholder="any 2xx/3xx">
+                <label for="monitor-status">Expected Status <span style="opacity:0.6">(optional)</span></label>
+                <input type="number" id="monitor-status" x-model="newMonitor.expected_status" placeholder="any 2xx/3xx">
               </div>
             </div>
             <div class="dialog-actions">
@@ -1117,14 +1129,17 @@
         </div>
       </template>
 
-      <!-- Create Restore Test Dialog -->
-      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="showCreateDialog = false" x-cloak>
-        <div class="dialog">
-          <h2>Add Restore Test</h2>
+      <!-- Create Restore Test Dialog (focus-trapped, Escape closes — A49/A58). -->
+      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="showCreateDialog = false"
+           @keydown.tab="trapDialogFocus($event)"
+           @keydown.escape.window="showCreateDialog && closeDialog()" x-cloak>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="restore-dialog-title"
+             tabindex="-1" x-effect="showCreateDialog && $nextTick(() => $el.focus())">
+          <h2 id="restore-dialog-title">Add Restore Test</h2>
           <form @submit.prevent="createTest()">
             <div class="field">
-              <label>Server</label>
-              <select x-model="newTest.server" required>
+              <label for="restore-server">Server</label>
+              <select id="restore-server" x-model="newTest.server" required>
                 <option value="" disabled>Select a server</option>
                 <template x-for="s in servers" :key="s.name">
                   <option :value="s.name" x-text="s.name + ' (' + s.host + ')'"></option>
@@ -1133,27 +1148,27 @@
             </div>
             <div class="field-row">
               <div class="field">
-                <label>App</label>
-                <input type="text" x-model="newTest.app" placeholder="myapp" required>
+                <label for="restore-app">App</label>
+                <input type="text" id="restore-app" x-model="newTest.app" placeholder="myapp" required>
               </div>
               <div class="field">
-                <label>Accessory</label>
-                <input type="text" x-model="newTest.accessory" placeholder="postgres" required>
+                <label for="restore-accessory">Accessory</label>
+                <input type="text" id="restore-accessory" x-model="newTest.accessory" placeholder="postgres" required>
               </div>
             </div>
             <div class="field-row">
               <div class="field">
-                <label>S3 Bucket</label>
-                <input type="text" x-model="newTest.bucket" placeholder="my-backups" required>
+                <label for="restore-bucket">S3 Bucket</label>
+                <input type="text" id="restore-bucket" x-model="newTest.bucket" placeholder="my-backups" required>
               </div>
               <div class="field">
-                <label>Region</label>
-                <input type="text" x-model="newTest.region" placeholder="us-east-1">
+                <label for="restore-region">Region</label>
+                <input type="text" id="restore-region" x-model="newTest.region" placeholder="us-east-1">
               </div>
             </div>
             <div class="field">
-              <label>Run Every</label>
-              <select x-model="newTest.interval_hours">
+              <label for="restore-interval">Run Every</label>
+              <select id="restore-interval" x-model="newTest.interval_hours">
                 <option value="6">6 hours</option>
                 <option value="12">12 hours</option>
                 <option value="24" selected>24 hours</option>
@@ -1392,12 +1407,12 @@
 
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">Domain</label>
-              <input class="form-input" x-model="installForm.domain" placeholder="app.example.com">
+              <label class="form-label" for="install-domain">Domain</label>
+              <input class="form-input" id="install-domain" x-model="installForm.domain" placeholder="app.example.com">
             </div>
             <div class="form-group">
-              <label class="form-label">Server</label>
-              <select class="form-input" x-model="installForm.server">
+              <label class="form-label" for="install-server">Server</label>
+              <select class="form-input" id="install-server" x-model="installForm.server">
                 <option value="">Select a server...</option>
                 <template x-for="s in serverList" :key="s">
                   <option :value="s" x-text="s"></option>
@@ -1439,7 +1454,7 @@
       <div class="page-header">
         <h1 class="page-title">Operations</h1>
         <div class="header-actions">
-          <select class="form-input" style="width:auto;" x-model="statusFilter" @change="load()">
+          <select class="form-input" style="width:auto;" aria-label="Filter by status" x-model="statusFilter" @change="load()">
             <option value="">All statuses</option>
             <option value="queued">Queued</option>
             <option value="running">Running</option>
@@ -1577,20 +1592,20 @@
         <div>
           <div class="form-row" style="margin-bottom: 16px;">
             <div class="form-group">
-              <label class="form-label">Name</label>
-              <input class="form-input" x-model="newServer.name" placeholder="prod">
+              <label class="form-label" for="new-server-name">Name</label>
+              <input class="form-input" id="new-server-name" x-model="newServer.name" placeholder="prod">
             </div>
             <div class="form-group">
-              <label class="form-label">Host</label>
-              <input class="form-input" x-model="newServer.host" placeholder="192.168.1.100">
+              <label class="form-label" for="new-server-host">Host</label>
+              <input class="form-input" id="new-server-host" x-model="newServer.host" placeholder="192.168.1.100">
             </div>
             <div class="form-group">
-              <label class="form-label">User</label>
-              <input class="form-input" x-model="newServer.user" placeholder="root">
+              <label class="form-label" for="new-server-user">User</label>
+              <input class="form-input" id="new-server-user" x-model="newServer.user" placeholder="root">
             </div>
             <div class="form-group">
-              <label class="form-label">Role</label>
-              <select class="form-input" x-model="newServer.role">
+              <label class="form-label" for="new-server-role">Role</label>
+              <select class="form-input" id="new-server-role" x-model="newServer.role">
                 <option value="app">Standard</option>
                 <option value="lb">Load Balancer</option>
               </select>
@@ -1634,22 +1649,22 @@
               <h3 class="section-title" style="font-size: 14px;">Edit <span x-text="editingServer.originalName"></span></h3>
               <div class="form-row">
                 <div class="form-group">
-                  <label class="form-label">Name</label>
-                  <input class="form-input" x-model="editingServer.name">
+                  <label class="form-label" for="edit-server-name">Name</label>
+                  <input class="form-input" id="edit-server-name" x-model="editingServer.name">
                 </div>
                 <div class="form-group">
-                  <label class="form-label">Host</label>
-                  <input class="form-input" x-model="editingServer.host">
+                  <label class="form-label" for="edit-server-host">Host</label>
+                  <input class="form-input" id="edit-server-host" x-model="editingServer.host">
                 </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label class="form-label">User</label>
-                  <input class="form-input" x-model="editingServer.user">
+                  <label class="form-label" for="edit-server-user">User</label>
+                  <input class="form-input" id="edit-server-user" x-model="editingServer.user">
                 </div>
                 <div class="form-group">
-                  <label class="form-label">Role</label>
-                  <select class="form-input" x-model="editingServer.role">
+                  <label class="form-label" for="edit-server-role">Role</label>
+                  <select class="form-input" id="edit-server-role" x-model="editingServer.role">
                     <option value="app">Standard</option>
                     <option value="lb">Load Balancer</option>
                   </select>
@@ -1722,7 +1737,7 @@
               <input class="form-input" type="password" x-model="webhookSecretDraft"
                      :disabled="webhookSecretMode === 'keep'"
                      :placeholder="webhookSecretMode === 'keep' ? (notifications.webhook_secret_set ? '(set — unchanged)' : '(not set)') : 'replacement secret'">
-              <select class="form-input" style="max-width:130px;" x-model="webhookSecretMode" :disabled="!notifications.webhook_secret_set && webhookSecretMode === 'keep'">
+              <select class="form-input" style="max-width:130px;" aria-label="Webhook secret: keep, replace, or clear" x-model="webhookSecretMode" :disabled="!notifications.webhook_secret_set && webhookSecretMode === 'keep'">
                 <option value="keep" :disabled="!notifications.webhook_secret_set">Keep</option>
                 <option value="replace">Replace</option>
                 <option value="clear" :disabled="!notifications.webhook_secret_set">Clear</option>
@@ -1752,7 +1767,7 @@
                 <input class="form-input" type="password" x-model="smtpPasswordDraft"
                        :disabled="smtpPasswordMode === 'keep'"
                        :placeholder="smtpPasswordMode === 'keep' ? (notifications.smtp_pass_set ? '(set — unchanged)' : '(not set)') : 'new password'">
-                <select class="form-input" style="max-width:130px;" x-model="smtpPasswordMode">
+                <select class="form-input" style="max-width:130px;" aria-label="SMTP password: keep, replace, or clear" x-model="smtpPasswordMode">
                   <option value="keep" :disabled="!notifications.smtp_pass_set">Keep</option>
                   <option value="replace">Replace</option>
                   <option value="clear" :disabled="!notifications.smtp_pass_set">Clear</option>
@@ -1841,12 +1856,12 @@
             </p>
             <div class="form-row" style="margin-bottom: 16px; align-items: flex-end;">
               <div class="form-group">
-                <label class="form-label">Token name</label>
-                <input class="form-input" x-model="newMcpToken.name" placeholder="claude-code">
+                <label class="form-label" for="mcp-token-name">Token name</label>
+                <input class="form-input" id="mcp-token-name" x-model="newMcpToken.name" placeholder="claude-code">
               </div>
               <div class="form-group">
-                <label class="form-label">Access</label>
-                <select class="form-input" x-model="newMcpToken.readOnly">
+                <label class="form-label" for="mcp-token-access">Access</label>
+                <select class="form-input" id="mcp-token-access" x-model="newMcpToken.readOnly">
                   <option value="false">Read + actions</option>
                   <option value="true">Read-only</option>
                 </select>
@@ -1910,16 +1925,16 @@
             </p>
             <div class="form-row" style="margin-bottom: 16px; align-items: flex-end;">
               <div class="form-group">
-                <label class="form-label">Username</label>
-                <input class="form-input" x-model="newUser.username" placeholder="jane">
+                <label class="form-label" for="new-user-name">Username</label>
+                <input class="form-input" id="new-user-name" x-model="newUser.username" placeholder="jane">
               </div>
               <div class="form-group">
-                <label class="form-label">Password</label>
-                <input class="form-input" type="password" x-model="newUser.password" placeholder="At least 8 characters">
+                <label class="form-label" for="new-user-pass">Password</label>
+                <input class="form-input" id="new-user-pass" type="password" x-model="newUser.password" placeholder="At least 8 characters">
               </div>
               <div class="form-group">
-                <label class="form-label">Role</label>
-                <select class="form-input" x-model="newUser.role">
+                <label class="form-label" for="new-user-role">Role</label>
+                <select class="form-input" id="new-user-role" x-model="newUser.role">
                   <option value="viewer">Viewer</option>
                   <option value="editor">Editor</option>
                   <option value="admin">Admin</option>
@@ -1940,6 +1955,7 @@
                         <td x-text="u.username"></td>
                         <td>
                           <select class="form-input" style="max-width: 130px; padding: 4px 8px;"
+                                  :aria-label="'Role for ' + u.username"
                                   @change="changeRole(u.username, $event.target.value)">
                             <option value="viewer" :selected="u.role === 'viewer'">Viewer</option>
                             <option value="editor" :selected="u.role === 'editor'">Editor</option>
@@ -2176,7 +2192,7 @@
 </div>
 
 <!-- Toast Container -->
-<div id="toast-container" class="toast-container"></div>
+<div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
 
 </body>
 </html>

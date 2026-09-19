@@ -52,9 +52,26 @@ html { background: var(--bg); }
 body { min-height: 100vh; background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); -webkit-font-smoothing: antialiased; }
 button, input, select, textarea { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 [x-cloak] { display: none !important; }
 ::selection { background: var(--accent-soft); }
+
+/* A49/A58: skip link is invisible until focused (first Tab stop), then a
+   plain high-contrast chip. sr-only hides the log controls' fallback labels
+   from sighted users while keeping them for assistive tech. */
+.skip-link {
+  position: absolute; top: 8px; left: 8px; z-index: 200;
+  padding: 8px 14px; border-radius: 6px;
+  background: var(--accent); color: #fff; font-weight: 600; text-decoration: none;
+  transform: translateY(-200%); transition: transform .1s;
+}
+.skip-link:focus { transform: none; }
+#main:focus { outline: none; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 
 /* Ship-aligned top header */
 .navbar {
