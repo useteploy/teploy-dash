@@ -113,3 +113,52 @@ func TestHostKeyCallback_ExistingStoreIsStrict(t *testing.T) {
 		t.Fatal("mismatch is not a knownhosts.KeyError")
 	}
 }
+
+// F012: one normalization for probe + dial. An explicit host:port must keep
+// its port (the old probe wrapped it in another :22), and every accepted
+// shape must round to a dialable host:port.
+func TestNormalizeAddress(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"example.test", "example.test:22"},
+		{"example.test:2222", "example.test:2222"},
+		{"Example.Test:2222", "example.test:2222"},
+		{"10.0.0.9", "10.0.0.9:22"},
+		{"10.0.0.9:2222", "10.0.0.9:2222"},
+		{"::1", "[::1]:22"},
+		{"[::1]", "[::1]:22"},
+		{"[::1]:2222", "[::1]:2222"},
+	}
+	for _, tc := range cases {
+		got, err := NormalizeAddress(tc.in)
+		if err != nil {
+			t.Fatalf("NormalizeAddress(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("NormalizeAddress(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	for _, bad := range []string{"", " ", "host test", "host/name", "a@b", "host:", ":22", "host:0", "host:70000", "host:abc", "[broken", "example.test:2222:3333"} {
+		if got, err := NormalizeAddress(bad); err == nil {
+			t.Fatalf("NormalizeAddress(%q) = %q, want error", bad, got)
+		}
+	}
+}
+
+// F009: capture respects the byte budget and reports overflow instead of
+// returning a silently truncated payload.
+func TestLimitedWriterOverflow(t *testing.T) {
+	var w limitedWriter
+	w.limit = 8
+	if _, err := w.Write([]byte("12345678")); err != nil || w.overflow {
+		t.Fatalf("in-budget write failed: %v overflow=%v", err, w.overflow)
+	}
+	if _, err := w.Write([]byte("9")); err != nil {
+		t.Fatalf("over-budget write errored: %v", err)
+	}
+	if !w.overflow {
+		t.Fatal("overflow not recorded")
+	}
+	if w.buf.String() != "12345678" {
+		t.Fatalf("captured %q", w.buf.String())
+	}
+}

@@ -9,8 +9,10 @@ import (
 	"io/fs"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,81 @@ const (
 type Client struct {
 	client *ssh.Client
 	host   string
+	// stopCancellation detaches the connection-lifetime cancellation watcher
+	// (F007): the watcher must live as long as the CLIENT owns the
+	// connection, not just until Connect returns, or a cancellation landing
+	// after setup leaves a session that can no longer be unblocked.
+	stopCancellation func()
+	closeOnce        sync.Once
+}
+
+// maxRunOutput bounds what Client.Run captures per stream (F009): a broken
+// or compromised remote that streams forever must not grow dashboard memory
+// without bound. Structured state reads are kilobytes; these ceilings are
+// orders of magnitude above legitimate output.
+const (
+	maxRunStdout = 4 << 20
+	maxRunStderr = 1 << 20
+)
+
+// ErrOutputLimit reports that a remote command produced more output than the
+// capture budget allows; the truncated payload is not a valid machine
+// response and must not be parsed as one.
+var ErrOutputLimit = errors.New("remote output exceeded the capture limit")
+
+// limitedWriter captures up to limit bytes and records overflow.
+type limitedWriter struct {
+	buf      bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if w.buf.Len()+len(p) > w.limit {
+		w.overflow = true
+		room := w.limit - w.buf.Len()
+		if room > 0 {
+			w.buf.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return w.buf.Write(p)
+}
+
+// NormalizeAddress validates a configured SSH endpoint and returns it in
+// host:port form (port 22 defaulted). DNS names, IPv4, raw IPv6, and
+// bracketed IPv6 with or without an explicit port are accepted; anything
+// else is an error. One shared normalization serves dialing, reachability
+// probing, identity, and logging so they can never disagree (F012).
+func NormalizeAddress(raw string) (string, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "/\\\t\r\n @") {
+		return "", errors.New("invalid SSH address")
+	}
+	if ip, err := netip.ParseAddr(raw); err == nil {
+		return net.JoinHostPort(ip.String(), "22"), nil
+	}
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"))
+		if err != nil {
+			return "", errors.New("invalid IPv6 address")
+		}
+		return net.JoinHostPort(ip.String(), "22"), nil
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		if strings.ContainsAny(raw, ":[]") {
+			return "", errors.New("invalid host:port")
+		}
+		host, port = raw, "22"
+	}
+	n, err := strconv.Atoi(port)
+	if host == "" || err != nil || n < 1 || n > 65535 {
+		return "", errors.New("invalid SSH endpoint")
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		host = ip.String()
+	}
+	return net.JoinHostPort(strings.ToLower(host), strconv.Itoa(n)), nil
 }
 
 // Connect establishes an SSH connection to the given host.
@@ -43,10 +120,12 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	if user == "" {
 		user = "root"
 	}
-	// A bare IPv6 literal contains colons but no port; only treat the address
-	// as port-suffixed when it actually splits (A18).
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		host = net.JoinHostPort(host, "22")
+	// F012: normalize once (bare IPv6, bracketed IPv6, explicit port,
+	// hostname) — the reachability probe and the dialer previously derived
+	// the address independently and disagreed for host:port endpoints.
+	addr, err := NormalizeAddress(host)
+	if err != nil {
+		return nil, err
 	}
 
 	signers, encryptedFound, err := loadSigners(keyPath)
@@ -55,12 +134,14 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 	}
 
 	var auth []ssh.AuthMethod
-	// ssh-agent is the correct way to use encrypted keys non-interactively in a
-	// daemon: when SSH_AUTH_SOCK is set, offer the agent's keys. The agent
+	// ssh-agent is the correct way to use encrypted keys non-interactively in
+	// a daemon: when SSH_AUTH_SOCK is set, offer the agent's keys. The agent
 	// connection is owned by this function and closed once the handshake is
 	// done — previously every attempt leaked the unix socket (A18). The agent
 	// socket dial is deadline-bounded so a wedged agent can't stall the
-	// connect phase outside every other bound (A29).
+	// connect phase outside every other bound (A29), and F008 bounds the
+	// agent's Signers/sign reads too: the dial timeout alone did not cover a
+	// hung agent that accepted the connection and then never answered.
 	agentMethod, agentConn, hasAgent := agentAuthMethod()
 	if hasAgent {
 		auth = append(auth, agentMethod)
@@ -90,18 +171,20 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 		HostKeyCallback: callback,
 	}
 
-	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", host)
+	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("dialing %s: %w", host, err)
+		return nil, fmt.Errorf("dialing %s: %w", addr, err)
 	}
 
 	// A29: ctx cancellation closes the owned connection for EVERY phase
 	// after the dial (handshake, session creation, command run) — a deadline
 	// on the conn alone only bounded the handshake, and a context canceled
 	// mid-handshake could leave the socket (and the caller) hanging until
-	// that deadline. stop releases the watcher on normal exit.
+	// that deadline. F007: the watcher stays attached for the CLIENT's whole
+	// owned lifetime (released in Close), not just until Connect returns —
+	// cancellation must keep covering NewSession and streaming, which run
+	// after setup with every deadline cleared.
 	stop := closeOnCancel(ctx, conn)
-	defer stop()
 
 	// Bound the handshake with a deadline (or the ctx deadline, whichever is
 	// sooner). Cleared once connected so long-lived sessions aren't affected.
@@ -110,15 +193,29 @@ func Connect(ctx context.Context, host, user, keyPath string) (*Client, error) {
 		hsDeadline = d
 	}
 	conn.SetDeadline(hsDeadline)
+	if hasAgent {
+		// F008: the handshake deadline also bounds the AGENT socket —
+		// Signers/sign reads during authentication ride this deadline, so a
+		// hung agent cannot stall the connect phase past its bound.
+		_ = agentConn.SetDeadline(hsDeadline)
+	}
 
-	c, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
+		stop()
 		conn.Close()
-		return nil, fmt.Errorf("SSH handshake with %s: %w", host, err)
+		return nil, fmt.Errorf("SSH handshake with %s: %w", addr, err)
 	}
 	conn.SetDeadline(time.Time{}) // clear handshake deadline
+	if hasAgent {
+		_ = agentConn.SetDeadline(time.Time{})
+	}
 
-	return &Client{client: ssh.NewClient(c, chans, reqs), host: host}, nil
+	return &Client{
+		client:           ssh.NewClient(c, chans, reqs),
+		host:             addr,
+		stopCancellation: stop,
+	}, nil
 }
 
 // closeOnCancel arranges for c to be closed the moment ctx is done, until the
@@ -258,22 +355,38 @@ func insecureRecordingCallback(knownHostsPath string) ssh.HostKeyCallback {
 	}
 }
 
-// Run executes a command and returns its combined stdout (trimmed).
+// Run executes a command and returns its stdout (trimmed), bounded by the
+// capture budget (F009). Overflow returns ErrOutputLimit — the truncated
+// payload must not be parsed as a valid machine response.
 func (c *Client) Run(ctx context.Context, cmd string) (string, error) {
-	var buf bytes.Buffer
-	if err := c.stream(ctx, cmd, &buf, io.Discard); err != nil {
+	var stdout, stderr limitedWriter
+	stdout.limit = maxRunStdout
+	stderr.limit = maxRunStderr
+	if err := c.stream(ctx, cmd, &stdout, &stderr); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(buf.String()), nil
+	if stdout.overflow || stderr.overflow {
+		return "", fmt.Errorf("%w (stdout=%d bytes, stderr=%d bytes)", ErrOutputLimit, stdout.buf.Len(), stderr.buf.Len())
+	}
+	return strings.TrimSpace(stdout.buf.String()), nil
 }
 
 // Stream executes a command and writes stdout to w line by line.
-// Used for log tailing via WebSocket.
+// Used for log tailing via SSE.
 func (c *Client) Stream(ctx context.Context, cmd string, w io.Writer) error {
 	return c.stream(ctx, cmd, w, io.Discard)
 }
 
 func (c *Client) stream(ctx context.Context, cmd string, stdout, stderr io.Writer) error {
+	// F007: register the cancellation watcher BEFORE NewSession and against
+	// the underlying transport — a peer that completes the handshake but
+	// never answers a session-open previously left NewSession blocking
+	// outside every context bound (the connection watcher had already been
+	// detached when Connect returned). Closing the transport is what
+	// unblocks it; a session that does not exist cannot be signaled.
+	stop := context.AfterFunc(ctx, func() { _ = c.client.Close() })
+	defer stop()
+
 	sess, err := c.client.NewSession()
 	if err != nil {
 		return fmt.Errorf("creating SSH session: %w", err)
@@ -299,9 +412,15 @@ func (c *Client) stream(ctx context.Context, cmd string, stdout, stderr io.Write
 	}
 }
 
-// Close closes the underlying SSH connection.
+// Close closes the underlying SSH connection and detaches the
+// connection-lifetime cancellation watcher (F007).
 func (c *Client) Close() {
-	c.client.Close()
+	c.closeOnce.Do(func() {
+		if c.stopCancellation != nil {
+			c.stopCancellation()
+		}
+		_ = c.client.Close()
+	})
 }
 
 // loadSigners returns usable (unencrypted) key signers and whether any key on
@@ -345,8 +464,9 @@ func loadSigners(keyPath string) (signers []ssh.Signer, encryptedFound bool, err
 // agentAuthMethod returns an AuthMethod backed by ssh-agent when SSH_AUTH_SOCK
 // is set, plus the agent connection's owner so the caller can close it once
 // authentication is done — each Connect previously leaked the unix socket
-// (A18).
-func agentAuthMethod() (ssh.AuthMethod, io.Closer, bool) {
+// (A18). The concrete net.Conn (not io.Closer) lets the caller bound the
+// agent's reads with deadlines (F008).
+func agentAuthMethod() (ssh.AuthMethod, net.Conn, bool) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
 		return nil, nil, false

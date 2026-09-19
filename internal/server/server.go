@@ -32,6 +32,7 @@ import (
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
 	"github.com/useteploy/teploy-dash/internal/remote"
+	sshclient "github.com/useteploy/teploy-dash/internal/ssh"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
 	"github.com/useteploy/teploy-dash/internal/state"
 	"github.com/useteploy/teploy-dash/internal/store"
@@ -1973,8 +1974,15 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 
 // tcpReachable reports whether host's SSH port accepts a TCP connection within
 // timeout. Used as a lightweight liveness probe for the Servers page.
+// F012: the endpoint is normalized exactly like the SSH dialer — an explicit
+// host:port used to be wrapped in ANOTHER port 22 ([example.test:2222]:22),
+// probing (and reporting offline) a target the real SSH code never uses.
 func tcpReachable(host string, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), timeout)
+	addr, err := sshclient.NormalizeAddress(host)
+	if err != nil {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return false
 	}
