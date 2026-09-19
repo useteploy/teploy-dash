@@ -251,7 +251,7 @@ func New(config Config) *Server {
 		MaxHistoryAge:      config.OperationMaxHistoryAge,
 		MaxOperations:      config.OperationMaxOperations,
 		MaxQueuedPerTarget: config.OperationMaxQueued,
-		Resolver:        resolver,
+		Resolver:           resolver,
 		ProjectResolver: func(server, app, revision string) (string, error) {
 			if s.manifests == nil {
 				return "", fmt.Errorf("manifest service unavailable")
@@ -697,8 +697,8 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		if inSetup {
 			// When SSO is configured, setup mode is never entered (New clears it),
 			// so this branch only runs for the local-account first-run flow.
-		switch r.URL.Path {
-		case "/api/health", "/healthz", "/readyz", "/setup", "/api/setup":
+			switch r.URL.Path {
+			case "/api/health", "/healthz", "/readyz", "/setup", "/api/setup":
 				// A06: setup is a state-changing route holding the bootstrap
 				// token — it gets the same same-origin requirement as every
 				// other mutation instead of bypassing the check below.

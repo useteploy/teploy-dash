@@ -338,6 +338,23 @@ func TestOperationAPIAttributesActorFromSession(t *testing.T) {
 	if envelope.Data.Actor.Kind != "local" || envelope.Data.Actor.Subject != "dana" || envelope.Data.Actor.Label != "dana" {
 		t.Fatalf("actor = %+v, want local/dana", envelope.Data.Actor)
 	}
+	// Join the operation before returning so its terminal persist cannot
+	// race t.TempDir cleanup.
+	waitForTerminalOperation(t, server, envelope.Data.ID)
+}
+
+// waitForTerminalOperation polls until the operation reaches a terminal
+// status, so tests never leave live runners writing behind them.
+func waitForTerminalOperation(t *testing.T, s *Server, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if op, err := s.operations.Get(id); err == nil && op.Status.Terminal() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("operation %s never reached a terminal status", id)
 }
 
 func TestOperationAdmissionBudgetMapsTo429(t *testing.T) {
@@ -364,10 +381,12 @@ func TestOperationAdmissionBudgetMapsTo429(t *testing.T) {
 		t.Fatalf("first enqueue status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	// Wait until the first op is running (holding the target's budget).
+	var firstID string
 	deadline := time.Now().Add(3 * time.Second)
 	running := false
 	for time.Now().Before(deadline) && !running {
 		for _, op := range server.operations.List("", "", 0) {
+			firstID = op.ID
 			if op.Status == operation.StatusRunning {
 				running = true
 			}
@@ -384,4 +403,6 @@ func TestOperationAdmissionBudgetMapsTo429(t *testing.T) {
 		t.Fatalf("budget-exceeded status = %d body=%s, want 429", rec.Code, rec.Body.String())
 	}
 	close(blocker)
+	waitForTerminalOperation(t, server, firstID)
+	server.DrainOperations(context.Background())
 }

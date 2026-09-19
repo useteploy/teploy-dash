@@ -60,8 +60,8 @@ type Options struct {
 	// refused at admission (A12/A27 remainder).
 	MaxQueuedPerTarget int
 	Resolver           Resolver
-	ProjectResolver ProjectResolver
-	Executor        Executor
+	ProjectResolver    ProjectResolver
+	Executor           Executor
 }
 
 // job is one admitted operation waiting for or receiving execution on its
@@ -190,15 +190,15 @@ func New(dataDir string, options Options) (*Manager, error) {
 		return nil, err
 	}
 	m := &Manager{
-		store:           store,
-		operations:      operations,
-		events:          make(map[string][]Event),
-		idempotency:     make(map[string]string),
-		cancels:         make(map[string]context.CancelFunc),
-		targets:         make(map[string]*targetRunner),
-		subscribers:     make(map[string]map[chan struct{}]struct{}),
-		resolver:        options.Resolver,
-		projectResolver: options.ProjectResolver,
+		store:              store,
+		operations:         operations,
+		events:             make(map[string][]Event),
+		idempotency:        make(map[string]string),
+		cancels:            make(map[string]context.CancelFunc),
+		targets:            make(map[string]*targetRunner),
+		subscribers:        make(map[string]map[chan struct{}]struct{}),
+		resolver:           options.Resolver,
+		projectResolver:    options.ProjectResolver,
 		executor:           options.Executor,
 		maxEvents:          options.MaxEvents,
 		maxHistoryAge:      options.MaxHistoryAge,

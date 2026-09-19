@@ -685,6 +685,12 @@ func TestAdmissionBudgetRejectsAndReleases(t *testing.T) {
 	if _, _, err := manager.Enqueue(deployRequest("web", "img:2"), "", actor); err != nil {
 		t.Fatalf("enqueue after drain rejected: %v", err)
 	}
+	// Drain the stragglers before returning: a terminal persist racing
+	// t.TempDir cleanup fails the test suite spuriously.
+	for _, op := range manager.List("", "", 0) {
+		waitForStatus(t, manager, op.ID, StatusSucceeded)
+	}
+	manager.Shutdown(context.Background())
 }
 
 func waitForCommands(t *testing.T, counter *atomic.Int32, want int32) chan struct{} {
@@ -807,6 +813,10 @@ func TestActorAttributionPersistedAndReloaded(t *testing.T) {
 	if plain.Actor != nil {
 		t.Fatalf("nil actor must stay nil, got %+v", plain.Actor)
 	}
+	// Join background work so terminal persists cannot race TempDir cleanup.
+	waitForStatus(t, reopened, plain.ID, StatusSucceeded)
+	manager.Shutdown(context.Background())
+	reopened.Shutdown(context.Background())
 }
 
 // ── Health + bounded shutdown (A39/A47) ───────────────────────────────────
@@ -888,6 +898,8 @@ func TestHealthReportsPersistDegradationAndRecovery(t *testing.T) {
 	if h := manager.Health(); h.JournalError == "" {
 		t.Fatal("unwritable journal directory not reported")
 	}
+	// Join background work so terminal persists cannot race TempDir cleanup.
+	manager.Shutdown(context.Background())
 }
 
 // Shutdown drains runners when work finishes in time, and force-cancels
