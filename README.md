@@ -117,8 +117,7 @@ teploy-dash --no-auth                                   # local dev only
 - Persistent groups + projects (organisation overlay stored in
   `~/.teploy/groups.json`, format-compatible with the CLI's embedded UI).
 - Umbrel-style template catalog: install pre-defined apps with one click.
-- WebSocket log tailing per app (with SSE fallback for clients that
-  don't speak WS).
+- Live log tailing per app over Server-Sent Events (`/api/logs/`).
 - **KV** tab: browse, read, set and delete keys in an app's shared Nucleus
   KV store, via `teploy kv`. Values are fetched one at a time when you ask
   for them, never prefetched or cached — each read is a live CLI call.
@@ -315,7 +314,7 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / POST / DELETE | `/api/apps/{server}/{app}/kv` | List keys (`?pattern=`) / set (`{key,value,ttl}`) / delete (`?key=`) in the shared Nucleus KV store. `?accessory=` defaults to `nucleus`. |
 | GET | `/api/apps/{server}/{app}/kv/value` | Read one value (`?key=`). Returns `exists:false` for an unset key. |
 | GET | `/api/apps/{server}/{app}/accessories` | List accessories (DBs, queues, etc). |
-| GET | `/ws/logs/{server}/{app}` | WebSocket log stream (SSE fallback). |
+| GET | `/api/logs/{server}/{app}` | Live log stream (SSE; `?process=`, `?lines=`). Same-origin only. |
 | GET / POST / DELETE | `/api/config/servers` `/api/config/servers/{name}` | Manage servers via CLI. |
 | GET / POST | `/api/registries` | List / login to image registries. |
 | DELETE | `/api/registries/{server}` | Logout. |
@@ -347,8 +346,7 @@ Browser
    v
 teploy-dash (Go, ~17MB)  --- session-cookie auth middleware
    |                         embedded SPA (Alpine.js)
-   |                         60s fleet cache
-   |                         WebSocket log streamer
+   |                         60s fleet cache                         SSE log streamer
    |
    +--> reads CLI state files at /deployments/{app}/state (key=value)
    +--> shells out to `teploy` for actions (deploy, rollback, env, ...)

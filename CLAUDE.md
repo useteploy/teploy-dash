@@ -74,8 +74,7 @@ teploy-dash/
 │   │   ├── server.go            HTTP server, auth middleware, all API routes,
 │   │   │                        fleet cache (multi-server aggregator lives here,
 │   │   │                        not in a separate fleet/ package)
-│   │   └── ws.go                WebSocket log streamer
-│   ├── state/reader.go          parses CLI state files
+│   │   ├── state/reader.go          parses CLI state files
 │   ├── monitor/monitor.go       HTTP / TCP / ping check runner
 │   ├── store/
 │   │   ├── store.go             Store interface

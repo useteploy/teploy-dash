@@ -708,7 +708,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 				}
 				next.ServeHTTP(w, r)
 			default:
-				if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+				if strings.HasPrefix(r.URL.Path, "/api/") {
 					jsonError(w, "setup required", http.StatusServiceUnavailable)
 				} else {
 					http.Redirect(w, r, "/setup", http.StatusFound)
@@ -788,7 +788,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// with someone hammering the login form. Lockout now applies only to
 		// unauthenticated traffic (A06).
 		if session == nil && g.lockedOut(ip) {
-			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
 				jsonError(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
 			} else {
 				http.Error(w, "too many failed attempts — try again shortly", http.StatusTooManyRequests)
@@ -796,7 +796,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 		if session == nil {
-			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
 				jsonError(w, "unauthorized", http.StatusUnauthorized)
 			} else {
 				nextPath := r.URL.Path
@@ -811,7 +811,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// CSRF: reject cross-origin state-changing requests. SameSite=Lax on
 		// the cookie already blocks most CSRF; this is a belt-and-suspenders
 		// check for browsers or proxies that don't enforce SameSite.
-		if isMutating(r.Method) && !strings.HasPrefix(r.URL.Path, "/ws/") && !sameOrigin(r) {
+		if isMutating(r.Method) && !sameOrigin(r) {
 			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
 			return
 		}
@@ -820,7 +820,7 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// mutating route with no explicit classification requires editor, never
 		// viewer, so a new endpoint can't silently be viewer-writable.
 		if need := requiredRole(r.Method, r.URL.Path); !roleAllows(session.role, need) {
-			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
 				jsonError(w, "forbidden: this action requires the "+need+" role", http.StatusForbidden)
 			} else {
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -1226,8 +1226,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/restore-tests", s.handleRestoreTests)
 	s.mux.HandleFunc("/api/restore-tests/", s.handleRestoreTest)
 
-	// WebSocket log streaming
-	s.mux.HandleFunc("/ws/logs/", s.handleLogsWS)
+	// Log streaming: SSE-only under /api/ (A24/A32/A33 — the hand-written
+	// WebSocket transport and its /ws/ prefix are gone).
+	s.mux.HandleFunc("/api/logs/", s.handleLogs)
 
 	// System
 	s.mux.HandleFunc("/api/cli/status", s.handleCLIStatus)
@@ -1791,22 +1792,22 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 	}
 }
 
-// ── WebSocket Log Streaming ──────────────────────────────────────────────
+// ── Log Streaming (SSE) ──────────────────────────────────────────────────
 
-func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
-	// Reject cross-origin WS/SSE connections so a malicious page the operator
-	// visits can't open the log stream using cached Basic-Auth creds. A
-	// non-browser client (no Origin) is allowed.
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	// Reject cross-origin stream connections so a malicious page the
+	// operator visits can't open the log stream using cached Basic-Auth
+	// creds. A non-browser client (no Origin) is allowed.
 	if !sameOrigin(r) {
 		http.Error(w, "cross-origin request blocked", http.StatusForbidden)
 		return
 	}
 
-	// Path: /ws/logs/{server}/{app}
-	path := strings.TrimPrefix(r.URL.Path, "/ws/logs/")
+	// Path: /api/logs/{server}/{app}
+	path := strings.TrimPrefix(r.URL.Path, "/api/logs/")
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 {
-		http.Error(w, "invalid path — expected /ws/logs/{server}/{app}", 400)
+		http.Error(w, "invalid path — expected /api/logs/{server}/{app}", 400)
 		return
 	}
 	serverName, appName := parts[0], parts[1]
@@ -1837,34 +1838,24 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 		lines = 1000
 	}
 
-	// Upgrade to WebSocket manually (no external dep — use chunked streaming).
-	// Check for WebSocket upgrade; fall back to SSE if not a WS request.
-	upgradeHeader := r.Header.Get("Upgrade")
-	if strings.ToLower(upgradeHeader) != "websocket" {
-		// SSE fallback for clients that don't support WebSocket.
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
+	// SSE-only log streaming (A24/A32/A33: the hand-written WebSocket
+	// transport is deleted; the browser's EventSource — with its built-in
+	// Last-Event-ID reconnect semantics — is the single log path).
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming not supported", 500)
-			return
-		}
-
-		ctx, cancel := context.WithCancel(r.Context())
-		defer cancel()
-
-		pw := &sseWriter{w: w, flusher: flusher}
-		remote.StreamLogs(ctx, srv, appName, process, lines, pw) //nolint:errcheck
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", 500)
 		return
 	}
 
-	// Proper WebSocket upgrade using net/http hijack.
-	wsHandler(w, r, func(ctx context.Context, send func(string)) {
-		pw := &wsLineWriter{send: send}
-		remote.StreamLogs(ctx, srv, appName, process, lines, pw) //nolint:errcheck
-	})
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	pw := &sseWriter{w: w, flusher: flusher}
+	remote.StreamLogs(ctx, srv, appName, process, lines, pw) //nolint:errcheck
 }
 
 // sseWriter wraps http.ResponseWriter as an io.Writer that formats SSE events.
@@ -1882,21 +1873,6 @@ func (s *sseWriter) Write(p []byte) (int, error) {
 		}
 	}
 	s.flusher.Flush()
-	return len(p), nil
-}
-
-// wsLineWriter sends each line as a WebSocket message.
-type wsLineWriter struct {
-	send func(string)
-}
-
-func (w *wsLineWriter) Write(p []byte) (int, error) {
-	lines := strings.Split(strings.TrimRight(string(p), "\n"), "\n")
-	for _, line := range lines {
-		if line != "" {
-			w.send(line)
-		}
-	}
 	return len(p), nil
 }
 

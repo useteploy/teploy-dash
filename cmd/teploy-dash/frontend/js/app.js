@@ -1012,8 +1012,12 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Log Viewer Component ──
+  // SSE-only (A24/A32/A33): the server deleted its hand-written WebSocket
+  // transport; EventSource is the single log path. Reconnects (with the
+  // server re-sending the requested tail on each reconnect) are the
+  // browser's built-in behavior — same-origin is enforced server-side.
   Alpine.data('logViewer', () => ({
-    ws: null,
+    source: null,
     lines: [],
     process: 'web',
     lineCount: '100',
@@ -1026,15 +1030,16 @@ document.addEventListener('alpine:init', () => {
     },
 
     connect() {
-      if (this.ws) this.ws.close();
+      this.disconnect();
       this.lines = [];
       const { server, name } = Alpine.store('router').params;
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${location.host}/ws/logs/${server}/${name}?process=${this.process}&lines=${this.lineCount}`;
-      this.ws = new WebSocket(url);
-      this.ws.onopen = () => { this.connected = true; };
-      this.ws.onclose = () => { this.connected = false; };
-      this.ws.onmessage = (e) => {
+      const url = `/api/logs/${encodeURIComponent(server)}/${encodeURIComponent(name)}` +
+        `?process=${encodeURIComponent(this.process)}&lines=${this.lineCount}`;
+      const source = new EventSource(url);
+      this.source = source;
+      source.onopen = () => { this.connected = true; };
+      source.onerror = () => { this.connected = false; };
+      source.onmessage = (e) => {
         if (this.paused) return;
         this.lines.push(e.data);
         if (this.lines.length > 5000) this.lines = this.lines.slice(-2500);
@@ -1048,7 +1053,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     disconnect() {
-      if (this.ws) { this.ws.close(); this.ws = null; }
+      if (this.source) { this.source.close(); this.source = null; }
+      this.connected = false;
     },
 
     clear() { this.lines = []; },
