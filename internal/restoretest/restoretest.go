@@ -7,7 +7,9 @@
 package restoretest
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -133,9 +135,11 @@ func (r *Runner) Start() {
 
 // Stop stops all scheduled tests and waits (bounded) for in-flight runs to
 // finish, so shutdown never closes the store underneath a live verification
-// (A46). A run that outlives the bound is logged loudly rather than
-// silently racing the closing store.
-func (r *Runner) Stop() {
+// (A46). F023: the whole scheduler goroutine lifetime is tracked (not just
+// each run), and the wait honors the caller's shared shutdown deadline with
+// a hard default of 90s. A run that outlives the bound is logged loudly
+// rather than silently racing the closing store.
+func (r *Runner) Stop(ctx context.Context) {
 	r.mu.Lock()
 	for id, ch := range r.stopChs {
 		close(ch)
@@ -152,9 +156,13 @@ func (r *Runner) Stop() {
 		r.wg.Wait()
 		close(done)
 	}()
+	timer := time.NewTimer(90 * time.Second)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(90 * time.Second):
+	case <-ctx.Done():
+		log.Printf("[restoretest] shutdown: worker join cut short by shutdown deadline; a run may race storage shutdown")
+	case <-timer.C:
 		log.Printf("[restoretest] shutdown: a verification run did not finish in time; it may race storage shutdown")
 	}
 }
@@ -196,13 +204,22 @@ func (r *Runner) startTest(t store.RestoreTest) {
 		interval = 365 * 24 * time.Hour
 	}
 
-	ticker := time.NewTicker(interval)
+	// F035: a resettable ONE-SHOT timer, recomputed after each run
+	// completes (fixed-delay-from-completion). A Ticker created here is
+	// phased to PROCESS START; combined with the initial-delay wait its
+	// buffered tick could fire a second run immediately after the first
+	// (restart at hour 12 of a 24h interval: runs at 24h then 25h).
 	stopCh := make(chan struct{})
-	r.timers[t.ID] = ticker
 	r.stopChs[t.ID] = stopCh
+	delete(r.timers, t.ID) // one-shot timers are owned by the goroutine below
 	r.mu.Unlock()
 
+	// F023: count the goroutine's WHOLE lifetime before launching it, so
+	// Stop's Wait can never observe zero while this scheduler is still
+	// about to start a run against the closing store.
+	r.wg.Add(1)
 	go func() {
+		defer r.wg.Done()
 		// Interval-boundary runs are expensive (they download the backup and
 		// boot a scratch container), so scheduling follows the PERSISTED
 		// last-run time rather than the process clock: a first-ever test
@@ -222,18 +239,24 @@ func (r *Runner) startTest(t store.RestoreTest) {
 			}
 		}
 		if cur, err := r.store.GetRestoreTest(t.ID); err == nil && cur.Enabled {
-			r.RunNow(*cur)
+			_, _ = r.RunNow(*cur)
 		}
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-timer.C:
 				// Re-read config each tick so edits between ticks apply and a
 				// deleted test doesn't get re-persisted by a stale copy.
 				cur, err := r.store.GetRestoreTest(t.ID)
 				if err != nil || !cur.Enabled {
+					// Keep the cadence even when this tick is skipped.
+					timer.Reset(interval)
 					continue
 				}
-				r.RunNow(*cur)
+				_, _ = r.RunNow(*cur)
+				// Fixed delay from COMPLETION, not from the fire time.
+				timer.Reset(interval)
 			case <-stopCh:
 				return
 			}
@@ -273,16 +296,23 @@ func (r *Runner) teardownLocked(id string) {
 	}
 }
 
+// ErrAlreadyRunning reports that a verification run for this test is
+// already in flight (F036): the caller must NOT present the record's stale
+// last result as the outcome of the requested run.
+var ErrAlreadyRunning = errors.New("restore test already running")
+
 // RunNow executes one verification run synchronously, persists the outcome
 // onto the test, and fires fail/recover alerts. Returns the updated test.
-// A manual request and a scheduled tick share the per-test claim, so a
-// second concurrent invocation returns the unchanged record instead of
-// stacking an expensive overlapping run (A25).
-func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
+// A manual request and a scheduled tick share the per-test claim; a second
+// concurrent invocation returns the UNCHANGED record plus ErrAlreadyRunning
+// (F036) — previously it returned the stale record with a nil error and the
+// caller displayed the previous run's verdict as if the new request had
+// verified the backup.
+func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 	r.mu.Lock()
 	if r.running[t.ID] {
 		r.mu.Unlock()
-		return t
+		return t, ErrAlreadyRunning
 	}
 	r.running[t.ID] = true
 	r.wg.Add(1)
@@ -352,7 +382,7 @@ func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
 	if err := r.store.SaveRestoreTestResult(t.ID, t); err != nil {
 		log.Printf("[restoretest] Failed to save result for %s: %v (result not persisted, no alert sent)", t.ID, err)
 		t.LastDetail = fmt.Sprintf("%s [result could not be persisted: %v]", t.LastDetail, err)
-		return t
+		return t, nil
 	}
 
 	// Alert on failure, and on recovery after a known failure.
@@ -383,5 +413,5 @@ func (r *Runner) RunNow(t store.RestoreTest) store.RestoreTest {
 		}
 	}
 
-	return t
+	return t, nil
 }

@@ -261,7 +261,12 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP shutdown error: %v", err)
+		// F022: a timed-out drain must not just log and continue as though
+		// every handler ended — close the remaining connections so a
+		// straggler cannot keep mutating (or admitting work) while the rest
+		// of the shutdown sequence proceeds.
+		log.Printf("HTTP shutdown error (closing remaining connections): %v", err)
+		srv.CloseHTTP()
 	}
 
 	cleanupCancel()
@@ -276,14 +281,19 @@ func run() error {
 		log.Println("cleanup worker did not stop in time")
 	}
 
-	mon.Stop()
-	rst.Stop()
-	// A39/A47: join in-flight operation work (bounded) before the store
-	// closes — a hard exit used to kill CLI children mid-write and leave
-	// records for recovery to mark interrupted.
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	srv.DrainOperations(drainCtx)
-	drainCancel()
+	// F023: ONE shared worker budget (monitor join + restore join + operation
+	// drain) instead of each phase carrying its own independent ceiling —
+	// the previous worst case (15+5+90+90+15s) far exceeded the supervisor's
+	// stop budget, so systemd SIGKILLed the process mid-drain. The installer
+	// unit now allows 180s against this ~140s worst case.
+	workerCtx, workerCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	mon.Stop(workerCtx)
+	rst.Stop(workerCtx)
+	// A39/A47: join in-flight operation work (bounded by the REMAINING
+	// shared budget) before the store closes — a hard exit used to kill CLI
+	// children mid-write and leave records for recovery to mark interrupted.
+	srv.DrainOperations(workerCtx)
+	workerCancel()
 	st.Close()
 	return nil
 }

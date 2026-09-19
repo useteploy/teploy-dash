@@ -102,12 +102,16 @@ func (r *Runner) CheckNow(m store.Monitor) store.CheckResult {
 	}
 }
 
-// Stop stops all running monitors and waits (bounded) for any in-flight
-// check to finish, so shutdown never closes the store underneath a check
-// that is about to persist its result (A46). Checks are individually bounded
-// by their configured timeout, so the wait is short in practice; a straggler
-// is logged rather than silently racing the closing store.
-func (r *Runner) Stop() {
+// Stop stops all running monitors and waits for all scheduler goroutines
+// and any in-flight check to finish, bounded by ctx's deadline (F023:
+// callers pass one shared shutdown budget) with a hard default of 90s, so
+// shutdown never closes the store underneath a check that is about to
+// persist its result (A46). The whole goroutine lifetime is tracked —
+// registering only each individual check left a window where Stop observed
+// a zero WaitGroup while a scheduler goroutine was between its ticker and
+// its next check, and that check then ran against a closed store.
+// A straggler is logged rather than silently racing the closing store.
+func (r *Runner) Stop(ctx context.Context) {
 	r.mu.Lock()
 	for id, ch := range r.stopChs {
 		close(ch)
@@ -124,9 +128,13 @@ func (r *Runner) Stop() {
 		r.wg.Wait()
 		close(done)
 	}()
+	timer := time.NewTimer(90 * time.Second)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(90 * time.Second):
+	case <-ctx.Done():
+		log.Printf("[monitor] shutdown: worker join cut short by shutdown deadline; a check may race storage shutdown")
+	case <-timer.C:
 		log.Printf("[monitor] shutdown: an in-flight check did not finish in time; it may race storage shutdown")
 	}
 }
@@ -174,27 +182,25 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	r.timers[m.ID] = ticker
 	r.stopChs[m.ID] = stopCh
 
+	// F023: count the goroutine's WHOLE lifetime before launching it, so
+	// Stop's Wait can never observe zero while this scheduler is still
+	// between its ticker and its next check (registering per check inside
+	// the goroutine left exactly that window).
+	r.wg.Add(1)
 	go func() {
+		defer r.wg.Done()
 		// Run first check immediately
-		r.runCheckLocked(m)
+		r.runCheck(m)
 
 		for {
 			select {
 			case <-ticker.C:
-				r.runCheckLocked(m)
+				r.runCheck(m)
 			case <-stopCh:
 				return
 			}
 		}
 	}()
-}
-
-// runCheckLocked wraps runCheck in the runner's WaitGroup so Stop can join
-// in-flight checks (A46).
-func (r *Runner) runCheckLocked(m store.Monitor) {
-	r.wg.Add(1)
-	defer r.wg.Done()
-	r.runCheck(m)
 }
 
 func (r *Runner) stopMonitor(id string) {
@@ -264,8 +270,17 @@ func (r *Runner) runCheck(m store.Monitor) {
 		log.Printf("[monitor] Failed to save check for %s: %v", m.ID, err)
 	}
 
-	// Fire alert on state transition (up->down or down->up).
+	// F033 (ours half): revalidate the generation BEFORE publishing the
+	// transition and mutating the alert baseline — a reload/remove that
+	// landed while the result was being saved must not have its baseline
+	// overwritten or its alert fired off stale work. (The save itself is
+	// store-side and stays with the deferred revision-CAS work, A19.)
 	r.mu.Lock()
+	if r.generations[m.ID] != generation {
+		r.mu.Unlock()
+		return
+	}
+	// Fire alert on state transition (up->down or down->up).
 	prev := r.lastStat[m.ID]
 	r.lastStat[m.ID] = result.Status
 	alerter := r.alerter

@@ -301,6 +301,19 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
+// CloseHTTP force-closes all remaining HTTP connections (F022). Called when
+// the bounded drain timed out: continuing with live stragglers lets a
+// request keep mutating (or admitting operations) while the rest of the
+// shutdown sequence closes stores underneath it.
+func (s *Server) CloseHTTP() {
+	s.httpSrvMu.Lock()
+	srv := s.httpSrv
+	s.httpSrvMu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
+}
+
 // DrainOperations joins in-flight operation work, bounded by ctx (A39/A47):
 // first a graceful drain until ctx expires, then a force-cancel plus a fixed
 // grace so terminal states persist. Call after Shutdown so no new operations
@@ -3717,7 +3730,18 @@ func (s *Server) handleRestoreTest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "restore-test runner not available", 500)
 			return
 		}
-		updated := s.restore.RunNow(*t)
+		updated, runErr := s.restore.RunNow(*t)
+		if runErr != nil {
+			// F036: a run already in flight is a CONFLICT, and the record's
+			// previous verdict must not be presented as this request's
+			// outcome.
+			if errors.Is(runErr, restoretest.ErrAlreadyRunning) {
+				http.Error(w, "a verification run for this test is already in progress; retry when it completes", http.StatusConflict)
+				return
+			}
+			http.Error(w, runErr.Error(), 500)
+			return
+		}
 		writeJSON(w, updated)
 		return
 	}

@@ -41,7 +41,10 @@ func TestRunNow_ParsesAndPersistsSuccess(t *testing.T) {
 	r, st := newTestRunner(t, out, nil)
 	rt := seedTest(t, st)
 
-	got := r.RunNow(rt)
+	got, err := r.RunNow(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !got.LastOK {
 		t.Fatalf("expected LastOK, detail=%s", got.LastDetail)
 	}
@@ -66,7 +69,10 @@ func TestRunNow_FailedVerificationIsResult(t *testing.T) {
 	r, st := newTestRunner(t, out, fmt.Errorf("exit status 1"))
 	rt := seedTest(t, st)
 
-	got := r.RunNow(rt)
+	got, err := r.RunNow(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.LastOK {
 		t.Fatal("expected LastOK=false")
 	}
@@ -80,7 +86,10 @@ func TestRunNow_OperationalFailureWithoutResult(t *testing.T) {
 	r, st := newTestRunner(t, "usage: teploy accessory verify-backup", nil)
 	rt := seedTest(t, st)
 
-	got := r.RunNow(rt)
+	got, err := r.RunNow(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.LastOK {
 		t.Fatal("expected LastOK=false")
 	}
@@ -94,7 +103,7 @@ func TestRunNow_TracksOutcomeTransitions(t *testing.T) {
 	r, st := newTestRunner(t, out, nil)
 	rt := seedTest(t, st)
 
-	r.RunNow(rt)
+	_, _ = r.RunNow(rt)
 	r.mu.Lock()
 	first := r.lastOK["rt1"]
 	r.mu.Unlock()
@@ -109,7 +118,7 @@ func TestRunNow_TracksOutcomeTransitions(t *testing.T) {
 	r.mu.Unlock()
 
 	cur, _ := st.GetRestoreTest("rt1")
-	r.RunNow(*cur)
+	_, _ = r.RunNow(*cur)
 	r.mu.Lock()
 	second := r.lastOK["rt1"]
 	r.mu.Unlock()
@@ -138,7 +147,7 @@ func TestStartSeedsBaselineAndSkipsImmediateRunForKnownTests(t *testing.T) {
 	}
 
 	r.Start()
-	defer r.Stop()
+	defer r.Stop(context.Background())
 	time.Sleep(50 * time.Millisecond)
 
 	if ran != 0 {
@@ -171,12 +180,18 @@ func TestRunNow_TransportErrorBeatsLyingStdout(t *testing.T) {
 		return out, "", nil, context.DeadlineExceeded
 	}
 	rt := seedTest(t, st)
-	first := r.RunNow(rt)
+	first, err := r.RunNow(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !first.LastOK || first.LastMetric != "tables=42" {
 		t.Fatalf("first run = %+v", first)
 	}
 
-	second := r.RunNow(first)
+	second, err := r.RunNow(first)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.LastOK {
 		t.Fatal("transport timeout with ok:true stdout reported as successful verification")
 	}
@@ -194,7 +209,7 @@ func TestRunNow_TransportErrorBeatsLyingStdout(t *testing.T) {
 	r2.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 		return `{"ok":false,"detail":"broken backup"}`, "", nil, nil
 	}
-	r2.RunNow(seedTest(t, st))
+	_, _ = r2.RunNow(seedTest(t, st))
 	if bad.calls != 1 {
 		t.Fatalf("SaveRestoreTestResult calls = %d", bad.calls)
 	}
@@ -208,4 +223,48 @@ type failingResultStore struct {
 func (f *failingResultStore) SaveRestoreTestResult(id string, result store.RestoreTest) error {
 	f.calls++
 	return errors.New("disk full")
+}
+
+// F036: a second RunNow while one is in flight returns the UNCHANGED record
+// plus ErrAlreadyRunning — the caller can no longer mistake the previous
+// run's verdict for the outcome of the requested verification.
+func TestRunNow_ConcurrentClaimReturnsBusyError(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	release := make(chan struct{})
+	r := New(st)
+	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+		<-release
+		return `{"ok":true}`, "", nil, nil
+	}
+	rt := seedTest(t, st)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.RunNow(rt)
+	}()
+	// Wait for the claim, then collide.
+	deadline := time.After(2 * time.Second)
+	for {
+		r.mu.Lock()
+		claimed := r.running[rt.ID]
+		r.mu.Unlock()
+		if claimed {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("run never claimed")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	got, err := r.RunNow(rt)
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("second concurrent run: err=%v, want ErrAlreadyRunning", err)
+	}
+	if !got.LastRunAt.Equal(rt.LastRunAt) {
+		t.Fatal("busy response must return the unchanged record")
+	}
+	close(release)
+	<-done
 }

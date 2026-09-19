@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"strings"
 	"testing"
@@ -28,7 +29,7 @@ func TestStart_LogsOnlyEnabledMonitorCount(t *testing.T) {
 
 	r := New(ms)
 	r.Start()
-	r.Stop()
+	r.Stop(context.Background())
 
 	if !strings.Contains(buf.String(), "Started 1 monitors") {
 		t.Errorf("expected log to contain %q, got %q", "Started 1 monitors", buf.String())
