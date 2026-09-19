@@ -37,9 +37,9 @@ func TestCheckExit(t *testing.T) {
 // F015: an unverified probe outcome is not cached and fails closed for the
 // secret-bearing call sites; a verified answer (either way) is cached.
 func TestSecretFlagProbeVerifiedCaching(t *testing.T) {
+	// Hermetic: no teploy on PATH, so the probe cannot establish anything.
+	t.Setenv("PATH", t.TempDir())
 	p := &secretFlagProbe{flag: "--stdin", args: []string{"env", "set"}}
-	// The real probe shells out to "teploy" — absent in tests, so the probe
-	// is unverified and MUST return an error, not a cached "unsupported".
 	supported, err := p.check()
 	if err == nil {
 		t.Fatal("unverified probe must surface an error")
