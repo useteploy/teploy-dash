@@ -266,11 +266,12 @@ func (g *authGate) loadUsers() error {
 		// users is only a load failure when NOTHING can sign in (no users
 		// and no principals); whether SSO is actually configured is the
 		// constructor's call, because the gate learns its OIDC provider
-		// only after the store is loaded. Setup mode equally requires both
-		// sets to be empty, so an install that once had principals can
-		// never re-open first-run account claiming.
-		g.setupRequired = len(g.users) == 0 && len(g.oidcPrincipals) == 0
-		if g.setupRequired {
+		// only after the store is loaded. An EXISTING store never re-opens
+		// first-run setup either way — setup mode is reserved for a
+		// genuinely absent store (errNoUsers below), so an install that
+		// once had users or principals can never re-open account claiming.
+		g.setupRequired = false
+		if len(g.users) == 0 && len(g.oidcPrincipals) == 0 {
 			return fmt.Errorf("credential store %s has no users and no SSO principals", g.usersFile)
 		}
 		return nil
