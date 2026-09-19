@@ -456,10 +456,11 @@ func (g *authGate) revokeSessions(username string) error {
 // principalView is the API projection of an SSO identity — never a secret
 // (principals hold no credentials).
 type principalView struct {
-	Subject  string `json:"subject"`
-	Username string `json:"username"`
-	Email    string `json:"email,omitempty"`
-	Role     string `json:"role"`
+	Subject    string `json:"subject"`
+	Username   string `json:"username"`
+	Email      string `json:"email,omitempty"`
+	Role       string `json:"role"`
+	LastSignIn string `json:"last_sign_in,omitempty"`
 }
 
 func (g *authGate) listSSOPrincipals() []principalView {
@@ -467,7 +468,7 @@ func (g *authGate) listSSOPrincipals() []principalView {
 	defer g.credMu.RUnlock()
 	out := make([]principalView, 0, len(g.oidcPrincipals))
 	for _, p := range g.oidcPrincipals {
-		out = append(out, principalView{Subject: p.Subject, Username: p.Username, Email: p.Email, Role: p.Role})
+		out = append(out, principalView{Subject: p.Subject, Username: p.Username, Email: p.Email, Role: p.Role, LastSignIn: p.LastSignIn})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Subject < out[j].Subject })
 	return out

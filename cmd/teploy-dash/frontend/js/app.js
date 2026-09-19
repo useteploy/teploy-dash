@@ -1311,6 +1311,9 @@ document.addEventListener('alpine:init', () => {
     me: { username: '', role: 'viewer' },
     users: [],
     newUser: { username: '', password: '', role: 'editor' },
+    // SSO principals (admin-only endpoint; empty when auth is off, since
+    // /api/sso only exists with the session gate).
+    ssoPrincipals: [],
 
     isAdmin() { return (this.me && this.me.role) === 'admin'; },
 
@@ -1327,13 +1330,14 @@ document.addEventListener('alpine:init', () => {
         // Admin-only endpoints are only fetched for admins — non-admins would
         // just get 403s. Groups (editor-writable) and the current user load for
         // everyone.
-        const [servers, groups, notifications, registries, mcpTokens, users] = await Promise.all([
+        const [servers, groups, notifications, registries, mcpTokens, users, sso] = await Promise.all([
           admin ? api.get('/api/config/servers').catch(() => ({})) : Promise.resolve({}),
           api.get('/api/groups').catch(() => []),
           admin ? api.get('/api/notifications').catch(() => ({})) : Promise.resolve({}),
           admin ? api.get('/api/registries').catch(() => []) : Promise.resolve([]),
           admin ? api.get('/api/mcp-tokens').catch(() => []) : Promise.resolve([]),
           admin ? api.get('/api/users').catch(() => []) : Promise.resolve([]),
+          admin ? api.get('/api/sso').catch(() => []) : Promise.resolve([]),
         ]);
         this.servers = servers || {};
         this.groups = groups || [];
@@ -1341,9 +1345,10 @@ document.addEventListener('alpine:init', () => {
         this.registries = registries || [];
         this.mcpTokens = mcpTokens || [];
         this.users = users || [];
+        this.ssoPrincipals = sso || [];
         // A non-admin can't see the admin tabs; if the default landed on one,
         // move to a tab they can use.
-        if (!admin && ['servers', 'notifications', 'registry', 'mcp', 'users'].includes(this.tab)) {
+        if (!admin && ['servers', 'notifications', 'registry', 'mcp', 'users', 'sso'].includes(this.tab)) {
           this.tab = 'groups';
         }
       } catch (e) {
@@ -1399,6 +1404,40 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         showToast(e.message, 'error');
       }
+    },
+
+    // A02 surface: durable session revocation — the epoch bump retires every
+    // live session on its next request; the user simply signs in again.
+    async revokeUserSessions(username) {
+      if (!confirm(`Sign out ${username} everywhere? Active sessions end on their next request.`)) return;
+      try {
+        await api.post(`/api/users/${encodeURIComponent(username)}/revoke-sessions`);
+        showToast(`Sessions for ${username} revoked`, 'success');
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    async revokeSSO(p) {
+      if (!confirm(`Sign out ${p.username || p.subject} everywhere? Active sessions end on their next request.`)) return;
+      try {
+        await api.post('/api/sso/revoke', { subject: p.subject });
+        showToast('SSO sessions revoked', 'success');
+        this.ssoPrincipals = await api.get('/api/sso').catch(() => this.ssoPrincipals);
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    // The subject is opaque (issuer-derived); show the short tail for
+    // traceability without pretending it's a name.
+    ssoSubjectTail(subject) {
+      return subject.length > 24 ? '…' + subject.slice(-12) : subject;
+    },
+
+    fmtDate(d) {
+      if (!d || String(d).startsWith('0001')) return 'never';
+      return new Date(d).toLocaleString();
     },
 
     async createMcpToken() {

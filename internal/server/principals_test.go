@@ -418,6 +418,11 @@ func TestSSORevokeEndpoint(t *testing.T) {
 	if len(listed.Data) != 1 || listed.Data[0].Subject != sub || listed.Data[0].Role != RoleViewer {
 		t.Fatalf("principal list = %+v", listed.Data)
 	}
+	// The admin surface (Settings > SSO) shows when the identity last
+	// signed in — the view must carry it.
+	if listed.Data[0].LastSignIn == "" {
+		t.Fatalf("principal view carries no last_sign_in: %+v", listed.Data[0])
+	}
 }
 
 func TestRequiredRoleSSOAdminOnly(t *testing.T) {

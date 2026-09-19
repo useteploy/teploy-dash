@@ -1563,6 +1563,7 @@
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'registry' }" @click="tab = 'registry'">Registry</button>
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'">MCP</button>
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'users' }" @click="tab = 'users'">Users</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'sso' }" @click="tab = 'sso'">SSO</button>
         <button class="tab" :class="{ active: tab === 'links' }" @click="tab = 'links'">Links</button>
         <button class="tab" :class="{ active: tab === 'account' }" @click="tab = 'account'">Account</button>
       </div>
@@ -1947,6 +1948,7 @@
                         </td>
                         <td style="display: flex; gap: 6px; justify-content: flex-end;">
                           <button class="btn btn-sm" @click="resetUserPassword(u.username)">Reset password</button>
+                          <button class="btn btn-sm" @click="revokeUserSessions(u.username)">Revoke sessions</button>
                           <button class="btn btn-sm btn-danger" @click="deleteUser(u.username)"
                                   x-show="u.username !== (me && me.username)">Remove</button>
                         </td>
@@ -1958,6 +1960,54 @@
             </template>
             <template x-if="users.length === 0">
               <p style="font-size: 13px; color: var(--text-muted);">No users yet.</p>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- SSO Tab: external (OIDC) identities known to this instance. The
+           admin surface for the revocation API that landed with the
+           principal store — list + revoke; roles stay IdP-authoritative. -->
+      <template x-if="!loading && tab === 'sso'">
+        <div style="max-width: 720px;">
+          <div class="card" style="padding: 24px;">
+            <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Single sign-on identities</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
+              External identities that have signed in through the configured OIDC provider. Roles are
+              assigned by the provider and read live — change them there, not here. Revoking ends the
+              identity's active sessions on their next request; re-signing in works immediately.
+            </p>
+
+            <template x-if="ssoPrincipals.length > 0">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Identity</th><th>Role</th><th>Last sign-in</th><th style="width: 130px;"></th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="p in ssoPrincipals" :key="p.subject">
+                      <tr>
+                        <td>
+                          <div x-text="p.username"></div>
+                          <div class="text-muted" style="font-size: 11px;"
+                               :title="p.subject" x-text="p.email || ssoSubjectTail(p.subject)"></div>
+                        </td>
+                        <td x-text="p.role"></td>
+                        <td style="font-size: 12px;" x-text="fmtDate(p.last_sign_in)"></td>
+                        <td style="text-align: right;">
+                          <button class="btn btn-sm btn-danger" @click="revokeSSO(p)">Revoke sessions</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+            <template x-if="ssoPrincipals.length === 0">
+              <p style="font-size: 13px; color: var(--text-muted);">
+                No SSO identities have signed in yet
+                <span x-show="!me.username">(SSO is unavailable while authentication is disabled)</span>.
+              </p>
             </template>
           </div>
         </div>
