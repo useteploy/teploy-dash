@@ -108,6 +108,11 @@ func (s *Store) Put(server, app string, update Update) (*Document, bool, error) 
 		return nil, false, err
 	}
 	content := []byte(update.Manifest)
+	// R29: a store-level size bound — the request-body limit alone did not
+	// bound what registered revisions consume on disk.
+	if len(content) == 0 || len(content) > maxManifestBytes {
+		return nil, false, fmt.Errorf("manifest size must be between 1 and %d bytes", maxManifestBytes)
+	}
 	if err := Validate(content, app); err != nil {
 		return nil, false, err
 	}
@@ -128,6 +133,11 @@ func (s *Store) Put(server, app string, update Update) (*Document, bool, error) 
 		}
 		if *update.ExpectedRevision != existing.CurrentRevision {
 			return nil, false, fmt.Errorf("%w: current revision is %s", ErrConflict, existing.CurrentRevision)
+		}
+		// R29: the per-app revision budget — a DISTINCT new revision past the
+		// cap is rejected; re-registering known content stays free.
+		if !hasRevision(existing.Revisions, revision) && len(existing.Revisions) >= maxRegisteredRevisions {
+			return nil, false, fmt.Errorf("manifest revision quota reached (%d); archive unused revisions", maxRegisteredRevisions)
 		}
 	} else if update.ExpectedRevision != nil && *update.ExpectedRevision != "" {
 		return nil, false, fmt.Errorf("%w: manifest does not exist", ErrConflict)
@@ -315,10 +325,20 @@ func (s *Store) Delete(server, app string, expectedRevision *string) error {
 
 // Structural budgets for submitted manifests (A18): recursion is bounded by
 // a depth cap and a total node cap so a hostile YAML document cannot make
-// inspection do unbounded work regardless of the body-size limit.
+// inspection do unbounded work regardless of the body-size limit. R30: the
+// depth counter is a true recursion depth (every mapping value, sequence
+// element, and alias hop increments it) — the previous check counted the
+// MAPPING PATH length, so deeply nested sequences and aliases slipped past
+// it. R29: content and registered-revision budgets bound cumulative storage
+// across repeated authenticated uploads.
 const (
 	maxManifestDepth = 64
 	maxManifestNodes = 10000
+	maxManifestBytes = 1 << 20
+	// maxRegisteredRevisions bounds the per-app revision history; a new
+	// DISTINCT revision beyond it is rejected rather than silently growing
+	// disk. Re-registering an already-known revision is always allowed.
+	maxRegisteredRevisions = 128
 )
 
 func Validate(content []byte, app string) error {
@@ -337,7 +357,7 @@ func Validate(content []byte, app string) error {
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return fmt.Errorf("manifest root must be a YAML mapping")
 	}
-	foundApp, err := inspectNode(document.Content[0], nil, false, make(map[*yaml.Node]bool), &nodeBudget{})
+	foundApp, err := inspectNode(document.Content[0], nil, false, make(map[*yaml.Node]bool), &nodeBudget{}, 0)
 	if err != nil {
 		return err
 	}
@@ -360,14 +380,19 @@ func (n *nodeBudget) visit() error {
 	return nil
 }
 
-func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiting map[*yaml.Node]bool, budget *nodeBudget) (string, error) {
+// inspectNode walks one YAML node. depth is the TRUE recursion depth (R30):
+// every mapping value, sequence element, and alias hop passes depth+1, so
+// nesting is capped at maxManifestDepth regardless of shape. path carries
+// only the mapping-key names used in error messages and sensitivity
+// inheritance — it is not the depth budget.
+func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiting map[*yaml.Node]bool, budget *nodeBudget, depth int) (string, error) {
 	if node == nil {
 		return "", nil
 	}
 	if err := budget.visit(); err != nil {
 		return "", err
 	}
-	if len(path) > maxManifestDepth {
+	if depth > maxManifestDepth {
 		return "", fmt.Errorf("manifest nesting exceeds %d levels", maxManifestDepth)
 	}
 	if visiting[node] {
@@ -376,7 +401,7 @@ func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiti
 	visiting[node] = true
 	defer delete(visiting, node)
 	if node.Kind == yaml.AliasNode {
-		return inspectNode(node.Alias, path, inheritedSensitive, visiting, budget)
+		return inspectNode(node.Alias, path, inheritedSensitive, visiting, budget, depth+1)
 	}
 	var foundApp string
 	switch node.Kind {
@@ -401,7 +426,7 @@ func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiti
 				}
 				foundApp = valueNode.Value
 			}
-			childApp, err := inspectNode(valueNode, childPath, sensitive, visiting, budget)
+			childApp, err := inspectNode(valueNode, childPath, sensitive, visiting, budget, depth+1)
 			if err != nil {
 				return "", err
 			}
@@ -411,7 +436,7 @@ func inspectNode(node *yaml.Node, path []string, inheritedSensitive bool, visiti
 		}
 	case yaml.SequenceNode:
 		for _, child := range node.Content {
-			childApp, err := inspectNode(child, path, inheritedSensitive, visiting, budget)
+			childApp, err := inspectNode(child, path, inheritedSensitive, visiting, budget, depth+1)
 			if err != nil {
 				return "", err
 			}
