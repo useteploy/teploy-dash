@@ -215,6 +215,9 @@ return 404.
 | `TEPLOY_DASH_OPERATION_HISTORY_DAYS` | `30` | Retention age for finished operations: records and event journals older than this are deleted at startup. `0` keeps the default; set a huge value to effectively disable. |
 | `TEPLOY_DASH_MAX_OPERATIONS` | `5000` | Maximum retained operation records (oldest finished operations are removed first, live ones are never removed). |
 | `TEPLOY_DASH_MAX_QUEUED_PER_TARGET` | `50` | Per-target admission budget: how many non-finished operations may be queued for one server+app before further enqueues are rejected with HTTP 429 (never silently dropped). Idempotent replays of already-queued work still pass. |
+| `TEPLOY_DASH_MAX_LIVE_OPERATIONS` | `500` | Manager-wide budget: total non-finished operations across ALL targets before further enqueues are rejected with HTTP 429. |
+| `TEPLOY_DASH_MAX_CONCURRENT_OPERATIONS` | `8` | How many operations may run their CLI subprocess at the same time, across every target. Queued work waits for a slot. |
+| `TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV` | _(off)_ | Explicit opt-in for CLIs without the secret-stdin contract: without it, secret-bearing `env set` / `kv set` / template-variable writes are REFUSED (502 with upgrade guidance) instead of silently putting the value on the process list. Empty values keep working either way. |
 | `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
 | `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
 
@@ -337,7 +340,7 @@ so the direct role claim is available here and takes precedence over groups.
 | GET | `/api/sso` | List SSO principals (admin). |
 | POST | `/api/sso/revoke` | Revoke all sessions of one SSO principal `{subject}` (admin). |
 | POST | `/api/users/{username}/revoke-sessions` | Revoke all sessions of one local account (admin). |
-| GET / PUT | `/api/homepage` | Service links (Home grid + pinned header icons). |
+| GET / PUT | `/api/homepage` | Service links (Home grid + pinned header icons). PUT requires an `If-Match` header carrying the `ETag` the GET returned; a stale token answers 412 and a missing one 428. |
 
 All non-health routes require a valid session cookie. Sessions are issued by
 `POST /api/login` (24-hour TTL). Failed login attempts are rate-limited
