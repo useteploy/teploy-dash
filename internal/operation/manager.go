@@ -145,6 +145,18 @@ type Manager struct {
 	recordErrAt time.Time
 	eventErr    string
 	eventErrAt  time.Time
+	// droppedEvents counts events lost to append failures per operation
+	// (R23), guarded by mu. The count is paid down by an explicit gap
+	// marker committed before the next successful append, so a viewer sees
+	// the hole instead of a silently shorter history.
+	droppedEvents map[string]int
+	// maintenanceCtx/maintenanceWG own the periodic retention loop (R25),
+	// which applies AGE retention even while the operation count stays
+	// below the count cap. Joined at the START of Shutdown so a sweep can
+	// never race the closing store.
+	maintenanceCtx    context.Context
+	maintenanceCancel context.CancelFunc
+	maintenanceWG     sync.WaitGroup
 }
 
 // noteRecordErrLocked records an operation-record persistence failure for
@@ -230,6 +242,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 		cancels:            make(map[string]context.CancelFunc),
 		targets:            make(map[string]*targetRunner),
 		subscribers:        make(map[string]map[chan struct{}]struct{}),
+		droppedEvents:      make(map[string]int),
 		resolver:           options.Resolver,
 		projectResolver:    options.ProjectResolver,
 		executor:           options.Executor,
@@ -275,7 +288,31 @@ func New(dataDir string, options Options) (*Manager, error) {
 		return nil, err
 	}
 	m.lastSweep = time.Now()
+	// R25: age retention runs on a lifecycle-owned hourly loop, not only at
+	// startup and on count-cap crossings — a low-volume process that stays
+	// up retained expired history indefinitely while the hourly eligibility
+	// check in retire() sat unreachable.
+	m.maintenanceCtx, m.maintenanceCancel = context.WithCancel(context.Background())
+	m.maintenanceWG.Add(1)
+	go m.retentionLoop(m.maintenanceCtx)
 	return m, nil
+}
+
+// retentionLoop applies retention periodically until the manager shuts
+// down. retire() itself bounds sweeps (hourly + count-driven) and never
+// removes non-terminal operations.
+func (m *Manager) retentionLoop(ctx context.Context) {
+	defer m.maintenanceWG.Done()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.retire()
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (m *Manager) Enqueue(req Request, idempotencyKey string, actor *Actor) (*Operation, bool, error) {
@@ -672,7 +709,32 @@ func (m *Manager) emit(id string, eventType EventType, data string) {
 // appendEventLocked appends one event to the operation's journal (a single
 // append(2), no per-event rewrite or fsync — useteploy__teploy-dash-04), keeps
 // the bounded in-memory window, and wakes subscribers. Caller must hold m.mu.
+//
+// R23: a failed append loses output WITHOUT consuming a sequence, so the
+// next successful append used to produce an apparently contiguous history.
+// The loss is now accounted per operation and paid down with an explicit
+// gap marker committed before the next retained event; the dropped count
+// survives until its marker persists. (A restart still forgets unpaid debt —
+// the failed events never entered the journal, so there is no hole to find
+// after recovery; recorded as a residual.)
 func (m *Manager) appendEventLocked(id string, eventType EventType, data string) error {
+	if lost := m.droppedEvents[id]; lost > 0 {
+		delete(m.droppedEvents, id)
+		if err := m.appendOneEventLocked(id, EventGap, fmt.Sprintf("%d event(s) were lost during a storage failure", lost)); err != nil {
+			// The marker itself failed and this event is not attempted:
+			// both the old debt and the current event are lost. Carry the
+			// combined count so a later append retries the marker.
+			if eventType != EventGap {
+				lost++
+			}
+			m.droppedEvents[id] = lost
+			return err
+		}
+	}
+	return m.appendOneEventLocked(id, eventType, data)
+}
+
+func (m *Manager) appendOneEventLocked(id string, eventType EventType, data string) error {
 	data = boundedEventData(data)
 	events := m.events[id]
 	var sequence uint64 = 1
@@ -682,6 +744,9 @@ func (m *Manager) appendEventLocked(id string, eventType EventType, data string)
 	event := Event{Sequence: sequence, OperationID: id, Type: eventType, Data: data, CreatedAt: time.Now().UTC()}
 	if err := m.store.appendEvent(id, event); err != nil {
 		m.noteEventErrLocked(err)
+		if eventType != EventGap {
+			m.droppedEvents[id]++
+		}
 		return err
 	}
 	m.clearEventErrLocked()
@@ -861,6 +926,15 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	m.admissionClosed = true
 	m.mu.Unlock()
 
+	// R25: join the retention loop FIRST — an in-flight sweep must finish
+	// (or never start) before anything below closes storage out from under
+	// it. Cancel + Wait covers both: the loop exits on ctx.Done, and Wait
+	// blocks until any in-flight retire() returns.
+	if m.maintenanceCancel != nil {
+		m.maintenanceCancel()
+		m.maintenanceWG.Wait()
+	}
+
 	drained := make(chan struct{})
 	go func() {
 		m.runners.Wait()
@@ -979,8 +1053,14 @@ func (m *Manager) recover() error {
 			if err := m.store.saveOperation(op); err != nil {
 				return err
 			}
+			// R24: the event journal is ADVISORY. A failure to append the
+			// interrupted marker must not disable the entire operation
+			// service — the authoritative record above already committed.
+			// The degradation is visible through Health() and the next
+			// append retries with a gap marker (R23).
 			if err := m.appendEventLocked(id, EventStatus, string(StatusInterrupted)); err != nil {
-				return err
+				m.noteEventErrLocked(err)
+				log.Printf("[operation] recovery journal unavailable for %s: %v", id, err)
 			}
 			m.store.CloseJournal(id)
 		case StatusCancelRequested:
@@ -992,7 +1072,8 @@ func (m *Manager) recover() error {
 				return err
 			}
 			if err := m.appendEventLocked(id, EventStatus, string(StatusCanceled)); err != nil {
-				return err
+				m.noteEventErrLocked(err)
+				log.Printf("[operation] recovery journal unavailable for %s: %v", id, err)
 			}
 			m.store.CloseJournal(id)
 		}

@@ -1141,3 +1141,65 @@ func TestCloneOperationIsolatesPointerFields(t *testing.T) {
 		t.Fatal("cloneActor must copy")
 	}
 }
+
+// R23: events lost to append failures surface as an explicit gap marker
+// before the next retained event — the viewer sees the hole, sequences stay
+// contiguous, and no output is manufactured.
+func TestAppendFailureProducesGapMarker(t *testing.T) {
+	dir := t.TempDir()
+	manager, err := New(dir, Options{Resolver: testResolver, Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		return 0, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, _, err := manager.Enqueue(deployRequest("gap-app", "img"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, op.ID, StatusSucceeded)
+
+	// Make one append fail by making the journal file unwritable, then
+	// restore it.
+	journal := filepath.Join(dir, "operations", "events", op.ID+".jsonl")
+	manager.mu.Lock()
+	manager.store.CloseJournal(op.ID)
+	manager.mu.Unlock()
+	ropen, err := os.OpenFile(journal, os.O_WRONLY, 0444)
+	if err != nil {
+		t.Skipf("cannot simulate append failure on this platform: %v", err)
+	}
+	ropen.Close()
+	os.Chmod(journal, 0444)
+
+	manager.mu.Lock()
+	errFirst := manager.appendEventLocked(op.ID, EventStdout, "lost output")
+	errSecond := manager.appendEventLocked(op.ID, EventStdout, "kept output")
+	manager.mu.Unlock()
+	if errFirst == nil || errSecond == nil {
+		t.Fatalf("both appends must fail against the read-only journal: %v %v", errFirst, errSecond)
+	}
+
+	os.Chmod(journal, 0600)
+	manager.mu.Lock()
+	errThird := manager.appendEventLocked(op.ID, EventStdout, "recovered output")
+	manager.mu.Unlock()
+	if errThird != nil {
+		t.Fatalf("append after recovery: %v", errThird)
+	}
+
+	events, err := manager.EventsAfter(op.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawGap bool
+	for _, event := range events {
+		if event.Type == EventGap && strings.Contains(event.Data, "2 event(s) were lost") {
+			sawGap = true
+		}
+	}
+	if !sawGap {
+		t.Fatalf("expected an explicit gap marker for 2 lost events, got %+v", events)
+	}
+	manager.Shutdown(context.Background())
+}
