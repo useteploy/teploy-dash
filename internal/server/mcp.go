@@ -80,7 +80,7 @@ func (b mcpBackend) ListApps(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	b.s.fleet.set(apps)
+	b.s.fleet.publish(b.s.fleet.snapshotGeneration(), apps)
 	return jsonText(apps)
 }
 

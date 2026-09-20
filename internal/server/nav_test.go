@@ -10,7 +10,7 @@ import (
 func navServer(t *testing.T, apps []remote.AppState) *Server {
 	t.Helper()
 	s := New(Config{DataDir: t.TempDir(), NoAuth: true})
-	s.fleet.set(apps)
+	s.fleet.publish(s.fleet.snapshotGeneration(), apps)
 	return s
 }
 
@@ -79,7 +79,7 @@ func TestNavCurrentProductHasNoURL(t *testing.T) {
 // fresh, which nav never reads.
 func TestNavSurvivesStaleFleetCache(t *testing.T) {
 	s := New(Config{DataDir: t.TempDir(), NoAuth: true})
-	s.fleet.set([]remote.AppState{
+	s.fleet.publish(s.fleet.snapshotGeneration(), []remote.AppState{
 		{App: "observe", Server: "infra", Domain: "observe.acme.com", CurrentPort: 3000, Status: "running"},
 	})
 	// Expire the cache the way time would.

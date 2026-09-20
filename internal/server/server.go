@@ -107,6 +107,11 @@ type fleetCache struct {
 	apps    []remote.AppState
 	builtAt time.Time
 	ttl     time.Duration
+	// generation is the invalidation token (R50): a refresh captures it
+	// before collecting and publishes only if it still matches — a sweep
+	// that started BEFORE a mutation (which invalidates) must not re-publish
+	// its stale snapshot as freshly built afterwards.
+	generation uint64
 	// lastGood survives both TTL expiry and invalidation. The TTL exists to keep
 	// app *status* fresh; consumers that only read stable facts (where a sibling
 	// dashboard lives) want the last known answer rather than none.
@@ -117,21 +122,59 @@ type fleetCache struct {
 }
 
 // beginRefresh claims the right to run a background refresh. Returns false when
-// one is already in flight, so callers simply serve what they have.
-func (fc *fleetCache) beginRefresh() bool {
+// one is already in flight, so callers simply serve what they have. R50: it
+// also returns the CURRENT generation, which the refresh must present to
+// publish — a stale generation is dropped.
+func (fc *fleetCache) beginRefresh() (uint64, bool) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if fc.refreshing {
-		return false
+		return 0, false
 	}
 	fc.refreshing = true
-	return true
+	return fc.generation, true
 }
 
 func (fc *fleetCache) endRefresh() {
 	fc.mu.Lock()
 	fc.refreshing = false
 	fc.mu.Unlock()
+}
+
+// snapshotGeneration reads the current generation WITHOUT claiming a refresh
+// (for synchronous cold reads).
+func (fc *fleetCache) snapshotGeneration() uint64 {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.generation
+}
+
+// publish stores a completed refresh only when its captured generation is
+// still current (R50). Reports whether the snapshot was published.
+func (fc *fleetCache) publish(generation uint64, apps []remote.AppState) bool {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if generation != fc.generation {
+		return false
+	}
+	fc.apps = apps
+	if apps == nil {
+		fc.builtAt = time.Time{} // zero time forces cache miss on next read
+	} else {
+		fc.builtAt = time.Now()
+		fc.lastGood = apps
+	}
+	return true
+}
+
+// invalidate drops the cached snapshot and advances the generation so any
+// in-flight refresh cannot republish its pre-mutation view (R50).
+func (fc *fleetCache) invalidate() {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.generation++
+	fc.apps = nil
+	fc.builtAt = time.Time{}
 }
 
 // snapshot returns the last successfully collected fleet regardless of age.
@@ -148,18 +191,6 @@ func (fc *fleetCache) get() ([]remote.AppState, bool) {
 		return nil, false
 	}
 	return fc.apps, true
-}
-
-func (fc *fleetCache) set(apps []remote.AppState) {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	fc.apps = apps
-	if apps == nil {
-		fc.builtAt = time.Time{} // zero time forces cache miss on next read
-	} else {
-		fc.builtAt = time.Now()
-		fc.lastGood = apps
-	}
 }
 
 // Server is the teploy-dash HTTP server.
@@ -254,7 +285,7 @@ func New(config Config) *Server {
 	executor := config.OperationExecutor
 	if executor == nil {
 		executor = func(ctx context.Context, command operation.Command, emit func(operation.Stream, string)) (int, error) {
-			defer s.fleet.set(nil)
+			defer s.fleet.invalidate()
 			return executeOperation(ctx, command, emit)
 		}
 	}
@@ -350,7 +381,11 @@ func (s *Server) DrainOperations(ctx context.Context) {
 // context: the refresh must outlive the request that triggered it, or a client
 // navigating away would cancel it and the cache would never re-warm.
 func (s *Server) refreshFleetAsync() {
-	if !cli.IsInstalled() || !s.fleet.beginRefresh() {
+	if !cli.IsInstalled() {
+		return
+	}
+	generation, claimed := s.fleet.beginRefresh()
+	if !claimed {
 		return
 	}
 	go func() {
@@ -362,7 +397,9 @@ func (s *Server) refreshFleetAsync() {
 			log.Printf("[fleet] background refresh failed (serving last known state): %v", err)
 			return
 		}
-		s.fleet.set(apps)
+		if !s.fleet.publish(generation, apps) {
+			log.Printf("[fleet] background refresh discarded: the fleet changed while it was running")
+		}
 	}()
 }
 
@@ -376,7 +413,15 @@ func (s *Server) warmFleet() {
 	if !cli.IsInstalled() {
 		return
 	}
+	// R50: warmFleet shares the single-flight latch with the stale-refresh
+	// path instead of bypassing it — a cold request burst at startup
+	// previously launched one full sweep per request.
+	generation, claimed := s.fleet.beginRefresh()
+	if !claimed {
+		return
+	}
 	go func() {
+		defer s.fleet.endRefresh()
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		apps, err := s.collectFleetApps(ctx)
@@ -384,7 +429,9 @@ func (s *Server) warmFleet() {
 			log.Printf("[fleet] startup warm failed (will fill on first request): %v", err)
 			return
 		}
-		s.fleet.set(apps)
+		if !s.fleet.publish(generation, apps) {
+			log.Printf("[fleet] startup warm discarded: the fleet changed while it was running")
+		}
 	}()
 }
 
@@ -1434,7 +1481,7 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.fleet.set(apps)
+	s.fleet.publish(s.fleet.snapshotGeneration(), apps)
 	writeData(w, apps)
 }
 
@@ -1930,7 +1977,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, err.Error())
 			return
 		}
-		s.fleet.set(nil)
+		s.fleet.invalidate()
 		writeData(w, result)
 
 	case "unlock":
@@ -1943,7 +1990,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, err.Error())
 			return
 		}
-		s.fleet.set(nil)
+		s.fleet.invalidate()
 		writeData(w, result)
 
 	case "maintenance/on", "maintenance/off":
@@ -2925,7 +2972,7 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
-		s.fleet.set(nil)
+		s.fleet.invalidate()
 		writeData(w, map[string]string{"status": "updated"})
 	default:
 		http.Error(w, "method not allowed", 405)
@@ -3205,10 +3252,17 @@ func validateMonitor(m *store.Monitor) error {
 	}
 	// "ping" is a TCP-connect probe in this codebase, not ICMP — a bare
 	// hostname would dial port 0 and always fail, so require host:port up
-	// front for both TCP-like types.
+	// front for both TCP-like types. R46: SplitHostPort alone accepts an
+	// empty host and service-name/out-of-range ports, deferring the breakage
+	// to dial time; validate both explicitly.
 	if m.Type == "tcp" || m.Type == "ping" {
-		if _, _, err := net.SplitHostPort(m.Target); err != nil {
+		host, port, err := net.SplitHostPort(m.Target)
+		if err != nil || strings.TrimSpace(host) == "" {
 			return fmt.Errorf("%s monitor target must be host:port (TCP reachability probe, not ICMP)", m.Type)
+		}
+		n, perr := strconv.Atoi(port)
+		if perr != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("%s monitor target port must be numeric and between 1 and 65535", m.Type)
 		}
 	}
 	if m.Type == "http" {
@@ -3225,6 +3279,18 @@ func validateMonitor(m *store.Monitor) error {
 		}
 	}
 	return nil
+}
+
+// isEffectiveAdmin reports whether the caller holds admin capability in the
+// CURRENT mode (R45): an admin session when auth is enabled, or the operator
+// themselves in --no-auth mode (where there is no session to check but the
+// instance is deliberately single-user). An auth-store outage never reaches
+// this — the gate refuses the request first.
+func (s *Server) isEffectiveAdmin(r *http.Request) bool {
+	if session, ok := currentUser(r); ok {
+		return session.role == RoleAdmin
+	}
+	return s.gate == nil && s.config.NoAuth
 }
 
 func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
@@ -3278,14 +3344,15 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 		// network position to a probe). An editor may edit other fields of an
 		// internal monitor but cannot change the flag in either direction —
 		// enabling it requires admin, and this route is how both the create
-		// and edit paths arrive.
-		if m.AllowInternal {
-			if session, ok := currentUser(r); !ok || session.role != RoleAdmin {
+		// and edit paths arrive. R45: no-auth mode treats the operator as
+		// the admin it deliberately is (an auth-store failure is NOT no-auth
+		// — the gate refuses requests before this point).
+		if !s.isEffectiveAdmin(r) {
+			if m.AllowInternal {
 				http.Error(w, "internal-network monitoring requires an admin", http.StatusForbidden)
 				return
 			}
-		} else if prev, err := s.store.GetMonitor(m.ID); err == nil && prev != nil && prev.AllowInternal {
-			if session, ok := currentUser(r); !ok || session.role != RoleAdmin {
+			if prev, err := s.store.GetMonitor(m.ID); err == nil && prev != nil && prev.AllowInternal {
 				http.Error(w, "disabling internal-network monitoring requires an admin", http.StatusForbidden)
 				return
 			}
@@ -3402,6 +3469,15 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
+// publicCheck is the unauthenticated /readyz projection of one subsystem
+// (R44): a coarse, stable state + machine code. Internal error strings
+// (filesystem paths, hostnames, database detail) go to the log, not the
+// public response.
+type publicCheck struct {
+	State string `json:"state"`
+	Code  string `json:"code,omitempty"`
+}
+
 // handleReadyz is the READINESS probe (A39/A47): dependencies are reachable
 // and persistence is not known-degraded. Unlike liveness, failing readiness
 // takes the instance out of rotation.
@@ -3412,6 +3488,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 //	                         failed to init); stays in rotation on purpose
 //	status "unavailable" 503 — the store is unreachable, or the auth store is
 //	                         in its fail-closed outage
+//
+// R44: the public body carries coarse codes only; detail is logged.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	status := "ready"
@@ -3425,20 +3503,22 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if s.gate != nil && s.gate.initErr != nil {
 		status = "unavailable"
 		code = http.StatusServiceUnavailable
-		checks["auth"] = s.gate.initErr.Error()
+		checks["auth"] = publicCheck{State: "unavailable", Code: "AUTH_STORE_UNAVAILABLE"}
+		log.Printf("[readyz] auth store unavailable: %v", s.gate.initErr)
 	}
 	if pinger, ok := s.store.(interface{ Ping() error }); ok {
 		if err := pinger.Ping(); err != nil {
 			status = "unavailable"
 			code = http.StatusServiceUnavailable
-			checks["store"] = err.Error()
+			checks["store"] = publicCheck{State: "unavailable", Code: "STORE_UNAVAILABLE"}
+			log.Printf("[readyz] store unreachable: %v", err)
 		} else {
-			checks["store"] = "ok"
+			checks["store"] = publicCheck{State: "ok"}
 		}
 	} else if s.store == nil {
-		checks["store"] = "not configured"
+		checks["store"] = publicCheck{State: "not_configured"}
 	} else {
-		checks["store"] = "unknown"
+		checks["store"] = publicCheck{State: "unknown"}
 	}
 	if s.operations != nil {
 		h := s.operations.Health()
@@ -3446,20 +3526,47 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 			if status == "ready" {
 				status = "degraded"
 			}
+			// Coarse codes; the specific errors stay in the log.
+			log.Printf("[readyz] operation persistence degraded: record_error=%q event_error=%q journal_error=%q", h.RecordError, h.EventError, h.JournalError)
+			checks["operations"] = map[string]interface{}{
+				"persist_degraded": h.PersistDegraded,
+				"degraded_codes":   degradedCodes(h),
+				"live_operations":  h.LiveOperations,
+			}
+		} else {
+			checks["operations"] = map[string]interface{}{
+				"persist_degraded": false,
+				"live_operations":  h.LiveOperations,
+			}
 		}
-		checks["operations"] = h
 	} else {
 		if status == "ready" {
 			status = "degraded"
 		}
-		checks["operations"] = map[string]string{"error": "operation service unavailable"}
+		checks["operations"] = publicCheck{State: "unavailable", Code: "OPERATION_SERVICE_UNAVAILABLE"}
 		if s.operationInitErr != nil {
-			checks["operations"] = map[string]string{"error": s.operationInitErr.Error()}
+			log.Printf("[readyz] operation service init failed: %v", s.operationInitErr)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": status, "checks": checks})
+}
+
+// degradedCodes turns the operation Health projection into stable public
+// codes (R44) without the raw error text.
+func degradedCodes(h operation.Health) []string {
+	var codes []string
+	if h.RecordError != "" {
+		codes = append(codes, "RECORD_PERSIST_DEGRADED")
+	}
+	if h.EventError != "" {
+		codes = append(codes, "EVENT_JOURNAL_DEGRADED")
+	}
+	if h.JournalError != "" {
+		codes = append(codes, "JOURNAL_STORAGE_DEGRADED")
+	}
+	return codes
 }
 
 // teployNav returns the cross-product dashboard switcher entries: the current
@@ -4001,8 +4108,12 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid restore test id (use letters, digits, '_' or '-')", 400)
 			return
 		}
-		if !store.ValidID(body.Server) || !store.ValidID(body.App) || !store.ValidID(body.Accessory) {
-			http.Error(w, "server, app, and accessory are required (letters, digits, '_' or '-')", 400)
+		// R46: app names follow the DEPLOYMENT grammar (dots allowed — the
+		// CLI creates dotted app names), not the opaque store-ID grammar
+		// that previously rejected them; the server alias and accessory
+		// keep the store-ID grammar they always had.
+		if !store.ValidID(body.Server) || !validAppName(body.App) || !store.ValidID(body.Accessory) {
+			http.Error(w, "server and accessory are required (letters, digits, '_' or '-'); app must be a valid deployment name", 400)
 			return
 		}
 		if !bucketPattern.MatchString(body.Bucket) || len(body.Bucket) > 63 {

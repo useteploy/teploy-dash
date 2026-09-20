@@ -78,3 +78,36 @@ func TestMonitorValidationBounds(t *testing.T) {
 		t.Errorf("method normalization: got %d %s", w.Code, w.Body.String())
 	}
 }
+
+// R45: in no-auth mode the operator IS the admin — managing internal
+// monitors from the loopback no-auth dashboard previously 403'd because
+// there is no session to check.
+func TestMonitorAllowInternalWorksInNoAuthMode(t *testing.T) {
+	s := &Server{store: store.NewFileStore(t.TempDir()), config: Config{NoAuth: true}}
+	internal := `{"id":"m1","name":"M1","type":"http","target":"http://10.0.0.5/up","interval":60000000000,"timeout":10000000000,"allow_internal":true}`
+	if w := postMonitor(t, s, "", internal); w.Code != 200 {
+		t.Fatalf("no-auth operator enabling allow_internal: got %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+}
+
+// R46: TCP monitor targets need a nonempty host and a numeric 1-65535 port —
+// SplitHostPort alone accepted "host:" and service names.
+func TestMonitorTCPTargetValidation(t *testing.T) {
+	s := monitorsTestServer(t)
+	cases := []struct{ name, target string }{
+		{"empty host", ":5432"},
+		{"service port", "db.example:postgres"},
+		{"zero port", "db.example:0"},
+		{"out of range port", "db.example:70000"},
+	}
+	for _, tc := range cases {
+		body := `{"id":"m","name":"M","type":"tcp","target":"` + tc.target + `","interval":60000000000,"timeout":10000000000}`
+		if w := postMonitor(t, s, RoleAdmin, body); w.Code != 400 {
+			t.Fatalf("%s (%s): got %d, want 400", tc.name, tc.target, w.Code)
+		}
+	}
+	good := `{"id":"m","name":"M","type":"tcp","target":"db.example:5432","interval":60000000000,"timeout":10000000000}`
+	if w := postMonitor(t, s, RoleAdmin, good); w.Code != 200 {
+		t.Fatalf("valid tcp target: got %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+}
