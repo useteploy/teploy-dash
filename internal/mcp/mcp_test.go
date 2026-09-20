@@ -387,9 +387,14 @@ func TestFractionalAndOutOfRangeIntegerArgs(t *testing.T) {
 	srv, full, _, b := testServer(t)
 	defer srv.Close()
 
+	// R54 makes wrong-typed scalars a -32602 protocol error (rejected at the
+	// schema, before dispatch); range violations inside a correctly typed
+	// integer remain tool-level isError results. Both must keep the backend
+	// unreachable.
 	cases := []map[string]interface{}{
 		{"server": "prod", "app": "web", "image": "example/web:1", "port": 80.5},
 		{"server": "prod", "app": "web", "image": "example/web:1", "port": 70000},
+		{"server": "prod", "app": "web", "image": "example/web:1", "port": true},
 		{"server": "prod", "app": "web", "lines": 10.25},
 	}
 	for _, params := range cases {
@@ -397,13 +402,38 @@ func TestFractionalAndOutOfRangeIntegerArgs(t *testing.T) {
 		if _, ok := params["lines"]; ok {
 			method = "teploy_app_logs"
 		}
-		out := rpcToolCall(t, srv.URL, full, method, params)
-		if !out["isError"].(bool) {
-			t.Fatalf("%v accepted: %+v", params, out)
+		body, _ := json.Marshal(map[string]interface{}{
+			"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+			"params": map[string]interface{}{"name": method, "arguments": params},
+		})
+		req, _ := http.NewRequest("POST", srv.URL, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+full)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Result map[string]interface{} `json:"result"`
+			Error  *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&envelope)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case envelope.Error != nil && envelope.Error.Code == -32602:
+			// rejected at the schema — correct for wrong types
+		case envelope.Result != nil && envelope.Result["isError"] == true:
+			// rejected by the tool's own bounds — correct for out-of-range values
+		default:
+			t.Fatalf("%v accepted: result=%+v error=%+v", params, envelope.Result, envelope.Error)
 		}
 	}
 	if len(b.calls) != 0 {
-		t.Fatalf("backend reached with invalid integer args: %v", b.calls)
+		t.Fatalf("backend reached with invalid args: %v", b.calls)
 	}
 }
 
@@ -568,5 +598,73 @@ func TestProtocolVersionHeader(t *testing.T) {
 	}
 	if code := post("2025-06-18"); code != http.StatusOK {
 		t.Fatalf("supported version header: code = %d, want 200", code)
+	}
+}
+
+// R54: a deploy whose optional domain has the wrong TYPE is rejected at the
+// schema — the old discarded string assertion silently omitted the domain
+// and queued a deploy without it.
+func TestWrongTypeScalarRejectedAtSchema(t *testing.T) {
+	srv, full, _, b := testServer(t)
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+		"params": map[string]interface{}{
+			"name":      "teploy_deploy",
+			"arguments": map[string]interface{}{"server": "prod", "app": "web", "image": "example/web:1", "domain": true},
+		},
+	})
+	req, _ := http.NewRequest("POST", srv.URL, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+full)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 {
+		t.Fatalf("wrong-typed domain must be -32602, got %+v", envelope)
+	}
+	if !strings.Contains(envelope.Error.Message, "domain") {
+		t.Fatalf("error should name the field, got %q", envelope.Error.Message)
+	}
+	if len(b.calls) != 0 {
+		t.Fatalf("backend reached: %v", b.calls)
+	}
+}
+
+// R54: malformed initialize params answer -32602 instead of negotiating
+// successfully over garbage.
+func TestInitializeMalformedParamsRejected(t *testing.T) {
+	srv, full, _, _ := testServer(t)
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL, bytes.NewReader([]byte(
+		`{"jsonrpc":"2.0","id":9,"method":"initialize","params":[1,2,3]}`)))
+	req.Header.Set("Authorization", "Bearer "+full)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var envelope struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 {
+		t.Fatalf("malformed initialize params must answer -32602, got %+v", envelope)
 	}
 }

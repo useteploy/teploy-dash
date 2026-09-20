@@ -250,13 +250,14 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 		}
 	}
 	if os.Getenv("TEPLOY_DASH_SSH_INSECURE") == "1" {
-		log.Printf("[ssh] WARNING: host-key verification disabled (TEPLOY_DASH_SSH_INSECURE=1)")
-		// Accept any key, but still RECORD it to known_hosts. The bundled teploy
-		// CLI (used for delegate actions like logs/env/rollback) strict-checks
-		// known_hosts and has no insecure mode, so without a recorded key it
-		// fails with "knownhosts: key is unknown/mismatch". Recording the key
-		// the dash already accepts lets the CLI reach the same servers.
-		return insecureRecordingCallback(path), nil
+		log.Printf("[ssh] WARNING: host-key verification disabled (TEPLOY_DASH_SSH_INSECURE=1); observed keys will NOT be enrolled into %s", path)
+		log.Printf("[ssh] WARNING: delegate CLI actions against NEW hosts will fail strict known_hosts verification until the operator enrolls their real keys (e.g. ssh-keyscan)")
+		// R53: insecure mode accepts every key for THIS session only. The
+		// previous behavior also APPENDED each unverified key to the same
+		// known_hosts the strict mode and the CLI check — turning a
+		// temporary opt-out into permanent silent trust of whatever key
+		// happened to be observed (including an attacker-in-the-middle's).
+		return ssh.InsecureIgnoreHostKey(), nil
 	}
 	if path == "" {
 		// Can't resolve home: no durable trust store. Fail closed rather
@@ -329,31 +330,11 @@ func acceptNewHostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
 // could both pass the "unknown" check and both be enrolled.
 var enrollMu sync.Mutex
 
-// insecureRecordingCallback accepts every host key (the container explicitly
-// opted into insecure host-key handling on a trusted private mesh) but appends
-// the key to known_hosts so the bundled teploy CLI — which strict-checks
-// known_hosts and has no insecure mode — can reach the same servers. It
-// re-reads the file each call so a key it already recorded isn't duplicated,
-// and a changed key (server rebuild) is appended alongside the old one, which
-// the CLI's knownhosts matcher accepts.
-func insecureRecordingCallback(knownHostsPath string) ssh.HostKeyCallback {
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		if knownHostsPath == "" {
-			return nil // nowhere to persist; accept this session
-		}
-		if cb, err := knownhosts.New(knownHostsPath); err == nil {
-			if cb(hostname, remote, key) == nil {
-				return nil // current key already recorded and matching
-			}
-		}
-		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
-		if f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644); err == nil {
-			fmt.Fprintln(f, line)
-			f.Close()
-		}
-		return nil
-	}
-}
+// insecureRecordingCallback was the R53 defect: under
+// TEPLOY_DASH_SSH_INSECURE=1 it accepted every key AND appended it to the
+// canonical known_hosts, so an unverified key observed during the insecure
+// window stayed trusted after the mode was turned off. It is deleted;
+// insecure mode now uses ssh.InsecureIgnoreHostKey and enrolls nothing.
 
 // Run executes a command and returns its stdout (trimmed), bounded by the
 // capture budget (F009). Overflow returns ErrOutputLimit — the truncated

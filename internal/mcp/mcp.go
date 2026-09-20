@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -185,7 +186,15 @@ func (h *Handler) dispatch(r *http.Request, req rpcRequest, tok Token) rpcRespon
 		var params struct {
 			ProtocolVersion string `json:"protocolVersion"`
 		}
-		_ = json.Unmarshal(req.Params, &params)
+		// R54: malformed initialize params are an invalid-params error, not
+		// a silently successful negotiation over garbage (an unparseable
+		// protocolVersion used to fall through to "use latest").
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				resp.Error = &rpcError{Code: -32602, Message: "invalid params"}
+				return resp
+			}
+		}
 		version := latestProtocol
 		if supportedProtocols[params.ProtocolVersion] {
 			version = params.ProtocolVersion
@@ -280,6 +289,9 @@ func (h *Handler) callTool(r *http.Request, name string, args map[string]interfa
 // validateToolArguments enforces the top-level argument contract a tool's
 // schema advertises (additionalProperties: false) BEFORE any side effect
 // (A41): unknown fields and null values are rejected instead of ignored.
+// R54: each PRESENT field must also match its advertised type — the old
+// check let a boolean/object "domain" through to a discarded string
+// assertion, silently queuing a deploy without the operator's value.
 func validateToolArguments(tools []Tool, name string, raw json.RawMessage) error {
 	var tool *Tool
 	for i := range tools {
@@ -299,9 +311,15 @@ func validateToolArguments(tools []Tool, name string, raw json.RawMessage) error
 		return fmt.Errorf("arguments must be an object")
 	}
 	allowed := map[string]bool{}
+	types := map[string]string{}
 	if props, ok := tool.InputSchema["properties"].(map[string]interface{}); ok {
-		for key := range props {
+		for key, def := range props {
 			allowed[key] = true
+			if prop, ok := def.(map[string]interface{}); ok {
+				if t, ok := prop["type"].(string); ok {
+					types[key] = t
+				}
+			}
 		}
 	}
 	for key, value := range fields {
@@ -310,6 +328,41 @@ func validateToolArguments(tools []Tool, name string, raw json.RawMessage) error
 		}
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return fmt.Errorf("argument %q must not be null", key)
+		}
+		if expected := types[key]; expected != "" {
+			if err := validateScalarType(value, expected); err != nil {
+				return fmt.Errorf("argument %q for tool %s %s", key, name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateScalarType checks a raw JSON value against an advertised schema
+// type (R54). Only the scalar types the tool schemas use are enforced;
+// anything else is left to the tool's own arg parsing.
+func validateScalarType(raw json.RawMessage, expected string) error {
+	trimmed := bytes.TrimSpace(raw)
+	switch expected {
+	case "string":
+		var value string
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return errors.New("must be a string")
+		}
+	case "integer":
+		var value int64
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return errors.New("must be an integer")
+		}
+	case "number":
+		var value float64
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return errors.New("must be a number")
+		}
+	case "boolean":
+		var value bool
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return errors.New("must be a boolean")
 		}
 	}
 	return nil
