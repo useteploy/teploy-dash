@@ -2334,6 +2334,54 @@ func saveGroupsFile(data groupData) error {
 	return atomicFileWrite(path, raw, 0644)
 }
 
+// groupsMu serializes whole read-modify-write transactions on groups.json
+// (R11). Atomic replacement prevents torn FILES, not lost UPDATES: two
+// concurrent handlers previously both read the same version and the later
+// writer erased the first writer's change. The CLI can also write this file
+// (a shared contract) — cross-process locking remains deferred with the
+// A35 store/schema work; within the dashboard the transaction is now atomic.
+var groupsMu sync.Mutex
+
+// updateGroups runs one read-modify-write transaction against groups.json.
+// Request bodies must be decoded BEFORE calling; change mutates the loaded
+// document and saveErrors abort with the previous document intact.
+func updateGroups(change func(*groupData) error) (groupData, error) {
+	groupsMu.Lock()
+	defer groupsMu.Unlock()
+	data, err := loadGroupsFile()
+	if err != nil {
+		return groupData{}, err
+	}
+	if err := change(&data); err != nil {
+		return data, err
+	}
+	if err := saveGroupsFile(data); err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
+// errGroupExists reports a create/rename colliding with an existing name.
+var errGroupExists = errors.New("a group by that name already exists")
+
+// groupNameRE is the creation/renaming grammar for groups and projects
+// (R12): route-safe (no slash, no leading dot/dot-segment), bounded. Slash
+// in a name made the entry unaddressable through the /api/groups/{name}
+// route, which splits the decoded path.
+var groupNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$`)
+
+// checkedGroupName validates and canonicalizes a NEW group/project name.
+// Existing stores with out-of-grammar names stay readable; only create and
+// rename enforce the grammar.
+func checkedGroupName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if !groupNameRE.MatchString(name) || name == "." || name == ".." ||
+		strings.HasPrefix(name, ".") {
+		return "", errors.New("name must be 1-64 route-safe characters (letters, digits, space, '_', '.', '-'; no leading dot)")
+	}
+	return name, nil
+}
+
 func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
@@ -2347,24 +2395,31 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := strictDecode(r, &body); err != nil || body.Name == "" {
+		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "name is required")
 			return
 		}
-		data, err := loadGroupsFile()
+		name, err := checkedGroupName(body.Name)
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
-		for _, g := range data.Groups {
-			if g.Name == body.Name {
-				writeError(w, "group already exists")
-				return
+		// R11: create runs as one transaction — the existence check and the
+		// save see the same document under the groups lock.
+		if _, err := updateGroups(func(data *groupData) error {
+			for _, g := range data.Groups {
+				if g.Name == name {
+					return errGroupExists
+				}
 			}
-		}
-		data.Groups = append(data.Groups, groupEntry{Name: body.Name, Apps: []string{}})
-		if err := saveGroupsFile(data); err != nil {
-			writeError(w, err.Error())
+			data.Groups = append(data.Groups, groupEntry{Name: name, Apps: []string{}})
+			return nil
+		}); err != nil {
+			if errors.Is(err, errGroupExists) {
+				writeErrorStatus(w, err.Error(), http.StatusConflict)
+			} else {
+				writeError(w, err.Error())
+			}
 			return
 		}
 		writeData(w, map[string]string{"status": "created"})
@@ -2373,53 +2428,78 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// errGroupNotFound is the transaction sentinel for "the named group does
+// not exist" (R11) — it carries the handler's verdict out of the locked
+// transaction.
+var errGroupNotFound = errors.New("group not found")
+
 func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/groups/")
 	parts := strings.Split(path, "/")
 	groupName := parts[0]
 
 	if len(parts) == 1 {
-		data, err := loadGroupsFile()
-		if err != nil {
-			writeError(w, err.Error())
-			return
-		}
 		switch r.Method {
 		case "DELETE":
-			// DELETE /api/groups/{name}
-			filtered := make([]groupEntry, 0, len(data.Groups))
-			for _, g := range data.Groups {
-				if g.Name != groupName {
-					filtered = append(filtered, g)
+			// DELETE /api/groups/{name} — R11: the whole filter+save runs as
+			// one transaction.
+			if _, err := updateGroups(func(data *groupData) error {
+				filtered := make([]groupEntry, 0, len(data.Groups))
+				for _, g := range data.Groups {
+					if g.Name != groupName {
+						filtered = append(filtered, g)
+					}
 				}
-			}
-			data.Groups = filtered
-			if err := saveGroupsFile(data); err != nil {
+				data.Groups = filtered
+				return nil
+			}); err != nil {
 				writeError(w, err.Error())
 				return
 			}
 			writeData(w, map[string]string{"status": "deleted"})
 		case "PUT":
-			// PUT /api/groups/{name} — rename
+			// PUT /api/groups/{name} — rename. R12: the destination collision
+			// check the project rename already had, applied inside the R11
+			// transaction — renaming A onto existing B used to create
+			// duplicate names, and deleting B then filtered out BOTH.
 			var body struct {
 				Name string `json:"name"`
 			}
-			if err := strictDecode(r, &body); err != nil || body.Name == "" {
+			if err := strictDecode(r, &body); err != nil {
 				writeError(w, "name is required")
 				return
 			}
-			for i, g := range data.Groups {
-				if g.Name == groupName {
-					data.Groups[i].Name = body.Name
-					if err := saveGroupsFile(data); err != nil {
-						writeError(w, err.Error())
-						return
-					}
-					writeData(w, map[string]string{"status": "renamed"})
-					return
-				}
+			newName, err := checkedGroupName(body.Name)
+			if err != nil {
+				writeError(w, err.Error())
+				return
 			}
-			writeError(w, "group not found")
+			_, terr := updateGroups(func(data *groupData) error {
+				for i, g := range data.Groups {
+					if g.Name == groupName {
+						if newName != groupName {
+							for _, other := range data.Groups {
+								if other.Name == newName {
+									return errGroupExists
+								}
+							}
+						}
+						data.Groups[i].Name = newName
+						return nil
+					}
+				}
+				return errGroupNotFound
+			})
+			switch {
+			case errors.Is(terr, errGroupExists):
+				writeErrorStatus(w, terr.Error(), http.StatusConflict)
+			case errors.Is(terr, errGroupNotFound):
+				writeError(w, "group not found")
+			case terr != nil:
+				writeError(w, terr.Error())
+			default:
+				writeData(w, map[string]string{"status": "renamed"})
+			}
 		default:
 			http.Error(w, "method not allowed", 405)
 		}
@@ -2432,29 +2512,26 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 	case resource == "apps" && len(parts) == 3 && r.Method == "DELETE":
 		// DELETE /api/groups/{name}/apps/{app} — unassign app from group
 		appName := parts[2]
-		data, err := loadGroupsFile()
-		if err != nil {
-			writeError(w, err.Error())
+		_, terr := updateGroups(func(data *groupData) error {
+			for i, g := range data.Groups {
+				if g.Name == groupName {
+					filtered := make([]string, 0, len(g.Apps))
+					for _, a := range g.Apps {
+						if a != appName {
+							filtered = append(filtered, a)
+						}
+					}
+					data.Groups[i].Apps = filtered
+					return nil
+				}
+			}
+			return errGroupNotFound
+		})
+		if terr != nil {
+			writeError(w, terr.Error())
 			return
 		}
-		for i, g := range data.Groups {
-			if g.Name == groupName {
-				filtered := make([]string, 0, len(g.Apps))
-				for _, a := range g.Apps {
-					if a != appName {
-						filtered = append(filtered, a)
-					}
-				}
-				data.Groups[i].Apps = filtered
-				if err := saveGroupsFile(data); err != nil {
-					writeError(w, err.Error())
-					return
-				}
-				writeData(w, map[string]string{"status": "unassigned"})
-				return
-			}
-		}
-		writeError(w, "group not found")
+		writeData(w, map[string]string{"status": "unassigned"})
 		return
 
 	case resource == "apps" && r.Method == "POST":
@@ -2466,62 +2543,69 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "app is required")
 			return
 		}
-		data, err := loadGroupsFile()
-		if err != nil {
-			writeError(w, err.Error())
+		already := false
+		_, terr := updateGroups(func(data *groupData) error {
+			for i, g := range data.Groups {
+				if g.Name == groupName {
+					for _, a := range g.Apps {
+						if a == body.App {
+							already = true
+							return nil
+						}
+					}
+					data.Groups[i].Apps = append(data.Groups[i].Apps, body.App)
+					return nil
+				}
+			}
+			return errGroupNotFound
+		})
+		if terr != nil {
+			writeError(w, terr.Error())
 			return
 		}
-		for i, g := range data.Groups {
-			if g.Name == groupName {
-				for _, a := range g.Apps {
-					if a == body.App {
-						writeData(w, map[string]string{"status": "already assigned"})
-						return
-					}
-				}
-				data.Groups[i].Apps = append(data.Groups[i].Apps, body.App)
-				if err := saveGroupsFile(data); err != nil {
-					writeError(w, err.Error())
-					return
-				}
-				writeData(w, map[string]string{"status": "assigned"})
-				return
-			}
+		if already {
+			writeData(w, map[string]string{"status": "already assigned"})
+			return
 		}
-		writeError(w, "group not found")
+		writeData(w, map[string]string{"status": "assigned"})
 
 	case resource == "projects" && r.Method == "POST" && len(parts) == 2:
 		// POST /api/groups/{name}/projects — create project
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := strictDecode(r, &body); err != nil || body.Name == "" {
+		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "name is required")
 			return
 		}
-		data, err := loadGroupsFile()
+		name, err := checkedGroupName(body.Name)
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
-		for i, g := range data.Groups {
-			if g.Name == groupName {
-				for _, p := range g.Projects {
-					if p.Name == body.Name {
-						writeError(w, "project already exists")
-						return
+		_, terr := updateGroups(func(data *groupData) error {
+			for i, g := range data.Groups {
+				if g.Name == groupName {
+					for _, p := range g.Projects {
+						if p.Name == name {
+							return errGroupExists
+						}
 					}
+					data.Groups[i].Projects = append(data.Groups[i].Projects, projectEntry{Name: name, Apps: []string{}})
+					return nil
 				}
-				data.Groups[i].Projects = append(data.Groups[i].Projects, projectEntry{Name: body.Name, Apps: []string{}})
-				if err := saveGroupsFile(data); err != nil {
-					writeError(w, err.Error())
-					return
-				}
-				writeData(w, map[string]string{"status": "created"})
-				return
 			}
+			return errGroupNotFound
+		})
+		if terr != nil {
+			if errors.Is(terr, errGroupExists) {
+				writeErrorStatus(w, "a project named "+name+" already exists in this group", http.StatusConflict)
+			} else {
+				writeError(w, terr.Error())
+			}
+			return
 		}
-		writeError(w, "group not found")
+		writeData(w, map[string]string{"status": "created"})
 
 	case resource == "projects" && len(parts) == 3 && r.Method == "PUT":
 		// PUT /api/groups/{name}/projects/{project} — rename project
@@ -2529,100 +2613,103 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := strictDecode(r, &body); err != nil || body.Name == "" {
+		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "name is required")
 			return
 		}
-		data, err := loadGroupsFile()
+		newName, err := checkedGroupName(body.Name)
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
-		for i, g := range data.Groups {
-			if g.Name == groupName {
+		_, terr := updateGroups(func(data *groupData) error {
+			for i, g := range data.Groups {
+				if g.Name != groupName {
+					continue
+				}
 				for j, p := range g.Projects {
-					if p.Name == projectName {
-						if body.Name != projectName {
-							for _, other := range g.Projects {
-								if other.Name == body.Name {
-									writeErrorStatus(w, "a project named "+body.Name+" already exists in this group", http.StatusConflict)
-									return
-								}
+					if p.Name != projectName {
+						continue
+					}
+					if newName != projectName {
+						for _, other := range g.Projects {
+							if other.Name == newName {
+								return errGroupExists
 							}
 						}
-						data.Groups[i].Projects[j].Name = body.Name
-						if err := saveGroupsFile(data); err != nil {
-							writeError(w, err.Error())
-							return
-						}
-						writeData(w, map[string]string{"status": "renamed"})
-						return
 					}
+					data.Groups[i].Projects[j].Name = newName
+					return nil
 				}
 			}
+			return errGroupNotFound
+		})
+		if terr != nil {
+			if errors.Is(terr, errGroupExists) {
+				writeErrorStatus(w, "a project named "+newName+" already exists in this group", http.StatusConflict)
+			} else {
+				writeError(w, terr.Error())
+			}
+			return
 		}
-		writeError(w, "group or project not found")
+		writeData(w, map[string]string{"status": "renamed"})
 		return
 
 	case resource == "projects" && len(parts) == 3 && r.Method == "DELETE":
 		// DELETE /api/groups/{name}/projects/{project} — delete project
 		projectName := parts[2]
-		data, err := loadGroupsFile()
-		if err != nil {
-			writeError(w, err.Error())
+		_, terr := updateGroups(func(data *groupData) error {
+			for i, g := range data.Groups {
+				if g.Name == groupName {
+					filtered := make([]projectEntry, 0, len(g.Projects))
+					for _, p := range g.Projects {
+						if p.Name != projectName {
+							filtered = append(filtered, p)
+						}
+					}
+					data.Groups[i].Projects = filtered
+					return nil
+				}
+			}
+			return errGroupNotFound
+		})
+		if terr != nil {
+			writeError(w, terr.Error())
 			return
 		}
-		for i, g := range data.Groups {
-			if g.Name == groupName {
-				filtered := make([]projectEntry, 0, len(g.Projects))
-				for _, p := range g.Projects {
-					if p.Name != projectName {
-						filtered = append(filtered, p)
-					}
-				}
-				data.Groups[i].Projects = filtered
-				if err := saveGroupsFile(data); err != nil {
-					writeError(w, err.Error())
-					return
-				}
-				writeData(w, map[string]string{"status": "deleted"})
-				return
-			}
-		}
-		writeError(w, "group not found")
+		writeData(w, map[string]string{"status": "deleted"})
 		return
 
 	case resource == "projects" && len(parts) == 5 && parts[3] == "apps" && r.Method == "DELETE":
 		// DELETE /api/groups/{name}/projects/{project}/apps/{app} — unassign from project
 		projectName := parts[2]
 		appName := parts[4]
-		data, err := loadGroupsFile()
-		if err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		for i, g := range data.Groups {
-			if g.Name == groupName {
+		_, terr := updateGroups(func(data *groupData) error {
+			for i, g := range data.Groups {
+				if g.Name != groupName {
+					continue
+				}
 				for j, p := range g.Projects {
-					if p.Name == projectName {
-						filtered := make([]string, 0, len(p.Apps))
-						for _, a := range p.Apps {
-							if a != appName {
-								filtered = append(filtered, a)
-							}
-						}
-						data.Groups[i].Projects[j].Apps = filtered
-						if err := saveGroupsFile(data); err != nil {
-							writeError(w, err.Error())
-							return
-						}
-						writeData(w, map[string]string{"status": "unassigned"})
-						return
+					if p.Name != projectName {
+						continue
 					}
+					filtered := make([]string, 0, len(p.Apps))
+					for _, a := range p.Apps {
+						if a != appName {
+							filtered = append(filtered, a)
+						}
+					}
+					data.Groups[i].Projects[j].Apps = filtered
+					return nil
 				}
 			}
+			return errGroupNotFound
+		})
+		if terr != nil {
+			writeError(w, terr.Error())
+			return
 		}
-		writeError(w, "group or project not found")
+		writeData(w, map[string]string{"status": "unassigned"})
 		return
 
 	case resource == "projects" && len(parts) >= 3:
@@ -2636,33 +2723,37 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 				writeError(w, "app is required")
 				return
 			}
-			data, err := loadGroupsFile()
-			if err != nil {
-				writeError(w, err.Error())
-				return
-			}
-			for i, g := range data.Groups {
-				if g.Name == groupName {
+			already := false
+			_, terr := updateGroups(func(data *groupData) error {
+				for i, g := range data.Groups {
+					if g.Name != groupName {
+						continue
+					}
 					for j, p := range g.Projects {
-						if p.Name == projectName {
-							for _, a := range p.Apps {
-								if a == body.App {
-									writeData(w, map[string]string{"status": "already assigned"})
-									return
-								}
-							}
-							data.Groups[i].Projects[j].Apps = append(data.Groups[i].Projects[j].Apps, body.App)
-							if err := saveGroupsFile(data); err != nil {
-								writeError(w, err.Error())
-								return
-							}
-							writeData(w, map[string]string{"status": "assigned"})
-							return
+						if p.Name != projectName {
+							continue
 						}
+						for _, a := range p.Apps {
+							if a == body.App {
+								already = true
+								return nil
+							}
+						}
+						data.Groups[i].Projects[j].Apps = append(data.Groups[i].Projects[j].Apps, body.App)
+						return nil
 					}
 				}
+				return errGroupNotFound
+			})
+			if terr != nil {
+				writeError(w, terr.Error())
+				return
 			}
-			writeError(w, "group or project not found")
+			if already {
+				writeData(w, map[string]string{"status": "already assigned"})
+				return
+			}
+			writeData(w, map[string]string{"status": "assigned"})
 		} else {
 			writeError(w, "not found")
 		}
