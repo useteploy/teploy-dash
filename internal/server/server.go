@@ -27,6 +27,7 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/manifest"
 	"github.com/useteploy/teploy-dash/internal/mcp"
 	"github.com/useteploy/teploy-dash/internal/monitor"
@@ -2902,18 +2903,29 @@ func notificationsFilePath() string {
 }
 
 // LoadNotificationsConfig reads alert configuration from ~/.teploy/notifications.json.
-func LoadNotificationsConfig() alert.Config {
+// R14: an unreadable or corrupt file is an ERROR, not "notifications not
+// configured" — the caller decides how to degrade; a silent empty config
+// let a later partial overwrite destroy stored secrets.
+func LoadNotificationsConfig() (alert.Config, error) {
 	return loadNotificationsConfig()
 }
 
-func loadNotificationsConfig() alert.Config {
+func loadNotificationsConfig() (alert.Config, error) {
 	raw, err := os.ReadFile(notificationsFilePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return alert.Config{}, nil
+	}
 	if err != nil {
-		return alert.Config{}
+		return alert.Config{}, fmt.Errorf("read notifications config: %w", err)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return alert.Config{}, nil
 	}
 	var cfg alert.Config
-	json.Unmarshal(raw, &cfg)
-	return cfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return alert.Config{}, fmt.Errorf("decode notifications config: %w", err)
+	}
+	return cfg, nil
 }
 
 func saveNotificationsConfig(cfg alert.Config) error {
@@ -2930,38 +2942,32 @@ func saveNotificationsConfig(cfg alert.Config) error {
 	return atomicFileWrite(path, raw, 0600)
 }
 
+// notificationsMu serializes the notification config's read-merge-validate-
+// save-publication sequence (R14): concurrent patches previously overwrote
+// one another because each read the file outside any lock.
+var notificationsMu sync.Mutex
+
 // atomicFileWrite writes data to path via a same-directory temp file + rename
 // so a failed or partial write cannot replace the previous complete file.
+// R15: the replacement shares the audited durable semantics (unique temp,
+// file sync, rename, PARENT-DIRECTORY sync after the rename) used by the
+// credential and token stores — a rename without the dir sync is not
+// crash-durable on filesystems that need explicit directory synchronization.
 func atomicFileWrite(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return durable.Replace(path, data, mode)
 }
 
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	switch r.Method {
 	case "GET":
-		cfg := loadNotificationsConfig()
+		cfg, err := loadNotificationsConfig()
+		if err != nil {
+			// R14: corrupt/unreadable state is a configuration error, not a
+			// silently empty one.
+			writeErrorStatus(w, "notification configuration unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		// Never return secrets to the client; expose only whether one is
 		// configured.
 		writeData(w, map[string]any{
@@ -2996,7 +3002,17 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid request body")
 			return
 		}
-		cfg := loadNotificationsConfig()
+		notificationsMu.Lock()
+		defer notificationsMu.Unlock()
+		// R14: refuse patches against unreadable/corrupt state — merging
+		// into a fabricated empty config destroyed the secrets the request
+		// deliberately omitted. The whole read-merge-save sequence runs
+		// under one lock so concurrent patches cannot overwrite one another.
+		cfg, err := loadNotificationsConfig()
+		if err != nil {
+			writeErrorStatus(w, "notification configuration unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		if patch.WebhookURL != nil {
 			cfg.WebhookURL = strings.TrimSpace(*patch.WebhookURL)
 		}

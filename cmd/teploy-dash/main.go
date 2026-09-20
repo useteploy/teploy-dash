@@ -200,8 +200,12 @@ func run() error {
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.
-	notifCfg := server.LoadNotificationsConfig()
-	if notifCfg.WebhookURL != "" || notifCfg.SMTPHost != "" {
+	// R14: an unreadable/corrupt config is loud at startup — it previously
+	// read as "not configured" and a later partial save destroyed secrets.
+	notifCfg, notifErr := server.LoadNotificationsConfig()
+	if notifErr != nil {
+		log.Printf("Warning: %v (alerts disabled until the config is repaired; saving from Settings is refused in this state)", notifErr)
+	} else if notifCfg.WebhookURL != "" || notifCfg.SMTPHost != "" {
 		mon.SetAlerter(alert.New(notifCfg))
 		rst.SetAlerter(alert.New(notifCfg))
 		log.Printf("Alerts configured")
