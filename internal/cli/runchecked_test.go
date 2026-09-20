@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // checkExit must turn a non-zero CLI exit into an error (so mutating delegate
 // calls fail through the caller's normal err path) and a zero exit into nil.
@@ -36,6 +39,8 @@ func TestCheckExit(t *testing.T) {
 
 // F015: an unverified probe outcome is not cached and fails closed for the
 // secret-bearing call sites; a verified answer (either way) is cached.
+// R48: the cache is keyed on executable identity + TTL, so the hand-set
+// cache entries below carry both.
 func TestSecretFlagProbeVerifiedCaching(t *testing.T) {
 	// Hermetic: no teploy on PATH, so the probe cannot establish anything.
 	t.Setenv("PATH", t.TempDir())
@@ -50,9 +55,17 @@ func TestSecretFlagProbeVerifiedCaching(t *testing.T) {
 	if p.decided {
 		t.Fatal("unverified outcome must not be cached")
 	}
-	// A verified outcome is cached and returned on subsequent calls.
+	// A verified outcome is cached (with identity + timestamp) and returned
+	// on subsequent calls.
 	p.decided, p.supported = true, true
+	p.identity = cliIdentity() // "" here: no teploy resolves on the empty PATH
+	p.checkedAt = time.Now()
 	if s, err := p.check(); err != nil || !s {
 		t.Fatalf("cached verified answer: %v %v", s, err)
+	}
+	// R48: an expired TTL re-probes rather than serving the stale answer.
+	p.checkedAt = time.Now().Add(-2 * probeCacheTTL)
+	if _, err := p.check(); err == nil {
+		t.Fatal("expired cache entry must re-probe (and fail closed here)")
 	}
 }

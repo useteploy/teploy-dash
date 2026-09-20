@@ -71,6 +71,25 @@ func SetVarStdinSupport(probe func() (bool, error)) {
 	}
 }
 
+// legacySecretArgVAllowed is the operator opt-in that re-enables secret
+// values on the argv for CLIs without the stdin contract (R03). Mirrors
+// cli.LegacySecretArgVAllowed without an import (operation stays
+// self-contained for its own tests and recovery tools).
+var legacySecretArgVAllowed = func() bool { return false }
+
+// SetLegacySecretArgVAllowed installs the argv-exposure opt-in probe used by
+// Build. Wired by the server package at startup.
+func SetLegacySecretArgVAllowed(allowed func() bool) {
+	if allowed != nil {
+		legacySecretArgVAllowed = allowed
+	}
+}
+
+// errLegacySecretArgV refuses secret-bearing template variables on a CLI
+// without the --var-stdin contract (R03). Kept as a package error so the
+// server surface can map it consistently.
+var errLegacySecretArgV = fmt.Errorf("template variables carry secret values this CLI cannot receive safely (no --var-stdin support); upgrade the CLI, or set TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV=1 to deliberately accept process-list exposure")
+
 func BuildDeploy(req Request, resolve Resolver) (Command, Server, string, error) {
 	if req.Mode != "" && req.Mode != "ad-hoc" {
 		return Command{}, Server{}, "", fmt.Errorf("deploy mode must be ad-hoc")
@@ -199,6 +218,17 @@ func BuildTemplateInstall(req Request, resolve Resolver, varStdin bool) (Command
 		}
 		args = append(args, "--var-stdin")
 	} else {
+		// R03: a VERIFIED-unsupported CLI no longer receives secret variable
+		// values on the argv by default — refuse unless the operator opted
+		// into the legacy transport. Empty values carry no secret and keep
+		// the compatibility path.
+		if !legacySecretArgVAllowed() {
+			for _, key := range keys {
+				if req.Vars[key] != "" {
+					return Command{}, Server{}, "", errLegacySecretArgV
+				}
+			}
+		}
 		for _, key := range keys {
 			value := req.Vars[key]
 			args = append(args, "--var", key+"="+value)

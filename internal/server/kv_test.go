@@ -48,7 +48,9 @@ func (k *kvRunner) kvCalls() [][]string {
 
 // newKVServer builds a server whose CLI is the given runner. CLIInstalled is
 // injected so the tests are hermetic — they must pass with no `teploy` binary
-// on PATH.
+// on PATH. The argv-construction tests below drive the LEGACY kv transport,
+// so they opt into it explicitly (R03); the transport-policy tests that need
+// the refusal keep the default and are marked as such.
 func newKVServer(t *testing.T, k *kvRunner) *Server {
 	t.Helper()
 	return New(Config{
@@ -57,6 +59,14 @@ func newKVServer(t *testing.T, k *kvRunner) *Server {
 		CLIInstalled: func() bool { return true },
 		CLIRunner:    k.run,
 	})
+}
+
+// newKVServerLegacyArgV is newKVServer with the R03 operator opt-in that
+// re-enables the legacy argv transport for CLIs without `kv set --stdin`.
+func newKVServerLegacyArgV(t *testing.T, k *kvRunner) *Server {
+	t.Helper()
+	t.Setenv("TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV", "1")
+	return newKVServer(t, k)
 }
 
 func indexOf(args []string, want string) int {
@@ -324,7 +334,7 @@ func TestAppKV_GetTrimsOnlyTheCommandsOwnNewline(t *testing.T) {
 
 func TestAppKV_SetPassesTTLAndPositionalsInOrder(t *testing.T) {
 	k := &kvRunner{}
-	s := newKVServer(t, k)
+	s := newKVServerLegacyArgV(t, k)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/apps/prod/web/kv",
 		strings.NewReader(`{"key":"flags/beta","value":"on","ttl":60}`))
@@ -354,7 +364,7 @@ func TestAppKV_SetPassesTTLAndPositionalsInOrder(t *testing.T) {
 
 func TestAppKV_SetWithoutTTLOmitsTheFlag(t *testing.T) {
 	k := &kvRunner{}
-	s := newKVServer(t, k)
+	s := newKVServerLegacyArgV(t, k)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/apps/prod/web/kv",
 		strings.NewReader(`{"key":"flags/beta","value":"on"}`))
@@ -513,6 +523,7 @@ func TestKVNotSet_MatchesOnlyTheExactCLIMessage(t *testing.T) {
 // VALID request on each route and asserts the CLI was invoked with the right
 // kv verb, which is false the moment a route stops being dispatched.
 func TestAppKV_SEAM_EveryRouteReachesItsHandler(t *testing.T) {
+	t.Setenv("TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV", "1")
 	cases := []struct {
 		name, method, target, body string
 		wantVerb                   string
@@ -547,5 +558,27 @@ func TestAppKV_SEAM_EveryRouteReachesItsHandler(t *testing.T) {
 				t.Errorf("expected verb %q in the CLI args, got %v", c.wantVerb, calls[0])
 			}
 		})
+	}
+}
+
+// R03: with a CLI that verifiably lacks `kv set --stdin`, a nonempty value is
+// REFUSED unless the operator opted into the legacy argv transport.
+func TestAppKV_SetRefusesSecretArgVWithoutOptIn(t *testing.T) {
+	k := &kvRunner{}
+	s := newKVServer(t, k) // no TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV
+
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/prod/web/kv",
+		strings.NewReader(`{"key":"flags/beta","value":"hunter2"}`))
+	rec := httptest.NewRecorder()
+	s.handleAppAction(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 refusal, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if calls := k.kvCalls(); len(calls) != 0 {
+		t.Fatalf("no kv subprocess may run for a refused value, got %v", calls)
+	}
+	if strings.Contains(rec.Body.String(), "hunter2") {
+		t.Fatal("refusal must not echo the value")
 	}
 }

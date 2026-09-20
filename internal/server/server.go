@@ -252,8 +252,11 @@ func New(config Config) *Server {
 	// when the installed CLI has it. F015: the probe reports unverified
 	// states as errors, and Build fails closed for secret-bearing installs
 	// rather than caching a transient failure as "unsupported" (argv
-	// fallback only for a VERIFIED unsupported CLI).
+	// fallback only for a VERIFIED unsupported CLI). R03: a verified
+	// unsupported CLI refuses secret values outright unless the operator
+	// opted into the legacy argv transport.
 	operation.SetVarStdinSupport(cli.VarStdinSupport)
+	operation.SetLegacySecretArgVAllowed(cli.LegacySecretArgVAllowed)
 	s.operations, s.operationInitErr = operation.New(config.DataDir, operation.Options{
 		MaxEvents:          config.OperationMaxEvents,
 		MaxJournalBytes:    config.OperationMaxJournalBytes,

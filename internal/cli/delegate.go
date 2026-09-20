@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -473,10 +474,12 @@ func EnvList(server, user, app string) (interface{}, error) {
 // EnvSet sets an environment variable. When the installed CLI supports the
 // secret-stdin contract (`env set KEY --stdin`, UPSTREAM-1), the value
 // travels on the process's stdin instead of the argv, where it would be
-// visible to every local process (A11); an older CLI keeps the legacy argv
-// path so an upgrade boundary degrades instead of breaking. F015: a probe
-// that cannot establish an answer fails closed rather than silently
-// selecting the argv transport.
+// visible to every local process (A11). F015: a probe that cannot establish
+// an answer fails closed rather than silently selecting the argv transport.
+// R03: a VERIFIED-unsupported CLI is no longer a silent argv fallback either
+// — secret-bearing values are refused unless the operator explicitly accepts
+// the process-list exposure via TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV=1.
+// Empty values keep the legacy path: they carry no secret.
 func EnvSet(ctx context.Context, server, user, app, key, value string) (*Result, error) {
 	supported, err := EnvStdinSupport()
 	if err != nil {
@@ -487,9 +490,24 @@ func EnvSet(ctx context.Context, server, user, app, key, value string) (*Result,
 		args = append(args, userArgs(user)...)
 		return RunWithStdin(ctx, value, args...)
 	}
+	if value != "" && !LegacySecretArgVAllowed() {
+		return nil, ErrLegacySecretArgV
+	}
 	args := []string{"env", "set", fmt.Sprintf("%s=%s", key, value), "--host", server, "--app", app}
 	args = append(args, userArgs(user)...)
 	return RunChecked(args...)
+}
+
+// ErrLegacySecretArgV reports that a secret-bearing write cannot proceed
+// safely: the installed CLI lacks the stdin contract and the operator has
+// not accepted argv exposure (R03). The message deliberately names the
+// remedy, never the value.
+var ErrLegacySecretArgV = errors.New("the installed teploy CLI cannot receive secret values safely (no --stdin support); upgrade the CLI, or set TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV=1 to deliberately accept process-list exposure")
+
+// LegacySecretArgVAllowed reports the explicit operator opt-in that
+// re-enables secret values on the argv for CLIs without the stdin contract.
+func LegacySecretArgVAllowed() bool {
+	return os.Getenv("TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV") == "1"
 }
 
 // EnvUnset removes an environment variable.
@@ -603,16 +621,29 @@ func IsInstalled() bool {
 // The CLI's stdin contract (`env set KEY --stdin`, `kv set KEY --stdin`,
 // `template install --var-stdin`) removed secrets from the argv. Dash shells
 // out to whatever teploy is on PATH, so each call site probes whether the
-// installed CLI knows the flag and falls back to the legacy argv path when a
-// VERIFIED probe says it doesn't — a hard requirement on the new flag would
-// break every install at the CLI upgrade boundary.
+// installed CLI knows the flag.
 //
 // F015: only verified probe outcomes are cached. A probe that could not run
 // (missing binary, timeout, non-zero help exit) is NOT cached as
 // "unsupported" — a transient failure previously selected the legacy argv
 // transport forever after, silently putting secret values back on the
-// process list. An unverified probe now fails closed for secret-bearing
-// writes: the operator retries, and no secret travels by argv.
+// process list. An unverified probe fails closed for secret-bearing writes.
+//
+// R48: the probe subprocess runs under its own short deadline (never the
+// 20-minute delegate ceiling), waiters no longer block behind a mutex held
+// across the subprocess (single-flight result sharing instead), and a
+// verified answer is cached against the resolved executable's identity plus
+// a bounded TTL — replacing or upgrading the CLI refreshes the capability
+// without a dashboard restart.
+
+// probeTimeout bounds one capability probe subprocess. `--help` answers in
+// milliseconds; anything past this is a hung binary.
+const probeTimeout = 5 * time.Second
+
+// probeCacheTTL bounds how long a verified capability answer stays fresh.
+// Re-probes are cheap; a stale "unsupported" answer must not outlive a CLI
+// upgrade by more than this.
+const probeCacheTTL = time.Hour
 
 // probeFlagVerified runs `teploy <args...> --help` and reports whether the
 // flag appears in its usage text. The second return is FALSE when the probe
@@ -621,35 +652,81 @@ func probeFlagVerified(flag string, args ...string) (supported, verified bool) {
 	if !IsInstalled() {
 		return false, false
 	}
-	result, err := Run(append(append([]string{}, args...), "--help")...)
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	result, err := RunContext(ctx, append(append([]string{}, args...), "--help")...)
 	if err != nil || result.ExitCode != 0 {
 		return false, false
 	}
 	return strings.Contains(result.Stdout, flag) || strings.Contains(result.Stderr, flag), true
 }
 
+// cliIdentity fingerprints the resolved teploy executable so a replaced or
+// upgraded binary invalidates cached capability answers (R48).
+func cliIdentity() string {
+	path, err := exec.LookPath("teploy")
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return path
+	}
+	return fmt.Sprintf("%s:%d:%d", path, info.Size(), info.ModTime().UnixNano())
+}
+
 // secretFlagProbe caches one flag probe's VERIFIED outcome; unverified
 // attempts are retried on the next call instead of being frozen.
 type secretFlagProbe struct {
-	flag      string
-	args      []string
+	flag string
+	args []string
+
 	mu        sync.Mutex
 	decided   bool
 	supported bool
+	identity  string
+	checkedAt time.Time
+	// checking/inflight implement single-flight: concurrent callers share
+	// one probe result instead of queueing on a mutex held across the
+	// subprocess (R48).
+	checking bool
+	inflight chan struct{}
 }
 
 func (p *secretFlagProbe) check() (bool, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.decided {
-		return p.supported, nil
+	for {
+		p.mu.Lock()
+		identity := cliIdentity()
+		if p.decided && p.identity == identity && time.Since(p.checkedAt) < probeCacheTTL {
+			supported := p.supported
+			p.mu.Unlock()
+			return supported, nil
+		}
+		if p.checking {
+			done := p.inflight
+			p.mu.Unlock()
+			<-done // bounded by the probe's own 5s deadline
+			continue
+		}
+		p.checking = true
+		p.inflight = make(chan struct{})
+		p.mu.Unlock()
+
+		supported, verified := probeFlagVerified(p.flag, p.args...)
+
+		p.mu.Lock()
+		p.checking = false
+		close(p.inflight)
+		if verified {
+			p.decided, p.supported = true, supported
+			p.identity, p.checkedAt = identity, time.Now()
+		}
+		p.mu.Unlock()
+		if !verified {
+			return false, fmt.Errorf("cannot verify whether the installed teploy CLI supports %s (probe did not complete)", p.flag)
+		}
+		return supported, nil
 	}
-	supported, verified := probeFlagVerified(p.flag, p.args...)
-	if !verified {
-		return false, fmt.Errorf("cannot verify whether the installed teploy CLI supports %s (probe did not complete)", p.flag)
-	}
-	p.decided, p.supported = true, supported
-	return supported, nil
 }
 
 var (

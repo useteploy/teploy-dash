@@ -344,6 +344,10 @@ func TestStartupRecoveryResolvesCancelRequested(t *testing.T) {
 
 func TestSecretRedactionInRecordsEventsAndErrors(t *testing.T) {
 	const secret = "super-secret-token"
+	// The test drives the legacy argv transport (varStdinSupport default is
+	// "unsupported, verified"); R03 requires the explicit opt-in for it.
+	SetLegacySecretArgVAllowed(func() bool { return true })
+	t.Cleanup(func() { SetLegacySecretArgVAllowed(func() bool { return false }) })
 	dir := t.TempDir()
 	manager := newTestManager(t, dir, 100, func(_ context.Context, _ Command, emit func(Stream, string)) (int, error) {
 		emit(StreamStdout, "connecting with "+secret)

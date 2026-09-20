@@ -331,7 +331,8 @@ func (s *Server) handleKVSet(w http.ResponseWriter, r *http.Request, serverName,
 	// the runner can feed it. F015: a probe that cannot establish an answer
 	// fails closed — a secret value must not silently take the argv
 	// transport because a transient probe failure was cached as
-	// "unsupported".
+	// "unsupported". R03: a VERIFIED-unsupported CLI refuses nonempty values
+	// unless the operator opted into the legacy argv transport.
 	stdinSupported, probeErr := cli.KVStdinSupport()
 	if probeErr != nil {
 		writeErrorStatus(w, probeErr.Error()+"; retry the request rather than exposing the value on the process list", http.StatusBadGateway)
@@ -340,6 +341,10 @@ func (s *Server) handleKVSet(w http.ResponseWriter, r *http.Request, serverName,
 	if stdinSupported {
 		flagArgs = append(flagArgs, "--stdin")
 		s.kvRunStdin(w, r, serverName, appName, accessory, flagArgs, body.Key, body.Value)
+		return
+	}
+	if body.Value != "" && !cli.LegacySecretArgVAllowed() {
+		writeErrorStatus(w, cli.ErrLegacySecretArgV.Error(), http.StatusBadGateway)
 		return
 	}
 	if _, err := s.cliKVRun(r.Context(), serverName, appName, accessory, "set", flagArgs, body.Key, body.Value); err != nil {

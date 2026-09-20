@@ -132,6 +132,14 @@ func TestTemplateInstallVarStdin(t *testing.T) {
 		t.Fatalf("stdin payload = %v", decoded)
 	}
 
+	// R03: without the opt-in, a nonempty secret on an unsupported CLI is
+	// refused outright.
+	if _, _, _, err := BuildTemplateInstall(req, testResolver, false); err == nil {
+		t.Fatal("legacy argv transport must refuse secret values without the operator opt-in")
+	}
+	// With the explicit opt-in the documented compatibility path applies.
+	SetLegacySecretArgVAllowed(func() bool { return true })
+	t.Cleanup(func() { SetLegacySecretArgVAllowed(func() bool { return false }) })
 	legacy, _, _, err := BuildTemplateInstall(req, testResolver, false)
 	if err != nil {
 		t.Fatal(err)
