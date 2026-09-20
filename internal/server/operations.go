@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/operation"
@@ -232,21 +233,38 @@ func (s *Server) handleOperationEvents(w http.ResponseWriter, r *http.Request, i
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	writeEvents := func(events []operation.Event) error {
+	// R60: every write carries a deadline (a non-reading client cannot pin
+	// the handler), the stream opens with a comment frame, and a heartbeat
+	// keeps proxies from dropping a silent connection.
+	controller := http.NewResponseController(w)
+	writeRaw := func(frame []byte) bool {
+		// A deadline is best-effort: test recorders (and exotic handlers)
+		// may not support instrumentation — only a WRITE failure aborts.
+		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if _, err := w.Write(frame); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeRaw([]byte(": connected\n\n")) {
+		return
+	}
+
+	writeEvents := func(events []operation.Event) bool {
 		for _, event := range events {
 			data, err := json.Marshal(event)
 			if err != nil {
-				return err
+				return false
 			}
-			if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.Type, data); err != nil {
-				return err
+			if !writeRaw([]byte(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.Type, data))) {
+				return false
 			}
 			lastSequence = event.Sequence
 		}
-		flusher.Flush()
-		return nil
+		return true
 	}
-	if err := writeEvents(replay); err != nil {
+	if !writeEvents(replay) {
 		return
 	}
 	if terminal {
@@ -254,17 +272,29 @@ func (s *Server) handleOperationEvents(w http.ResponseWriter, r *http.Request, i
 		// terminal histories — the client no longer has to guess from a
 		// refetched snapshot and close early (losing replayed output) or
 		// reconnect forever when the retained history is empty.
-		if _, err := fmt.Fprint(w, "event: replay-complete\ndata: {\"terminal\":true}\n\n"); err != nil {
-			return
-		}
-		flusher.Flush()
+		writeRaw([]byte("event: replay-complete\ndata: {\"terminal\":true}\n\n"))
 		return
 	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case _, open := <-notifications:
 			events, err := s.operations.EventsAfter(id, lastSequence)
-			if err != nil || writeEvents(events) != nil || !open {
+			if err != nil || !writeEvents(events) || !open {
+				// R59: the notification channel closes when the operation
+				// finished and its subscribers were released — the retained
+				// replay is complete, so say so instead of dropping the
+				// connection without the marker (a reconnecting client
+				// could otherwise close on a terminal snapshot before the
+				// final output is replayed).
+				if err == nil && !open {
+					writeRaw([]byte("event: replay-complete\ndata: {\"terminal\":true}\n\n"))
+				}
+				return
+			}
+		case <-heartbeat.C:
+			if !writeRaw([]byte(": heartbeat\n\n")) {
 				return
 			}
 		case <-r.Context().Done():

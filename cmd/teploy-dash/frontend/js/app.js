@@ -1147,9 +1147,15 @@ document.addEventListener('alpine:init', () => {
       this.source = source;
       source.onopen = () => { this.connected = true; };
       source.onerror = () => { this.connected = false; };
-      source.onmessage = (e) => {
+      // R57: the server frames complete logical lines as JSON `log` events
+      // (arbitrary chunk boundaries no longer become fake lines) and
+      // reports stream failures as an explicit `stream-error` event.
+      source.addEventListener('log', e => {
         if (this.paused) return;
-        this.lines.push(e.data);
+        let line;
+        try { line = (JSON.parse(e.data) || {}).line; } catch { line = '[invalid log event]'; }
+        if (typeof line !== 'string') return;
+        this.lines.push(line);
         if (this.lines.length > 5000) this.lines = this.lines.slice(-2500);
         if (this.autoScroll) {
           this.$nextTick(() => {
@@ -1157,7 +1163,12 @@ document.addEventListener('alpine:init', () => {
             if (viewer) viewer.scrollTop = viewer.scrollHeight;
           });
         }
-      };
+      });
+      source.addEventListener('stream-error', e => {
+        let message = 'log stream failed';
+        try { message = (JSON.parse(e.data) || {}).error || message; } catch {}
+        this.lines.push(`[ ${message} ]`);
+      });
     },
 
     disconnect() {

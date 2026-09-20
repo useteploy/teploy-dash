@@ -2103,6 +2103,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -2113,26 +2114,98 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	pw := &sseWriter{w: w, flusher: flusher}
-	remote.StreamLogs(ctx, srv, appName, process, lines, pw) //nolint:errcheck
+	// R57: arbitrary writer chunks are reassembled into logical lines and
+	// emitted as JSON payloads (a chunk split mid-line, or a carriage
+	// return inside one, used to become multiple fake log entries). R60:
+	// every frame rides a per-write deadline and the stream starts with an
+	// explicit comment frame; stream failures surface as a typed
+	// stream-error event instead of a silent close.
+	stream := newSSELogStream(w, flusher)
+	if err := stream.writeFrame([]byte(": connected\n\n")); err != nil {
+		return
+	}
+	if err := remote.StreamLogs(ctx, srv, appName, process, lines, stream); err != nil && ctx.Err() == nil {
+		payload, _ := json.Marshal(map[string]string{"error": "log stream failed: " + err.Error()})
+		_ = stream.writeFrame(append(append([]byte("event: stream-error\ndata: "), payload...), '\n', '\n'))
+	}
 }
 
-// sseWriter wraps http.ResponseWriter as an io.Writer that formats SSE events.
-type sseWriter struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
+// sseLogStream frames SSH output as SSE. It reassembles writer chunks into
+// complete logical lines (R57) and bounds every write with a deadline so a
+// non-reading client cannot pin the handler (R60).
+type sseLogStream struct {
+	w          http.ResponseWriter
+	flusher    http.Flusher
+	controller *http.ResponseController
+	pending    []byte
 }
 
-func (s *sseWriter) Write(p []byte) (int, error) {
-	lines := strings.Split(strings.TrimRight(string(p), "\n"), "\n")
-	for _, line := range lines {
-		_, err := s.w.Write([]byte("data: " + line + "\n\n"))
-		if err != nil {
-			return 0, err
-		}
+func newSSELogStream(w http.ResponseWriter, flusher http.Flusher) *sseLogStream {
+	return &sseLogStream{w: w, flusher: flusher, controller: http.NewResponseController(w)}
+}
+
+const (
+	sseWriteDeadline = 10 * time.Second
+	sseMaxLogLine    = 64 << 10
+)
+
+func (s *sseLogStream) writeFrame(frame []byte) error {
+	// Best-effort deadline: unsupported instrumentation (test recorders)
+	// must not kill the stream — only a WRITE failure aborts.
+	_ = s.controller.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	if _, err := s.w.Write(frame); err != nil {
+		return err
 	}
 	s.flusher.Flush()
-	return len(p), nil
+	return nil
+}
+
+func (s *sseLogStream) emitLine(line string) error {
+	payload, err := json.Marshal(map[string]string{"line": line})
+	if err != nil {
+		return err
+	}
+	frame := append(append([]byte("event: log\ndata: "), payload...), '\n', '\n')
+	return s.writeFrame(frame)
+}
+
+// Write implements io.Writer for the SSH producer, reassembling arbitrary
+// chunks into logical lines (R57): a line split across writes stays one
+// event; CRLF and lone CR are treated as line breaks, never interpolated
+// into the SSE framing.
+func (s *sseLogStream) Write(p []byte) (int, error) {
+	consumed := 0
+	for len(p) > 0 {
+		nl := bytes.IndexByte(p, '\n')
+		cr := bytes.IndexByte(p, '\r')
+		take, sepLen := len(p), 0
+		if nl >= 0 && (cr < 0 || nl < cr) {
+			take, sepLen = nl, 1
+		} else if cr >= 0 {
+			take = cr
+			sepLen = 1
+			if nl == cr+1 {
+				sepLen = 2 // CRLF is one break
+			}
+		}
+		if len(s.pending)+take > sseMaxLogLine {
+			return consumed, errors.New("log line exceeds the streaming budget")
+		}
+		s.pending = append(s.pending, p[:take]...)
+		consumed += take
+		p = p[take:]
+		if sepLen == 0 {
+			break // incomplete tail; wait for the next chunk
+		}
+		line := string(s.pending)
+		s.pending = s.pending[:0]
+		p = p[sepLen:]
+		consumed += sepLen
+		if err := s.emitLine(line); err != nil {
+			return consumed, err
+		}
+	}
+	return consumed, nil
 }
 
 // ── Templates ────────────────────────────────────────────────────────────

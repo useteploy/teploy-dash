@@ -26,6 +26,8 @@ document.addEventListener('alpine:init', () => {
     statusFilter: '',
     _timer: null,
     _alive: false,
+    _loadGeneration: 0,
+    _loadingRequest: false,
 
     async init() {
       // A50: navigating away during the initial load destroys the component
@@ -39,22 +41,35 @@ document.addEventListener('alpine:init', () => {
       // discovered work started elsewhere until a manual refresh).
       this._timer = setInterval(() => {
         if (document.visibilityState !== 'visible') return;
-        this.load();
+        if (!this._loadingRequest) this.load();
       }, 3000);
     },
     destroy() {
       this._alive = false;
+      this._loadGeneration++; // R61: in-flight responses are stale on destroy
       if (this._timer) clearInterval(this._timer);
     },
 
+    // R61: a generation + captured filter guard the publish step — a slow
+    // response for an old filter can no longer replace a newer filter's
+    // list, and overlapping polls cannot interleave stale data.
     async load() {
+      const generation = ++this._loadGeneration;
+      const filter = this.statusFilter;
+      this._loadingRequest = true;
       try {
-        const q = this.statusFilter ? `?status=${this.statusFilter}` : '';
-        this.ops = (await api.get(`/api/operations${q}`)) || [];
+        const q = filter ? `?status=${encodeURIComponent(filter)}` : '';
+        const ops = (await api.get(`/api/operations${q}`)) || [];
+        if (!this._alive || generation !== this._loadGeneration || filter !== this.statusFilter) return;
+        this.ops = ops;
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this._alive && generation === this._loadGeneration) showToast(e.message, 'error');
+      } finally {
+        if (generation === this._loadGeneration) {
+          this._loadingRequest = false;
+          if (this._alive) this.loading = false;
+        }
       }
-      this.loading = false;
     },
 
     open(op) {
@@ -92,6 +107,7 @@ document.addEventListener('alpine:init', () => {
     destroy() {
       this._alive = false;
       if (this._es) this._es.close();
+      this._es = null; // R59: late promises check _es identity, never resurrect it
     },
 
     // SSE: replays the full event history, then follows live. Status events
@@ -104,8 +120,22 @@ document.addEventListener('alpine:init', () => {
       const source = new EventSource(`/api/operations/${id}/events`);
       this._es = source;
       const maxLines = 5000;
+      // R58: ONE defensive decoder for every payload-bearing event — a
+      // malformed frame renders a visible marker instead of throwing out
+      // of the listener.
+      const decodeEvent = event => {
+        try {
+          const value = JSON.parse(event.data);
+          if (!value || typeof value.data !== 'string') throw new Error('invalid event');
+          return value;
+        } catch {
+          this.lines.push({ text: '[an invalid event was received]\n', cls: 'op-line-err' });
+          return null;
+        }
+      };
       const append = (e, cls) => {
-        const ev = JSON.parse(e.data);
+        const ev = decodeEvent(e);
+        if (!ev) return;
         // Events are line-based with the newline stripped (bufio.Scanner);
         // re-add it so the pre-wrap log viewer renders one line per event.
         this.lines.push({ text: ev.data + '\n', cls });
@@ -119,15 +149,22 @@ document.addEventListener('alpine:init', () => {
       };
       source.addEventListener('stdout', e => { if (this._es === source) append(e, ''); });
       source.addEventListener('stderr', e => { if (this._es === source) append(e, 'op-line-err'); });
+      // R58: explicit gap events are rendered as persistent warnings — the
+      // backend emits them for retention truncation and lost output; hiding
+      // them made truncated history look complete.
+      source.addEventListener('gap', e => { if (this._es === source) append(e, 'op-line-err'); });
       source.addEventListener('status', e => {
         if (this._es !== source) return;
-        let status = '';
-        try { status = (JSON.parse(e.data) || {}).data || ''; } catch { return; }
-        if (!this.op || !status) return;
-        this.op = { ...this.op, status };
+        const value = decodeEvent(e);
+        if (!value || !this.op || !value.data) return;
+        this.op = { ...this.op, status: value.data };
       });
       // The server ends every terminal history with this marker: close AFTER
-      // the full replay, then take one authoritative snapshot (A53).
+      // the full replay, then take one authoritative snapshot (A53). R59: it
+      // is the ONLY close trigger — an error-path refetch of a terminal
+      // snapshot no longer closes the stream before missing terminal output
+      // has been replayed; EventSource's own Last-Event-ID reconnect keeps
+      // trying until the marker arrives.
       source.addEventListener('replay-complete', () => {
         if (this._es !== source) return;
         source.close();
@@ -136,15 +173,13 @@ document.addEventListener('alpine:init', () => {
         }).catch(() => {});
       });
       source.onerror = () => {
-        // Terminal operations close the stream server-side; anything else is
-        // a dropped connection — re-fetch the authoritative status instead of
-        // showing an indefinitely "running" operation. EventSource retries
-        // with Last-Event-ID on its own.
+        // R59: refresh the displayed status but do NOT close on a terminal
+        // snapshot — the retained replay may not have arrived yet. The
+        // replay-complete marker owns closure; EventSource retries on its
+        // own with Last-Event-ID.
         if (this._es !== source) return;
         api.get(`/api/operations/${encodeURIComponent(id)}`).then(op => {
-          if (this._es !== source) return;
-          this.op = op;
-          if (this.terminal()) source.close();
+          if (this._es === source) this.op = op;
         }).catch(() => {});
       };
     },

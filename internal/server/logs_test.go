@@ -112,3 +112,42 @@ func TestLogsRequireSessionJSON(t *testing.T) {
 		t.Fatalf("body = %s, want JSON unauthorized envelope", rec.Body.String())
 	}
 }
+
+// R57: writer chunks are reassembled into logical lines and framed as JSON
+// log events — a line split across two writes stays ONE event, and a
+// carriage return inside a chunk does not corrupt the SSE framing.
+func TestSSELogStreamFramesLogicalLines(t *testing.T) {
+	rec := httptest.NewRecorder()
+	stream := newSSELogStream(rec, rec)
+
+	chunks := []string{"hel", "lo\r\nworld", "\n", "tail without newline"}
+	for _, chunk := range chunks {
+		if _, err := stream.Write([]byte(chunk)); err != nil {
+			t.Fatalf("write %q: %v", chunk, err)
+		}
+	}
+	if err := stream.emitLine(string(stream.pending)); err != nil {
+		t.Fatal(err)
+	}
+
+	body := rec.Body.String()
+	want := []string{
+		"event: log\ndata: {\"line\":\"hello\"}\n\n",
+		"event: log\ndata: {\"line\":\"world\"}\n\n",
+		"event: log\ndata: {\"line\":\"tail without newline\"}\n\n",
+	}
+	for _, frame := range want {
+		if !strings.Contains(body, frame) {
+			t.Fatalf("missing frame %q in %q", frame, body)
+		}
+	}
+	if strings.Contains(body, "{\"line\":\"hel\"") || strings.Contains(body, "\r") {
+		t.Fatalf("chunk boundaries or CR leaked into framing: %q", body)
+	}
+
+	// An oversized line is refused, not silently split.
+	big := strings.Repeat("x", sseMaxLogLine+1)
+	if _, err := stream.Write([]byte(big)); err == nil {
+		t.Fatal("oversized line must be refused")
+	}
+}
