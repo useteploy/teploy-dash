@@ -39,15 +39,17 @@ func TestWriteRawJSON_LargeIntegersSurvive(t *testing.T) {
 	}
 }
 
-func TestWriteRawJSON_EmptyIsNullData(t *testing.T) {
+// R56: empty output from a --json command is a dependency failure (typed
+// 502), not a successful data:null — the old success hid broken delegates.
+func TestWriteRawJSON_EmptyIsADependencyError(t *testing.T) {
 	w := httptest.NewRecorder()
 	writeRawJSON(w, "   ")
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", w.Code)
 	}
-	if w.Body.String() != `{"data":null}`+"\n" {
-		t.Errorf("body = %q", w.Body.String())
+	if w.Body.String() == `{"data":null}`+"\n" {
+		t.Error("must not masquerade as successful null data")
 	}
 }
 

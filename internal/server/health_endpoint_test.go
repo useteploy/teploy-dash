@@ -27,8 +27,11 @@ func TestAppHealth_UnhealthyVerdictIsAnAnswerNotAnError(t *testing.T) {
 			return &cli.Result{Stdout: `{"prod":{"host":"192.0.2.10","user":"deploy"}}`}, nil
 		}
 		if strings.HasPrefix(joined, "health") {
-			// Non-zero exit AND a payload — exactly what the CLI does.
-			return &cli.Result{Stdout: verdict, ExitCode: 1}, errors.New("exit status 1")
+			// Non-zero exit AND a payload — exactly what the CLI does. The
+			// runner models the SUBPROCESS result; cliAppRun applies
+			// CheckExit, which turns the exit into a typed ExitStatusError
+			// the health branch can distinguish from transport failure (R51).
+			return &cli.Result{Stdout: verdict, ExitCode: 1}, nil
 		}
 		return nil, errors.New("unexpected command: " + joined)
 	}

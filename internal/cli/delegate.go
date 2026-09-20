@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -376,9 +377,22 @@ func CheckExit(result *Result) error {
 	return checkExit(result)
 }
 
-// checkExit converts a non-zero CLI exit into an error, preferring stderr, then
-// stdout, then a generic message. Split out for testability. The argv is
-// deliberately absent: argument vectors can carry secret values (A11).
+// ExitStatusError is a COMPLETED CLI run that exited non-zero (R51). It is
+// deliberately distinct from transport failures (timeout, cancellation,
+// output-limit, could-not-run): some commands print a valid machine verdict
+// on stdout and exit non-zero, and only this type may be interpreted as a
+// verdict-bearing result. The message never contains the argv (A11).
+type ExitStatusError struct {
+	Code    int
+	message string
+}
+
+func (e *ExitStatusError) Error() string { return e.message }
+
+// checkExit converts a non-zero CLI exit into an ExitStatusError, preferring
+// stderr, then stdout, then a generic message. Split out for testability.
+// The argv is deliberately absent: argument vectors can carry secret values
+// (A11).
 func checkExit(result *Result) error {
 	if result.ExitCode == 0 {
 		return nil
@@ -388,15 +402,19 @@ func checkExit(result *Result) error {
 		msg = strings.TrimSpace(result.Stdout)
 	}
 	if msg == "" {
-		return fmt.Errorf("teploy exited with code %d", result.ExitCode)
+		msg = fmt.Sprintf("teploy exited with code %d", result.ExitCode)
 	}
-	return errors.New(msg)
+	return &ExitStatusError{Code: result.ExitCode, message: msg}
 }
 
 // RunJSON executes a teploy CLI command with --json flag and parses output.
 // Non-JSON output on a zero exit is an error, not a passthrough string: the
 // caller expects a machine payload and silently returning the raw text made
-// "unknown/error" indistinguishable from a real answer (A30).
+// "unknown/error" indistinguishable from a real answer (A30). R55: decoding
+// uses json.Number so integers above 2^53 survive the interface{} round
+// trip (writeRawJSON fixed the byte-forwarding path; this is the helper
+// that still decoded through float64). R56: empty output is an error too —
+// a --json command that prints nothing did not answer.
 func RunJSON(args ...string) (interface{}, error) {
 	args = append(args, "--json")
 	result, err := Run(args...)
@@ -406,10 +424,24 @@ func RunJSON(args ...string) (interface{}, error) {
 	if result.ExitCode != 0 {
 		return nil, fmt.Errorf("command failed: %s", result.Stderr)
 	}
+	return decodeCLIJSON(result.Stdout)
+}
 
+// decodeCLIJSON decodes exactly one JSON value with number fidelity (R55).
+func decodeCLIJSON(raw string) (interface{}, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, errors.New("teploy returned no JSON output")
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	dec.UseNumber()
 	var data interface{}
-	if err := json.Unmarshal([]byte(result.Stdout), &data); err != nil {
+	if err := dec.Decode(&data); err != nil {
 		return nil, fmt.Errorf("teploy returned non-JSON output: %w", err)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, errors.New("teploy output must contain exactly one JSON value")
 	}
 	return data, nil
 }

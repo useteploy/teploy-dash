@@ -1828,15 +1828,22 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "health", "--json")
 		if err != nil {
-			// A failing health check exits non-zero AND prints its JSON verdict.
-			// That is an answer, not a transport failure — surface the verdict
-			// rather than an error banner, or an unhealthy app looks like a
-			// broken dashboard.
-			if result != nil && strings.TrimSpace(result.Stdout) != "" {
-				writeRawJSON(w, result.Stdout)
+			// R51: only a COMPLETED non-zero exit may be read as a verdict.
+			// The CLI prints its JSON health verdict and exits non-zero for
+			// an unhealthy app — that is an answer. A transport failure
+			// (timeout, cancellation, capture overflow) with partial stdout
+			// is NOT: the old branch accepted any nonempty stdout alongside
+			// any error, turning a timed-out command into a "healthy" 200.
+			var exited *cli.ExitStatusError
+			if !errors.As(err, &exited) {
+				writeErrorStatus(w, "health command did not complete: "+err.Error(), http.StatusBadGateway)
 				return
 			}
-			writeError(w, err.Error())
+			if result == nil || strings.TrimSpace(result.Stdout) == "" {
+				writeErrorStatus(w, "health command returned no verdict", http.StatusBadGateway)
+				return
+			}
+			writeRawJSON(w, result.Stdout)
 			return
 		}
 		writeRawJSON(w, result.Stdout)
@@ -2823,25 +2830,29 @@ func writeServerError(w http.ResponseWriter, err error) {
 	}
 }
 
-// lookupServerUserRole reads a server's configured SSH user + role from the
-// CLI's servers.yml (the source of truth, not the 60s fleet cache). Used to
-// preserve those fields on an edit that doesn't re-specify them.
-func (s *Server) lookupServerUserRole(name string) (user, role string) {
+// lookupServerRecord reads a server's configured host/SSH user/role from the
+// CLI's servers.yml (the source of truth, not the 60s fleet cache). R52: a
+// failed read is an ERROR — the caller must refuse the edit rather than
+// silently fall back to empty values (which fed root/default metadata into
+// the update path).
+func (s *Server) lookupServerRecord(name string) (host, user, role string, err error) {
 	result, err := cli.ServerList()
 	if err != nil {
-		return "", ""
+		return "", "", "", fmt.Errorf("server list failed: %w", err)
 	}
 	var raw map[string]struct {
+		Host string `json:"host"`
 		User string `json:"user"`
 		Role string `json:"role"`
 	}
 	if json.Unmarshal([]byte(result.Stdout), &raw) != nil {
-		return "", ""
+		return "", "", "", errors.New("server list returned unreadable output")
 	}
-	if srv, ok := raw[name]; ok {
-		return srv.User, srv.Role
+	srv, ok := raw[name]
+	if !ok {
+		return "", "", "", fmt.Errorf("server not found: %s", name)
 	}
-	return "", ""
+	return srv.Host, srv.User, srv.Role, nil
 }
 
 func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request) {
@@ -2859,6 +2870,12 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		// (UPSTREAM-2). The old remove+add emulation dropped tags/vpn_ip on
 		// every edit, was non-atomic across two processes, and its rollback
 		// could itself fail silently (A38).
+		//
+		// R52: rename and field updates must arrive as SEPARATE requests.
+		// PUT ran rename-then-update unconditionally: a failed update left
+		// the rename committed while the endpoint answered a generic error,
+		// and the client could not tell which identity survived. A mixed
+		// request is a 409; the UI sequences the two steps itself.
 		var body struct {
 			Name string `json:"name"`
 			Host string `json:"host"`
@@ -2873,9 +2890,16 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		if newName == "" {
 			newName = name
 		}
+		// The authoritative record must be READABLE before anything is
+		// changed (R52): a failed registry read used to degrade to empty
+		// user/role, silently queuing a root-default update.
+		exHost, exUser, exRole, err := s.lookupServerRecord(name)
+		if err != nil {
+			writeErrorStatus(w, err.Error(), http.StatusBadGateway)
+			return
+		}
 		// Preserve the configured SSH user/role when the form leaves a field
 		// blank — a silent downgrade back to root was the old failure mode.
-		exUser, exRole := s.lookupServerUserRole(name)
 		user := body.User
 		if user == "" {
 			user = exUser
@@ -2884,15 +2908,22 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 		if role == "" {
 			role = exRole
 		}
-		if newName != name {
+		renaming := newName != name
+		changingFields := body.Host != exHost || user != exUser || role != exRole
+		switch {
+		case renaming && changingFields:
+			writeErrorStatus(w, "rename and field updates must be separate requests (rename first, then edit the fields)", http.StatusConflict)
+			return
+		case renaming:
 			if _, err := cli.ServerRename(name, newName); err != nil {
 				writeServerError(w, err)
 				return
 			}
-		}
-		if _, err := cli.ServerUpdate(newName, body.Host, user, role); err != nil {
-			writeServerError(w, err)
-			return
+		default:
+			if _, err := cli.ServerUpdate(name, body.Host, user, role); err != nil {
+				writeServerError(w, err)
+				return
+			}
 		}
 		s.fleet.set(nil)
 		writeData(w, map[string]string{"status": "updated"})
@@ -3900,11 +3931,13 @@ func validEnvKey(k string) bool {
 // version mismatch, a stray warning on stdout, or corrupted output — so it is
 // reported as a typed 502 rather than concatenated raw into the response
 // body, which could itself produce invalid JSON (or, if the CLI output were
-// ever attacker-influenced, a response-shape injection).
+// ever attacker-influenced, a response-shape injection). R56: EMPTY output is
+// equally a 502 — a --json command that printed nothing did not answer, and
+// a data:null success hid the dependency failure.
 func writeRawJSON(w http.ResponseWriter, raw string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		writeData(w, nil)
+		writeErrorStatus(w, "delegated command returned no JSON result", http.StatusBadGateway)
 		return
 	}
 	// Forward the exact bytes: decoding into interface{} turns every number

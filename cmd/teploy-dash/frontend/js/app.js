@@ -1655,15 +1655,36 @@ document.addEventListener('alpine:init', () => {
     async saveEditServer() {
       const e = this.editingServer;
       if (!e || !e.name || !e.host) return;
+      const original = this.servers[e.originalName] || {};
       try {
-        await api.put(`/api/config/servers/${encodeURIComponent(e.originalName)}`, {
-          name: e.name, host: e.host, user: e.user, role: e.role,
-        });
+        // R52: the API requires rename and field updates as separate
+        // requests, so a change to BOTH sequences them here — rename first
+        // (carrying the unchanged fields), then the field update under the
+        // new name. A failure mid-sequence surfaces with the surviving
+        // identity already named in the toast, and loadAll() shows truth.
+        if (e.name !== e.originalName) {
+          await api.put(`/api/config/servers/${encodeURIComponent(e.originalName)}`, {
+            name: e.name,
+            host: original.host || e.host,
+            user: original.user || 'root',
+            role: original.role || 'app',
+          });
+          if (e.host !== (original.host || '') || e.user !== (original.user || 'root') || e.role !== (original.role || 'app')) {
+            await api.put(`/api/config/servers/${encodeURIComponent(e.name)}`, {
+              host: e.host, user: e.user, role: e.role,
+            });
+          }
+        } else {
+          await api.put(`/api/config/servers/${encodeURIComponent(e.originalName)}`, {
+            name: e.name, host: e.host, user: e.user, role: e.role,
+          });
+        }
         showToast('Server updated', 'success');
         this.editingServer = null;
         await this.loadAll();
       } catch (err) {
         showToast(err.message, 'error');
+        await this.loadAll();
       }
     },
 
