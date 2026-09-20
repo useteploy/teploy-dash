@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -59,6 +60,31 @@ func envInt64(name string, def int64) int64 {
 	return v
 }
 
+// envInt bounds an env count to the platform int range (R62): an envInt64
+// value above MaxInt32 would silently wrap on 32-bit targets and overflow
+// int on any target near the limit.
+func envInt(name string, def int) int {
+	v := envInt64(name, int64(def))
+	if v > math.MaxInt32 {
+		log.Printf("Warning: %s=%d exceeds the maximum; using %d", name, v, math.MaxInt32)
+		return math.MaxInt32
+	}
+	return int(v)
+}
+
+// durationFromDays converts whole days to a Duration with an explicit
+// overflow check (R62): an unbounded positive value used to wrap NEGATIVE,
+// and the operation manager interprets negative age as "retention
+// disabled" — an invalid setting silently became a dangerous one.
+func durationFromDays(name string, days int64) (time.Duration, error) {
+	const day = 24 * time.Hour
+	const maxDays = int64(math.MaxInt64) / int64(day)
+	if days < 0 || days > maxDays {
+		return 0, fmt.Errorf("%s must be between 0 and %d days", name, maxDays)
+	}
+	return time.Duration(days) * day, nil
+}
+
 func run() error {
 	port := flag.Int("port", 3456, "HTTP server port")
 	host := flag.String("host", "0.0.0.0", "HTTP server host")
@@ -78,14 +104,20 @@ func run() error {
 	// in the operation package; these envs override for chatty installs.
 	opJournalBytes := envInt64("TEPLOY_DASH_OPERATION_JOURNAL_BYTES", 0)
 	opHistoryDays := envInt64("TEPLOY_DASH_OPERATION_HISTORY_DAYS", 0)
-	opMaxOperations := int(envInt64("TEPLOY_DASH_MAX_OPERATIONS", 0))
+	opMaxOperations := envInt("TEPLOY_DASH_MAX_OPERATIONS", 0)
 	// Per-target admission budget (A12/A27): how many non-terminal operations
 	// may be queued for one server before further enqueues are rejected.
-	opMaxQueued := int(envInt64("TEPLOY_DASH_MAX_QUEUED_PER_TARGET", 0))
+	opMaxQueued := envInt("TEPLOY_DASH_MAX_QUEUED_PER_TARGET", 0)
 	// Global admission + execution bounds (R17): total live operations and
 	// simultaneous CLI executions across every target.
-	opMaxLive := int(envInt64("TEPLOY_DASH_MAX_LIVE_OPERATIONS", 0))
-	opMaxConcurrent := int(envInt64("TEPLOY_DASH_MAX_CONCURRENT_OPERATIONS", 0))
+	opMaxLive := envInt("TEPLOY_DASH_MAX_LIVE_OPERATIONS", 0)
+	opMaxConcurrent := envInt("TEPLOY_DASH_MAX_CONCURRENT_OPERATIONS", 0)
+	// R62: reject an unrepresentable retention age at startup instead of
+	// wrapping it negative (which disables retention).
+	opHistoryAge, historyErr := durationFromDays("TEPLOY_DASH_OPERATION_HISTORY_DAYS", opHistoryDays)
+	if historyErr != nil {
+		return historyErr
+	}
 
 	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
 	// nor a saved auth.json exist, the server starts in setup mode so the user
@@ -159,7 +191,9 @@ func run() error {
 	} else {
 		fileStore = store.NewFileStore(*dataDir)
 		if err := fileStore.InitErr(); err != nil {
-			log.Fatalf("file store unavailable in %s: %v", *dataDir, err)
+			// R39: return the error instead of log.Fatalf, so the deferred
+			// instance-lock release (and any future cleanup) still runs.
+			return fmt.Errorf("file store unavailable in %s: %w", *dataDir, err)
 		}
 		st = fileStore
 	}
@@ -172,7 +206,19 @@ func run() error {
 	// (index.html sits at "/", css/ and js/ at the expected URL paths).
 	uiFS, err := fs.Sub(frontendFS, "frontend")
 	if err != nil {
-		log.Fatalf("embed frontend: %v", err)
+		st.Close()
+		return fmt.Errorf("embed frontend: %w", err)
+	}
+
+	// R39: BIND the listener before any background service starts. A failed
+	// bind (port in use, bad address) previously raced monitors, restore
+	// schedules, and a possibly-running restore CLI child against an early
+	// return that skipped the normal cleanup sequence entirely.
+	addr := net.JoinHostPort(*host, strconv.Itoa(*port))
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		st.Close()
+		return fmt.Errorf("bind HTTP listener %s: %w", addr, err)
 	}
 
 	// Initialize HTTP server
@@ -192,7 +238,7 @@ func run() error {
 		Version:                  version,
 		Backend:                  backend,
 		OperationMaxJournalBytes: opJournalBytes,
-		OperationMaxHistoryAge:   time.Duration(opHistoryDays) * 24 * time.Hour,
+		OperationMaxHistoryAge:   opHistoryAge,
 		OperationMaxOperations:   opMaxOperations,
 		OperationMaxQueued:       opMaxQueued,
 		OperationMaxLive:         opMaxLive,
@@ -243,30 +289,32 @@ func run() error {
 		}
 	}()
 
-	// Start server
+	// Start the HTTP server on the pre-bound listener. A LATER failure
+	// (accept error, TLS misconfiguration) funnels through the same shutdown
+	// epilogue as a signal — it no longer bypasses runner joins and the
+	// store close (R39).
 	serverErrCh := make(chan error, 1)
 	go func() {
-		addr := net.JoinHostPort(*host, strconv.Itoa(*port))
 		log.Printf("teploy-dash listening on http://%s", addr)
-		if err := srv.ListenAndServe(addr); err != nil {
+		if err := srv.Serve(listener); err != nil {
 			serverErrCh <- err
 		}
 	}()
 
 	// Graceful shutdown: stop accepting HTTP traffic and drain in-flight
 	// requests FIRST, then stop background workers, then close storage last —
-	// so no in-flight handler or worker can touch a closed store.
+	// so no in-flight handler or worker can touch a closed store. R39: both
+	// exit paths (signal, listener failure) share this one epilogue.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	var runErr error
 	select {
 	case <-quit:
 		log.Println("Shutting down...")
-	case err := <-serverErrCh:
-		// A failed listener (port in use, bad bind address) is a startup
-		// error and must exit non-zero, not just log and return 0 (A39).
-		cleanupCancel()
-		return fmt.Errorf("HTTP server failed: %w", err)
+	case runErr = <-serverErrCh:
+		log.Printf("HTTP server failed: %v", runErr)
 	}
+	signal.Stop(quit)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -305,5 +353,5 @@ func run() error {
 	srv.DrainOperations(workerCtx)
 	workerCancel()
 	st.Close()
-	return nil
+	return runErr
 }

@@ -339,6 +339,21 @@ func (s *Server) ListenAndServe(addr string) error {
 	return nil
 }
 
+// Serve runs the HTTP server on an ALREADY-BOUND listener (R39): main binds
+// before starting background services, so a failed bind cannot leave
+// monitors, restore schedules, and cleanup goroutines racing an early exit.
+func (s *Server) Serve(ln net.Listener) error {
+	s.warmFleet()
+	srv := s.httpServer(ln.Addr().String())
+	s.httpSrvMu.Lock()
+	s.httpSrv = srv
+	s.httpSrvMu.Unlock()
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
 // Shutdown stops the HTTP server from accepting new connections and waits
 // (bounded by ctx) for in-flight requests to finish. Safe to call before
 // ListenAndServe has run (e.g. in tests) — it's then a no-op.
