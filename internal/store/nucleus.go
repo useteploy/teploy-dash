@@ -274,6 +274,11 @@ func scanRestoreTest(scan func(dest ...any) error) (RestoreTest, error) {
 	return t, nil
 }
 
+// SaveRestoreTest upserts configuration. R36: the last-result columns are
+// preserved from the CURRENT row inside the same statement when the target
+// identity is unchanged (and reset when it changed, F038) — the handler used
+// to round-trip stale Last* values through the API, letting a config save
+// overwrite a verification that completed while the edit was in flight.
 func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
@@ -289,9 +294,42 @@ func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 		   server = EXCLUDED.server, app = EXCLUDED.app, accessory = EXCLUDED.accessory,
 		   bucket = EXCLUDED.bucket, region = EXCLUDED.region,
 		   interval_hours = EXCLUDED.interval_hours, enabled = EXCLUDED.enabled,
-		   last_run_ms = EXCLUDED.last_run_ms, last_ok = EXCLUDED.last_ok,
-		   last_detail = EXCLUDED.last_detail, last_metric = EXCLUDED.last_metric,
-		   last_date = EXCLUDED.last_date, last_duration_ms = EXCLUDED.last_duration_ms`,
+		   last_run_ms = CASE WHEN restore_tests.server = EXCLUDED.server
+		                       AND restore_tests.app = EXCLUDED.app
+		                       AND restore_tests.accessory = EXCLUDED.accessory
+		                       AND restore_tests.bucket = EXCLUDED.bucket
+		                       AND restore_tests.region = EXCLUDED.region
+		                      THEN restore_tests.last_run_ms ELSE EXCLUDED.last_run_ms END,
+		   last_ok = CASE WHEN restore_tests.server = EXCLUDED.server
+		                   AND restore_tests.app = EXCLUDED.app
+		                   AND restore_tests.accessory = EXCLUDED.accessory
+		                   AND restore_tests.bucket = EXCLUDED.bucket
+		                   AND restore_tests.region = EXCLUDED.region
+		                  THEN restore_tests.last_ok ELSE EXCLUDED.last_ok END,
+		   last_detail = CASE WHEN restore_tests.server = EXCLUDED.server
+		                       AND restore_tests.app = EXCLUDED.app
+		                       AND restore_tests.accessory = EXCLUDED.accessory
+		                       AND restore_tests.bucket = EXCLUDED.bucket
+		                       AND restore_tests.region = EXCLUDED.region
+		                      THEN restore_tests.last_detail ELSE EXCLUDED.last_detail END,
+		   last_metric = CASE WHEN restore_tests.server = EXCLUDED.server
+		                       AND restore_tests.app = EXCLUDED.app
+		                       AND restore_tests.accessory = EXCLUDED.accessory
+		                       AND restore_tests.bucket = EXCLUDED.bucket
+		                       AND restore_tests.region = EXCLUDED.region
+		                      THEN restore_tests.last_metric ELSE EXCLUDED.last_metric END,
+		   last_date = CASE WHEN restore_tests.server = EXCLUDED.server
+		                     AND restore_tests.app = EXCLUDED.app
+		                     AND restore_tests.accessory = EXCLUDED.accessory
+		                     AND restore_tests.bucket = EXCLUDED.bucket
+		                     AND restore_tests.region = EXCLUDED.region
+		                    THEN restore_tests.last_date ELSE EXCLUDED.last_date END,
+		   last_duration_ms = CASE WHEN restore_tests.server = EXCLUDED.server
+		                            AND restore_tests.app = EXCLUDED.app
+		                            AND restore_tests.accessory = EXCLUDED.accessory
+		                            AND restore_tests.bucket = EXCLUDED.bucket
+		                            AND restore_tests.region = EXCLUDED.region
+		                           THEN restore_tests.last_duration_ms ELSE EXCLUDED.last_duration_ms END`,
 		t.ID, t.Server, t.App, t.Accessory, t.Bucket, t.Region, t.IntervalHours, t.Enabled,
 		lastRunMs, t.LastOK, t.LastDetail, t.LastMetric, t.LastDate, t.LastDurationMs,
 	)

@@ -221,12 +221,17 @@ func New(config Config) *Server {
 		}
 	}
 	if s.restore != nil {
-		// Restore-test runs go through the CLI delegate with --host <server>;
-		// non-root fleets also need --user, resolved the same way cliAppRun does.
-		s.restore.SetUserResolver(s.serverUser)
-		// The CLI treats --host as a raw address in app-scoped mode, so the
-		// alias must be resolved to the configured host first (A16).
-		s.restore.SetHostResolver(s.serverHost)
+		// R01: restore runs resolve ONE registered target through a
+		// fail-closed lookup — an unregistered alias or broken discovery
+		// fails the run instead of silently falling back to the alias as a
+		// hostname or the CLI's root user.
+		s.restore.SetTargetResolver(func(name string) (restoretest.Target, error) {
+			srv, err := s.lookupServerStrict(context.Background(), name)
+			if err != nil {
+				return restoretest.Target{}, err
+			}
+			return restoretest.Target{Host: srv.Host, User: srv.User}, nil
+		})
 	}
 	s.manifests, s.manifestInitErr = manifest.New(config.DataDir)
 	if s.manifestInitErr != nil {
@@ -1310,7 +1315,13 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 
 // collectFleetApps gathers app state from all servers in parallel.
 func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error) {
-	servers, err := s.resolveServers()
+	// R47: the whole-sweep deadline is created BEFORE discovery so the
+	// advertised 30s budget actually bounds the server-list lookup too —
+	// it previously started only after discovery completed.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	servers, err := s.resolveServers(ctx)
 	if err != nil {
 		// A discovery failure must not fall through to the local-state path
 		// (A34) — it would render a broken fleet as "local installation".
@@ -1318,8 +1329,13 @@ func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error
 	}
 
 	if len(servers) == 0 {
-		// Fall back to local state files when no servers configured.
-		localApps, _ := s.state.ListApps()
+		// Fall back to local state files when no servers configured. R49
+		// (partial): a failed local-state read is an error, not an empty
+		// success — the deployment list would silently lose every local app.
+		localApps, err := s.state.ListApps()
+		if err != nil {
+			return nil, fmt.Errorf("local deployment state unavailable: %w", err)
+		}
 		var apps []remote.AppState
 		for _, a := range localApps {
 			apps = append(apps, remote.AppState{
@@ -1333,11 +1349,6 @@ func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error
 		}
 		return apps, nil
 	}
-
-	// Bound the whole fleet refresh so a single slow/unreachable server can't
-	// stall the page (per-server SSH is also bounded in internal/ssh).
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	type result struct {
 		apps []remote.AppState
@@ -1376,12 +1387,14 @@ func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error
 // resolveServers returns server connections from the CLI's servers.yml via the CLI delegate.
 // A failure is an ERROR, not an empty list: callers must not mistake a broken
 // discovery (missing CLI, non-zero exit, malformed JSON) for an unconfigured
-// installation and fall back to local-state mode (A34).
-func (s *Server) resolveServers() ([]remote.ServerConn, error) {
+// installation and fall back to local-state mode (A34). R47: the caller's
+// context bounds the discovery subprocess too, so a canceled request stops
+// the lookup instead of running to the delegate ceiling.
+func (s *Server) resolveServers(ctx context.Context) ([]remote.ServerConn, error) {
 	if !s.cliInstalled() {
 		return nil, nil
 	}
-	result, err := s.runCLI(context.Background(), "server", "list", "--json")
+	result, err := s.runCLI(ctx, "server", "list", "--json")
 	if err != nil {
 		return nil, fmt.Errorf("listing servers from the teploy CLI: %w", err)
 	}
@@ -1417,12 +1430,31 @@ func (s *Server) resolveServers() ([]remote.ServerConn, error) {
 // than an error; the enqueue path re-resolves through the operation
 // resolver, which fails visibly.
 func (s *Server) serversBestEffort() []remote.ServerConn {
-	servers, err := s.resolveServers()
+	servers, err := s.resolveServers(context.Background())
 	if err != nil {
 		log.Printf("[fleet] server discovery failed: %v", err)
 		return nil
 	}
 	return servers
+}
+
+// lookupServerStrict resolves one registered server or fails. R01: restore
+// verification must never aim at an unregistered name; unlike
+// lookupServer/serversBestEffort this does not degrade to "unknown".
+func (s *Server) lookupServerStrict(ctx context.Context, name string) (remote.ServerConn, error) {
+	servers, err := s.resolveServers(ctx)
+	if err != nil {
+		return remote.ServerConn{}, fmt.Errorf("server discovery failed: %w", err)
+	}
+	for _, srv := range servers {
+		if srv.Name == name {
+			if srv.Host == "" {
+				return remote.ServerConn{}, fmt.Errorf("server %q has no configured host", name)
+			}
+			return srv, nil
+		}
+	}
+	return remote.ServerConn{}, fmt.Errorf("server not found: %s", name)
 }
 
 // lookupServer finds a server connection by name.
@@ -1459,19 +1491,35 @@ func (s *Server) serverHost(name string) string {
 // cliAppRun runs an app-scoped teploy subcommand, appending --host/--app and
 // --user (when the server has a non-root user). `parts` is the subcommand plus
 // any leading flags/positionals; flag order doesn't matter to cobra so trailing
-// flags like --json can be passed in parts.
-func (s *Server) cliAppRun(serverName, appName string, parts ...string) (*cli.Result, error) {
+// flags like --json can be passed in parts. R47: the caller's context bounds
+// both the server lookup and the subprocess, so a canceled HTTP request stops
+// the work instead of holding it to the delegate's ceiling.
+func (s *Server) cliAppRun(ctx context.Context, serverName, appName string, parts ...string) (*cli.Result, error) {
+	servers, err := s.resolveServers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("server discovery failed: %w", err)
+	}
+	var target *remote.ServerConn
+	for i := range servers {
+		if servers[i].Name == serverName {
+			target = &servers[i]
+			break
+		}
+	}
+	if target == nil {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
 	args := append([]string{}, parts...)
-	args = append(args, "--host", s.serverHost(serverName), "--app", appName)
-	if u := s.serverUser(serverName); u != "" {
-		args = append(args, "--user", u)
+	args = append(args, "--host", target.Host, "--app", appName)
+	if target.User != "" {
+		args = append(args, "--user", target.User)
 	}
 	// Route through the injected runner (defaults to the real CLI) rather than
 	// calling cli.RunChecked directly, so every app-scoped endpoint is
 	// testable — which is what Config.CLIRunner exists for. cli.CheckExit
 	// keeps RunChecked's rule that a non-zero exit is an error, so behavior is
 	// unchanged.
-	result, err := s.runCLI(context.Background(), args...)
+	result, err := s.runCLI(ctx, args...)
 	if err != nil {
 		return result, err
 	}
@@ -1607,7 +1655,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "log", "--json")
+		result, err := s.cliAppRun(r.Context(), serverName, appName, "log", "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1622,7 +1670,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "drift", "--json")
+		result, err := s.cliAppRun(r.Context(), serverName, appName, "drift", "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1636,7 +1684,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "stats", "--json")
+		result, err := s.cliAppRun(r.Context(), serverName, appName, "stats", "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1653,7 +1701,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "health", "--json")
+		result, err := s.cliAppRun(r.Context(), serverName, appName, "health", "--json")
 		if err != nil {
 			// A failing health check exits non-zero AND prints its JSON verdict.
 			// That is an answer, not a transport failure — surface the verdict
@@ -1689,7 +1737,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "accessory", "list", "--json")
+		result, err := s.cliAppRun(r.Context(), serverName, appName, "accessory", "list", "--json")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1745,7 +1793,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "lock")
+		result, err := s.cliAppRun(r.Context(), serverName, appName, "lock")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1758,7 +1806,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := s.cliAppRun(serverName, appName, "unlock")
+		result, err := s.cliAppRun(r.Context(), serverName, appName, "unlock")
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -1790,7 +1838,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 				case "stop", "start", "logs":
 					// Address {app}-{accessory} containers by name — resolvable
 					// from server state via --app/--user.
-					result, err := s.cliAppRun(serverName, appName, "accessory", sub, accName)
+					result, err := s.cliAppRun(r.Context(), serverName, appName, "accessory", sub, accName)
 					if err != nil {
 						writeError(w, err.Error())
 						return
@@ -3674,25 +3722,22 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "interval_hours must be between 1 and 8760", 400)
 			return
 		}
-		// Preserve the last result across config edits: the client only
-		// round-trips config fields, and an upsert that zeroed the result
-		// columns would show "never run" after every edit. F038: a RETARGETED
-		// test (server/app/accessory/bucket/region changed) keeps none of the
-		// old target's verdict — a newly selected target must not display
-		// "backup verified" before it has ever been checked.
+		// R01: a restore test may only target a REGISTERED server — reject
+		// at creation instead of failing (or worse, silently retargeting)
+		// at run time when the resolver fails closed.
+		if s.cliInstalled() {
+			if _, err := s.lookupServerStrict(r.Context(), body.Server); err != nil {
+				writeErrorStatus(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		// Configuration-only DTO (A24): the client never round-trips result
+		// fields. R36: Last* preservation happens INSIDE the store's
+		// save transaction, so a verification that completes while this
+		// edit is in flight can no longer be overwritten by a stale copy.
 		t := store.RestoreTest{
 			ID: body.ID, Server: body.Server, App: body.App, Accessory: body.Accessory,
 			Bucket: body.Bucket, Region: body.Region, IntervalHours: body.IntervalHours, Enabled: body.Enabled,
-		}
-		if prev, err := s.store.GetRestoreTest(t.ID); err == nil && prev != nil &&
-			prev.Server == t.Server && prev.App == t.App && prev.Accessory == t.Accessory &&
-			prev.Bucket == t.Bucket && prev.Region == t.Region {
-			t.LastRunAt = prev.LastRunAt
-			t.LastOK = prev.LastOK
-			t.LastDetail = prev.LastDetail
-			t.LastMetric = prev.LastMetric
-			t.LastDate = prev.LastDate
-			t.LastDurationMs = prev.LastDurationMs
 		}
 		if err := s.store.SaveRestoreTest(t); err != nil {
 			http.Error(w, err.Error(), 500)

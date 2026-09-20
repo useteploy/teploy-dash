@@ -16,12 +16,23 @@ func newTestRunner(t *testing.T, out string, cliErr error) (*Runner, store.Store
 	t.Helper()
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
+	installTestResolver(r)
 	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 		// cliErr models the CLI's non-zero EXIT (verdict-bearing per the
 		// documented verify-backup semantics), not a transport failure.
 		return out, "boom-stderr", cliErr, nil
 	}
 	return r, st
+}
+
+// installTestResolver gives a runner the fail-closed prod resolver (R01).
+func installTestResolver(r *Runner) {
+	r.SetTargetResolver(func(server string) (Target, error) {
+		if server == "prod" {
+			return Target{Host: "203.0.113.10", User: "root"}, nil
+		}
+		return Target{}, fmt.Errorf("server not found: %s", server)
+	})
 }
 
 func seedTest(t *testing.T, st store.Store) store.RestoreTest {
@@ -133,6 +144,7 @@ func TestStartSeedsBaselineAndSkipsImmediateRunForKnownTests(t *testing.T) {
 	ran := 0
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
+	installTestResolver(r)
 	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 		ran++
 		return `{"ok":true}`, "", nil, nil
@@ -169,6 +181,7 @@ func TestRunNow_TransportErrorBeatsLyingStdout(t *testing.T) {
 	out := `{"app":"myapp","ok":true,"metric":"tables=42","date":"20260710-040000","duration_ms":9500}`
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
+	installTestResolver(r)
 	var calls int32
 	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 		atomic.AddInt32(&calls, 1)
@@ -206,6 +219,7 @@ func TestRunNow_TransportErrorBeatsLyingStdout(t *testing.T) {
 	// either — swap in a failing store wrapper.
 	bad := &failingResultStore{Store: st}
 	r2 := New(bad)
+	installTestResolver(r2)
 	r2.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 		return `{"ok":false,"detail":"broken backup"}`, "", nil, nil
 	}
@@ -232,6 +246,7 @@ func TestRunNow_ConcurrentClaimReturnsBusyError(t *testing.T) {
 	st := store.NewFileStore(t.TempDir())
 	release := make(chan struct{})
 	r := New(st)
+	installTestResolver(r)
 	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
 		<-release
 		return `{"ok":true}`, "", nil, nil
@@ -267,4 +282,69 @@ func TestRunNow_ConcurrentClaimReturnsBusyError(t *testing.T) {
 	}
 	close(release)
 	<-done
+}
+
+// R01: an unregistered target must FAIL CLOSED — the CLI is never invoked
+// with the alias as a hostname or an empty (root-defaulting) user, and the
+// failed verdict is persisted for the test's unchanged identity.
+func TestRunNow_UnregisteredTargetFailsClosedWithoutCLICall(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	r := New(st)
+	called := false
+	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+		called = true
+		return `{"ok":true}`, "", nil, nil
+	}
+	r.SetTargetResolver(func(server string) (Target, error) {
+		return Target{}, fmt.Errorf("server not found: %s", server)
+	})
+	rt := seedTest(t, st)
+
+	got, err := r.RunNow(rt)
+	if err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	if called {
+		t.Fatal("CLI must not be invoked for an unregistered target")
+	}
+	if got.LastOK {
+		t.Fatal("unresolvable target must record a failed verification")
+	}
+	if !strings.Contains(got.LastDetail, "could not be resolved") {
+		t.Fatalf("detail should name the resolution failure, got %q", got.LastDetail)
+	}
+	saved, err := st.GetRestoreTest(rt.ID)
+	if err != nil {
+		t.Fatalf("saved: %v", err)
+	}
+	if saved.LastOK || !strings.Contains(saved.LastDetail, "could not be resolved") {
+		t.Fatalf("failure must persist, got ok=%v detail=%q", saved.LastOK, saved.LastDetail)
+	}
+}
+
+// R01: a resolver returning an empty user (the old silent root fallback) is
+// rejected just like a missing alias.
+func TestRunNow_EmptyUserTargetFailsClosed(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	r := New(st)
+	called := false
+	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+		called = true
+		return `{"ok":true}`, "", nil, nil
+	}
+	r.SetTargetResolver(func(server string) (Target, error) {
+		return Target{Host: "203.0.113.10", User: ""}, nil
+	})
+	rt := seedTest(t, st)
+
+	got, err := r.RunNow(rt)
+	if err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	if called {
+		t.Fatal("CLI must not be invoked without an explicit user")
+	}
+	if got.LastOK || !strings.Contains(got.LastDetail, "unavailable") {
+		t.Fatalf("expected closed failure, got ok=%v detail=%q", got.LastOK, got.LastDetail)
+	}
 }

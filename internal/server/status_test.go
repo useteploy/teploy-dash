@@ -115,18 +115,21 @@ func TestAppNamePatternMatchesCLIAppNames(t *testing.T) {
 // A38: a stale result is not current evidence — the monitor reads unknown,
 // and an all-unknown (or empty) fleet is never "operational".
 func TestStatusAPI_StaleAndUnknownNeverOperational(t *testing.T) {
-	s := statusTestServer(t, true)
-	// Age the seeded checks beyond any freshness window by rewriting them
-	// with old timestamps.
-	old := time.Now().Add(-2 * time.Hour)
-	if err := s.store.SaveCheck(store.CheckResult{MonitorID: "web", Status: "up", CheckedAt: old}); err != nil {
+	// R43 changed "latest" from last-appended to newest-CheckedAt, so this
+	// test now builds its own fixture: every check for "web" is old, which
+	// is the only way its NEWEST evidence can be stale. (The previous
+	// version appended one old check after the fixture's fresh one and
+	// relied on append-order masking — the exact defect R43 removed.)
+	st := store.NewFileStore(t.TempDir())
+	if err := st.SaveMonitor(store.Monitor{ID: "web", Name: "Web", Type: "http", Target: "https://internal.example.com/health", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := st.SaveCheck(store.CheckResult{MonitorID: "web", Status: "up", CheckedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{config: Config{PublicStatus: true}, store: st}
 
-	// Freshness uses the newest check: GetChecks returns newest-first, and
-	// the stale write above is now the latest for "web" (the fresh one from
-	// the fixture is older in file order but newer in time — so also verify
-	// via the aggregate instead of exact per-monitor states).
 	w := httptest.NewRecorder()
 	s.handleStatusAPI(w, httptest.NewRequest("GET", "/api/status", nil))
 	if w.Code != 200 {

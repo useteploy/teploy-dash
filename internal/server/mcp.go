@@ -247,7 +247,7 @@ func (b mcpBackend) AppAction(ctx context.Context, server, app, action string) (
 		if _, err := b.resolveServer(server); err != nil {
 			return "", err
 		}
-		result, err := b.s.cliAppRun(server, app, strings.Fields(action)...)
+		result, err := b.s.cliAppRun(ctx, server, app, strings.Fields(action)...)
 		if err != nil {
 			return "", err
 		}

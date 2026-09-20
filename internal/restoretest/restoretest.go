@@ -48,18 +48,16 @@ type runCLIFunc func(server, user, app, accessory, bucket, region string) (stdou
 type Runner struct {
 	store   store.Store
 	alerter *alert.Dispatcher
-	// userFor resolves the SSH user for a server name (from servers.yml via
-	// the dash server's cached list); nil/"" falls back to the CLI default.
-	userFor func(server string) string
-	// hostFor resolves a server ALIAS to its configured host/IP. The CLI's
-	// --host flag in app-scoped mode is a raw address, not a servers.yml key,
-	// so passing the alias fails with "no such host" whenever the two differ
-	// (A16). Nil falls back to the alias itself.
-	hostFor func(server string) string
-	runCLI  runCLIFunc
-	timers  map[string]*time.Ticker
-	stopChs map[string]chan struct{}
-	lastOK  map[string]bool // last known outcome per test (for transition alerts)
+	// resolveTarget resolves a server ALIAS to one registered host/user
+	// snapshot, FAILING when the alias is unknown or discovery is broken
+	// (R01). It replaces the old host/user callbacks, whose silent
+	// fallbacks (alias-as-host, empty user -> CLI root default) could aim a
+	// verification run at an unregistered host or an unintended user.
+	resolveTarget func(server string) (Target, error)
+	runCLI        runCLIFunc
+	timers        map[string]*time.Ticker
+	stopChs       map[string]chan struct{}
+	lastOK        map[string]bool // last known outcome per test (for transition alerts)
 	// running is the per-test single-flight claim (A25): a manual run and a
 	// scheduled tick (or a reload racing either) share one claim, so the
 	// same test never runs two expensive verifications at once.
@@ -68,6 +66,12 @@ type Runner struct {
 	// closes (A46).
 	wg sync.WaitGroup
 	mu sync.Mutex
+}
+
+// Target is one registered server's resolved host/user pair.
+type Target struct {
+	Host string
+	User string
 }
 
 // New creates a restore-test runner.
@@ -104,18 +108,13 @@ func (r *Runner) SetAlerter(d *alert.Dispatcher) {
 	r.alerter = d
 }
 
-// SetUserResolver installs the server-name -> SSH-user lookup.
-func (r *Runner) SetUserResolver(f func(server string) string) {
+// SetTargetResolver installs the fail-closed server-alias -> host/user
+// lookup (R01). The resolver must return an error for an unregistered alias
+// or a failed discovery; an empty host or user is rejected at run time.
+func (r *Runner) SetTargetResolver(f func(server string) (Target, error)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.userFor = f
-}
-
-// SetHostResolver installs the server-alias -> host/IP lookup (A16).
-func (r *Runner) SetHostResolver(f func(server string) string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.hostFor = f
+	r.resolveTarget = f
 }
 
 // Start loads all restore tests from the store and begins scheduling.
@@ -212,12 +211,13 @@ func (r *Runner) startTest(t store.RestoreTest) {
 	stopCh := make(chan struct{})
 	r.stopChs[t.ID] = stopCh
 	delete(r.timers, t.ID) // one-shot timers are owned by the goroutine below
+
+	// R38 (partial): count the goroutine's whole lifetime BEFORE releasing
+	// the lifecycle lock — an Add after Unlock could race a concurrent
+	// Stop's Wait observing zero and proceed to run against a closing store.
+	r.wg.Add(1)
 	r.mu.Unlock()
 
-	// F023: count the goroutine's WHOLE lifetime before launching it, so
-	// Stop's Wait can never observe zero while this scheduler is still
-	// about to start a run against the closing store.
-	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		// Interval-boundary runs are expensive (they download the backup and
@@ -325,23 +325,44 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 	}()
 
 	r.mu.Lock()
-	userFor := r.userFor
-	hostFor := r.hostFor
+	resolveTarget := r.resolveTarget
 	runCLI := r.runCLI
 	r.mu.Unlock()
 
-	user := ""
-	if userFor != nil {
-		user = userFor(t.Server)
-	}
-	host := t.Server
-	if hostFor != nil {
-		if resolved := hostFor(t.Server); resolved != "" {
-			host = resolved
+	// R01: resolve ONE registered target, ONCE, failing closed. A missing
+	// resolver, an unregistered alias, broken discovery, or an empty
+	// host/user is a failed verification — never a silent fallback to the
+	// alias-as-host or the CLI's root default, which could aim the run at
+	// an unintended target.
+	if resolveTarget == nil {
+		t.LastRunAt = time.Now()
+		t.LastOK = false
+		t.LastMetric, t.LastDate, t.LastDurationMs = "", "", 0
+		t.LastDetail = "restore target resolver unavailable"
+		applied, err := r.store.SaveRestoreTestResult(t.ID, t)
+		if err != nil || !applied {
+			log.Printf("[restoretest] unresolved target for %s and result not persisted (applied=%v err=%v)", t.ID, applied, err)
 		}
+		return t, nil
+	}
+	target, err := resolveTarget(t.Server)
+	if err != nil || target.Host == "" || target.User == "" {
+		t.LastRunAt = time.Now()
+		t.LastOK = false
+		t.LastMetric, t.LastDate, t.LastDurationMs = "", "", 0
+		reason := fmt.Sprintf("restore target %q is unavailable", t.Server)
+		if err != nil {
+			reason = fmt.Sprintf("restore target %q could not be resolved: %v", t.Server, err)
+		}
+		t.LastDetail = reason
+		applied, saveErr := r.store.SaveRestoreTestResult(t.ID, t)
+		if saveErr != nil || !applied {
+			log.Printf("[restoretest] unresolved target for %s; result not persisted (applied=%v err=%v)", t.ID, applied, saveErr)
+		}
+		return t, nil
 	}
 
-	stdout, stderr, _, err := runCLI(host, user, t.App, t.Accessory, t.Bucket, t.Region)
+	stdout, stderr, _, err := runCLI(target.Host, target.User, t.App, t.Accessory, t.Bucket, t.Region)
 
 	// A26: the verdict starts from a FRESH projection — failure branches
 	// must not inherit the previous run's metric/date/duration, and a

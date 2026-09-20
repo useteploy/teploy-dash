@@ -332,3 +332,71 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 		t.Error("deleted restore test resurrected by its own result")
 	}
 }
+
+// R43: "latest" orders by CheckedAt, not append order — a newer record
+// appended BEFORE an older one must still be the limit=1 result.
+func TestFileStore_GetChecks_OrdersByCheckedAtNotAppendOrder(t *testing.T) {
+	s := NewFileStore(t.TempDir())
+	newer := time.Now()
+	older := newer.Add(-time.Hour)
+	if err := s.SaveCheck(CheckResult{MonitorID: "m", Status: "up", CheckedAt: newer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCheck(CheckResult{MonitorID: "m", Status: "down", CheckedAt: older}); err != nil {
+		t.Fatal(err)
+	}
+	checks, err := s.GetChecks("m", time.Time{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 || !checks[0].CheckedAt.Equal(newer) {
+		t.Fatalf("limit=1 must return the newest check, got %+v", checks)
+	}
+	all, err := s.GetChecks("m", time.Time{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unlimited scan must keep every record, got %d", len(all))
+	}
+}
+
+// R36: a configuration-only save preserves the CURRENT stored result when
+// the target identity is unchanged — even when the caller's struct carries
+// zero result fields (the handler's stale read can no longer win).
+func TestFileStore_SaveRestoreTest_PreservesStoredResultInTransaction(t *testing.T) {
+	s := NewFileStore(t.TempDir())
+	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", Bucket: "b", Region: "r", IntervalHours: 24}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", Bucket: "b", Region: "r",
+		LastOK: false, LastDetail: "just failed", LastRunAt: time.Now()}
+	if applied, err := s.SaveRestoreTestResult("rt", fresh); err != nil || !applied {
+		t.Fatalf("SaveRestoreTestResult applied=%v err=%v", applied, err)
+	}
+	// Config-only edit arriving with stale/empty result fields.
+	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", Bucket: "b", Region: "r", IntervalHours: 12}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRestoreTest("rt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastOK || got.LastDetail != "just failed" {
+		t.Fatalf("config save must preserve the fresh result, got ok=%v detail=%q", got.LastOK, got.LastDetail)
+	}
+	if got.IntervalHours != 12 {
+		t.Fatalf("config edit must apply, got interval=%d", got.IntervalHours)
+	}
+	// Retargeting clears the verdict (F038 preserved through the new path).
+	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "other", App: "app", Accessory: "db", Bucket: "b", Region: "r", IntervalHours: 12}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetRestoreTest("rt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastOK || got.LastDetail != "" || !got.LastRunAt.IsZero() {
+		t.Fatalf("retarget must clear the previous target's verdict, got %+v", got)
+	}
+}

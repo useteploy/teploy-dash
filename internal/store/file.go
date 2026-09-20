@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -212,11 +213,39 @@ func (s *FileStore) SaveRestoreTest(t RestoreTest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// R36: preserve the CURRENT stored result inside the save transaction.
+	// The handler used to read Last* beforehand and round-trip them through
+	// the API, so a verification completing between that read and this write
+	// was overwritten by the stale copy — resurrecting an obsolete "verified"
+	// verdict over a newer failure. A RETARGETED test (identity changed)
+	// keeps none of the old target's verdict (F038).
+	path := filepath.Join(s.dir, "restore-tests", t.ID+".json")
+	if data, err := os.ReadFile(path); err == nil {
+		var stored RestoreTest
+		if json.Unmarshal(data, &stored) == nil && sameRestoreTarget(stored, t) {
+			t.LastRunAt = stored.LastRunAt
+			t.LastOK = stored.LastOK
+			t.LastDetail = stored.LastDetail
+			t.LastMetric = stored.LastMetric
+			t.LastDate = stored.LastDate
+			t.LastDurationMs = stored.LastDurationMs
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(s.dir, "restore-tests", t.ID+".json"), data, 0644)
+	return atomicWrite(path, data, 0644)
+}
+
+// sameRestoreTarget compares the target identity fields that a result is
+// attributed to (A24/F037: region included).
+func sameRestoreTarget(a, b RestoreTest) bool {
+	return a.Server == b.Server && a.App == b.App && a.Accessory == b.Accessory &&
+		a.Bucket == b.Bucket && a.Region == b.Region
 }
 
 func (s *FileStore) DeleteRestoreTest(id string) error {
@@ -334,16 +363,19 @@ func (s *FileStore) GetChecks(monitorID string, since time.Time, limit int) ([]C
 		return nil, fmt.Errorf("reading history for %s: %w", monitorID, err)
 	}
 
-	// Return the most recent N, newest-first — matching the Nucleus store's
-	// `ORDER BY checked_at DESC` so callers (and the UI) see a consistent order
-	// regardless of backend. The unlimited path (limit==0, used by GetStats) is
-	// left ascending since it only aggregates.
+	// R43: "latest" means newest CheckedAt, not last-appended. Records can
+	// be appended out of timestamp order (clock skew, backfilled checks),
+	// and the previous append-order tail disagreed with the Nucleus
+	// backend's ORDER BY checked_at DESC — including for the runner's
+	// limit=1 transition baseline. Stable sort keeps append order as the
+	// deterministic tie-breaker. The unlimited path (limit==0, used by
+	// GetStats) stays ascending since it only aggregates.
 	if limit > 0 {
+		sort.SliceStable(results, func(i, j int) bool {
+			return results[i].CheckedAt.After(results[j].CheckedAt)
+		})
 		if len(results) > limit {
-			results = results[len(results)-limit:]
-		}
-		for i, j := 0, len(results)-1; i < j; i, j = i+1, j-1 {
-			results[i], results[j] = results[j], results[i]
+			results = results[:limit]
 		}
 	}
 	return results, nil
