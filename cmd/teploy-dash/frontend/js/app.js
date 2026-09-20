@@ -58,7 +58,7 @@ async function trackedFetch(...args) {
 // non-JSON success payloads, and unwraps the {data: ...} envelope when asked
 // (raw endpoints like monitors answer directly).
 async function requestJSON(url, options = {}, unwrap = true) {
-  const {body, ...init} = options;
+  const {body, _meta, ...init} = options;
   const headers = new Headers(init.headers || {});
   headers.set('Accept', 'application/json');
   if (body !== undefined) headers.set('Content-Type', 'application/json');
@@ -66,6 +66,7 @@ async function requestJSON(url, options = {}, unwrap = true) {
     ...init, headers, credentials: 'same-origin', cache: 'no-store',
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (_meta) _meta.etag = response.headers.get('ETag') || '';
   if (response.status === 401) {
     window.dispatchEvent(new CustomEvent('teploy:unauthorized'));
   }
@@ -2015,10 +2016,11 @@ document.addEventListener('alpine:init', () => {
     showForm: false,
     editingItem: null,
     form: { name: '', url: '', description: '', color: '#3b82f6' },
-    colors: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#f97316'],
+    colors: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06d4c4','#f97316'],
     _dragId: null,
     _dragOverId: null,
     _didDrag: false,
+    _etag: '', // R13: concurrency token for the shared shortcut list
 
     // Header-only links (Settings > Links, Home off) stay out of the grid but
     // remain in `items` so persisting order doesn't drop them.
@@ -2026,7 +2028,9 @@ document.addEventListener('alpine:init', () => {
 
     async init() {
       try {
-        const raw = (await api.get('/api/homepage')) || [];
+        const meta = {};
+        const raw = (await api.get('/api/homepage', {_meta: meta})) || [];
+        this._etag = meta.etag || '';
         this.items = raw.map(i => ({ ...i, _faviconFailed: false }));
       } catch(e) {
         showToast(e.message, 'error');
@@ -2103,9 +2107,21 @@ document.addEventListener('alpine:init', () => {
     },
 
     // persistList is the single writer; persist() kept for the drag path.
+    // R13: the save carries the ETag the list was loaded under; a 412 means
+    // another editor changed it first — reload instead of overwriting.
     async persistList(list) {
       const clean = list.map(({ _faviconFailed, ...i }) => i);
-      await api.put('/api/homepage', clean);
+      const meta = {};
+      try {
+        await api.put('/api/homepage', clean, {headers: {'If-Match': this._etag}, _meta: meta});
+      } catch (e) {
+        if (e.status === 412 || e.status === 428) {
+          showToast('Shortcuts were changed by someone else — reloading', 'error');
+          await this.init();
+        }
+        throw e;
+      }
+      this._etag = meta.etag || this._etag;
       window.dispatchEvent(new CustomEvent('teploy:links-changed'));
     },
 
@@ -2154,6 +2170,7 @@ document.addEventListener('alpine:init', () => {
     items: [],
     editingId: null,
     role: null, // null = auth disabled (no /api/auth/me route)
+    _etag: '', // R13: concurrency token for the shared shortcut list
     // `home` is the inverse of the stored `hidden` flag: the form asks what to
     // show, the record stores the exception.
     form: { name: '', url: '', description: '', color: '#3b82f6', icon: '', home: true, pinned: false, dark_icon: false },
@@ -2164,7 +2181,9 @@ document.addEventListener('alpine:init', () => {
       // read-only table on an install that has no roles at all.
       this.role = await api.get('/api/auth/me').then(authRole).catch(() => null);
       try {
-        const raw = (await api.get('/api/homepage')) || [];
+        const meta = {};
+        const raw = (await api.get('/api/homepage', {_meta: meta})) || [];
+        this._etag = meta.etag || '';
         this.items = raw.map(i => ({ ...i, _faviconFailed: false }));
       } catch (e) {
         showToast(e.message, 'error');
@@ -2218,7 +2237,21 @@ document.addEventListener('alpine:init', () => {
 
     async persistCandidate(candidate) {
       const clean = candidate.map(({ _faviconFailed, ...i }) => i);
-      await api.put('/api/homepage', clean);
+      const meta = {};
+      try {
+        await api.put('/api/homepage', clean, {headers: {'If-Match': this._etag}, _meta: meta});
+      } catch (e) {
+        // R13: the list changed underneath this editor — reload rather than
+        // overwrite, then surface the original conflict.
+        if (e.status === 412 || e.status === 428) {
+          const role = this.role;
+          await this.init();
+          this.role = role;
+          showToast('Shortcuts were changed by someone else — list reloaded, retry your edit', 'error');
+        }
+        throw e;
+      }
+      this._etag = meta.etag || this._etag;
       this.items = candidate;
       window.dispatchEvent(new CustomEvent('teploy:links-changed'));
     },

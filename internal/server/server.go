@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -185,6 +186,9 @@ type Server struct {
 
 	httpSrvMu sync.Mutex
 	httpSrv   *http.Server
+
+	// homepageMu serializes the homepage load-compare-save sequence (R13).
+	homepageMu sync.Mutex
 }
 
 // New creates a new server.
@@ -3753,13 +3757,22 @@ func (s *Server) saveHomepage(data homepageData) error {
 func (s *Server) handleHomepage(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
+		s.homepageMu.Lock()
 		data, err := s.loadHomepage()
+		s.homepageMu.Unlock()
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
+		etag := homepageETag(data)
+		w.Header().Set("ETag", etag)
 		writeData(w, data.Items)
 	case "PUT":
+		// R13: whole-document replacement requires the client's copy to be
+		// current. Two editors previously loaded the same list, each changed
+		// a different shortcut, and the second save silently erased the
+		// first — a mutex around save alone could not detect it because each
+		// request already contained a stale complete list.
 		var items []HomepageItem
 		if err := strictDecode(r, &items); err != nil {
 			writeError(w, "invalid JSON: "+err.Error())
@@ -3772,14 +3785,42 @@ func (s *Server) handleHomepage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err.Error())
 			return
 		}
+		ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
+		if ifMatch == "" {
+			writeErrorStatus(w, "If-Match is required (reload the shortcuts and retry)", http.StatusPreconditionRequired)
+			return
+		}
+		s.homepageMu.Lock()
+		defer s.homepageMu.Unlock()
+		current, err := s.loadHomepage()
+		if err != nil {
+			writeErrorStatus(w, "cannot load shortcuts: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if ifMatch != homepageETag(current) {
+			writeErrorStatus(w, "shortcuts changed since you loaded them; reload before saving", http.StatusPreconditionFailed)
+			return
+		}
 		if err := s.saveHomepage(homepageData{Items: items}); err != nil {
 			writeError(w, err.Error())
 			return
 		}
+		w.Header().Set("ETag", homepageETag(homepageData{Items: items}))
 		writeData(w, items)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// homepageETag derives the document's concurrency token from its canonical
+// encoding (R13).
+func homepageETag(data homepageData) string {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

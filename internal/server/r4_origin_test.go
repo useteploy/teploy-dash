@@ -1,9 +1,10 @@
 package server
 
 import (
-	"net/http"
 	"crypto/tls"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -96,5 +97,48 @@ func TestNoAuthModeStillBlocksCrossOriginMutations(t *testing.T) {
 	s.handler().ServeHTTP(rec2, req2)
 	if rec2.Code == http.StatusForbidden {
 		t.Fatalf("same-origin mutation must pass the origin guard, got %d", rec2.Code)
+	}
+}
+
+// R13: homepage replacement requires If-Match; a stale token is a 412 that
+// leaves the stored list unchanged, and a missing precondition is a 428.
+func TestHomepageOptimisticConcurrency(t *testing.T) {
+	s := &Server{config: Config{DataDir: t.TempDir()}}
+
+	put := func(ifMatch string, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/homepage", strings.NewReader(body))
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		rec := httptest.NewRecorder()
+		s.handleHomepage(rec, req)
+		return rec
+	}
+
+	get := func() (string, string) {
+		rec := httptest.NewRecorder()
+		s.handleHomepage(rec, httptest.NewRequest(http.MethodGet, "/api/homepage", nil))
+		return rec.Header().Get("ETag"), rec.Body.String()
+	}
+
+	if rec := put("", `[{"id":"a","name":"A","url":"https://a.example"}]`); rec.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing If-Match must 428, got %d", rec.Code)
+	}
+
+	etag, _ := get()
+	if etag == "" {
+		t.Fatal("GET must advertise an ETag")
+	}
+	if rec := put(etag, `[{"id":"a","name":"A","url":"https://a.example"}]`); rec.Code != 200 {
+		t.Fatalf("matching If-Match must succeed, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// A second editor holding the FIRST etag must not overwrite the change.
+	if rec := put(etag, `[{"id":"b","name":"B","url":"https://b.example"}]`); rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale If-Match must 412, got %d", rec.Code)
+	}
+	_, body := get()
+	if !strings.Contains(body, "a.example") || strings.Contains(body, "b.example") {
+		t.Fatalf("stale save must not change the stored list: %s", body)
 	}
 }
