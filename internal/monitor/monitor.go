@@ -182,6 +182,13 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	r.timers[m.ID] = ticker
 	r.stopChs[m.ID] = stopCh
 
+	// R33: capture the generation THIS scheduler runs under while the
+	// lifecycle lock is held (teardownLocked just bumped it). The goroutine
+	// must never read the live counter later: a scheduler delayed past a
+	// reload/remove would otherwise adopt the NEW generation with its OLD
+	// captured configuration and pass every freshness check.
+	generation := r.generations[m.ID]
+
 	// F023: count the goroutine's WHOLE lifetime before launching it, so
 	// Stop's Wait can never observe zero while this scheduler is still
 	// between its ticker and its next check (registering per check inside
@@ -190,12 +197,12 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	go func() {
 		defer r.wg.Done()
 		// Run first check immediately
-		r.runCheck(m)
+		r.runCheck(m, generation)
 
 		for {
 			select {
 			case <-ticker.C:
-				r.runCheck(m)
+				r.runCheck(m, generation)
 			case <-stopCh:
 				return
 			}
@@ -233,10 +240,18 @@ func (r *Runner) Remove(id string) {
 	delete(r.lastStat, id)
 }
 
-func (r *Runner) runCheck(m store.Monitor) {
+// runCheck executes one check under the scheduler-owned configuration and
+// generation. expected is the generation captured when THIS scheduler was
+// constructed (R33): a check is stale the moment the live generation moves,
+// and staleness is re-checked before any network work, before persistence,
+// and before the transition baseline is touched.
+func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 	r.mu.Lock()
-	generation := r.generations[m.ID]
+	stale := r.generations[m.ID] != expected
 	r.mu.Unlock()
+	if stale {
+		return
+	}
 
 	var result store.CheckResult
 	result.MonitorID = m.ID
@@ -260,7 +275,7 @@ func (r *Runner) runCheck(m store.Monitor) {
 	// the new configuration's status, and a transition alert off it would
 	// be spurious.
 	r.mu.Lock()
-	stale := r.generations[m.ID] != generation
+	stale = r.generations[m.ID] != expected
 	r.mu.Unlock()
 	if stale {
 		return
@@ -276,7 +291,7 @@ func (r *Runner) runCheck(m store.Monitor) {
 	// overwritten or its alert fired off stale work. (The save itself is
 	// store-side and stays with the deferred revision-CAS work, A19.)
 	r.mu.Lock()
-	if r.generations[m.ID] != generation {
+	if r.generations[m.ID] != expected {
 		r.mu.Unlock()
 		return
 	}

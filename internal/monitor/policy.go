@@ -97,7 +97,6 @@ func resolveAndFilter(ctx context.Context, host string, allowInternal bool) ([]n
 // Transport.DialContext (which also covers redirects — Go's http.Client
 // invokes DialContext again for the redirect target's host) and checkTCP.
 func policyDialContext(allowInternal bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	dialer := &net.Dialer{}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -108,23 +107,48 @@ func policyDialContext(allowInternal bool) func(ctx context.Context, network, ad
 			return nil, err
 		}
 		// Try each already-validated address within the check's total
-		// deadline: a dual-stack or multi-address service whose first
-		// returned address is unreachable still succeeds via a later one.
-		// Only filtered addresses are ever dialed — the policy is not
-		// weakened by the fallback.
-		var lastErr error
-		for _, ip := range ips {
-			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-			if err == nil {
-				return conn, nil
-			}
-			lastErr = err
-			if ctx.Err() != nil {
-				break
-			}
-		}
-		return nil, lastErr
+		// deadline (R42): the remaining budget is divided across the
+		// remaining addresses, so one blackholing address can no longer
+		// consume the whole deadline and hide a reachable sibling. Only
+		// filtered addresses are ever dialed — the policy is not weakened
+		// by the fallback.
+		return dialAddrs(ctx, network, port, ips, func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, network, addr)
+		})
 	}
+}
+
+// dialAddrs dials each address in order, splitting the remaining context
+// budget across the remaining candidates so a blackholing first address
+// cannot starve the rest (R42). dial is injected for tests.
+func dialAddrs(ctx context.Context, network, port string, ips []net.IP, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (net.Conn, error) {
+	var lastErr error
+	for i, ip := range ips {
+		attemptCtx := ctx
+		cancel := func() {}
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, context.DeadlineExceeded
+			}
+			budget := remaining / time.Duration(len(ips)-i)
+			attemptCtx, cancel = context.WithTimeout(ctx, budget)
+		}
+		conn, err := dial(attemptCtx, network, net.JoinHostPort(ip.String(), port))
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no addresses to dial")
+	}
+	return nil, lastErr
 }
 
 // httpClientFor returns an HTTP client whose Transport enforces the network
@@ -146,9 +170,14 @@ var policyTransports = map[bool]*http.Transport{
 
 func newPolicyTransport(allowInternal bool) *http.Transport {
 	return &http.Transport{
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
+		IdleConnTimeout: 30 * time.Second,
+		// R41: no hidden phase-specific limits. The fixed 10s/15s handshake
+		// and response-header timeouts silently capped monitors configured
+		// with longer total timeouts (up to 60s); the per-check context
+		// supplies the one bounded deadline for connect, TLS, headers, and
+		// body — cancellation is not delegated to the transport at all.
+		TLSHandshakeTimeout:   0,
+		ResponseHeaderTimeout: 0,
 		DialContext:           policyDialContext(allowInternal),
 	}
 }

@@ -51,7 +51,7 @@ func TestRunner_TracksLastStatus(t *testing.T) {
 	m := store.Monitor{ID: "m1", Name: "t", Type: "http", Target: "http://127.0.0.1:1"}
 
 	// First run — no previous state, no transition yet.
-	r.runCheck(m)
+	r.runCheck(m, 0)
 	r.mu.Lock()
 	first := r.lastStat[m.ID]
 	r.mu.Unlock()
@@ -61,7 +61,7 @@ func TestRunner_TracksLastStatus(t *testing.T) {
 	}
 
 	// Second run with same result — lastStat stays the same.
-	r.runCheck(m)
+	r.runCheck(m, 0)
 	r.mu.Lock()
 	second := r.lastStat[m.ID]
 	r.mu.Unlock()
@@ -86,7 +86,7 @@ func TestRunner_DetectsTransitionFromSeededState(t *testing.T) {
 	r.lastStat[m.ID] = "up"
 	r.mu.Unlock()
 
-	r.runCheck(m)
+	r.runCheck(m, 0)
 
 	r.mu.Lock()
 	after := r.lastStat[m.ID]
