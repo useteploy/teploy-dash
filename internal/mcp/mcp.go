@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -85,9 +87,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Origin validation per the MCP Streamable HTTP transport spec: a browser
 	// that sends an Origin must be same-origin (DNS-rebinding and cross-site
 	// protection). Non-browser clients typically omit the header and pass.
+	// R05: the comparison is on the FULL origin (scheme+host+port,
+	// normalized) — the previous host-only check accepted http:// against
+	// https:// for the same host.
 	if origin := r.Header.Get("Origin"); origin != "" {
-		u, err := url.Parse(origin)
-		if err != nil || u.Host != r.Host {
+		if !sameOrigin(r) {
 			http.Error(w, "cross-origin MCP requests are not permitted", http.StatusForbidden)
 			return
 		}
@@ -321,4 +325,52 @@ func toolError(msg string) map[string]interface{} {
 func writeRPC(w http.ResponseWriter, resp rpcResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// sameOrigin compares the request's Origin against its own scheme+host with
+// default ports normalized (R05). Self-contained twin of the server
+// package's check — the MCP handler must not depend on the session stack.
+func sameOrigin(r *http.Request) bool {
+	u, err := url.Parse(r.Header.Get("Origin"))
+	if err != nil {
+		return false
+	}
+	got, err := originKey(u)
+	if err != nil {
+		return false
+	}
+	expected, err := originKey(&url.URL{Scheme: requestScheme(r), Host: r.Host})
+	if err != nil {
+		return false
+	}
+	return got == expected
+}
+
+func originKey(u *url.URL) (string, error) {
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Hostname() == "" ||
+		u.User != nil || u.Opaque != "" || (u.Path != "" && u.Path != "/") ||
+		u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
+		return "", fmt.Errorf("invalid origin")
+	}
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("invalid origin port")
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), strconv.Itoa(n)), nil
+}
+
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
