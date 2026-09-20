@@ -23,6 +23,16 @@ const defaultMaxEvents = 1000
 // count IS queue depth (one running + the rest waiting).
 const defaultMaxQueuedPerTarget = 50
 
+// R17: the per-target budget alone does not bound TOTAL admitted work — a
+// caller spraying distinct app/target names gets a worker and queue per
+// target. These globals bound the whole manager instead: total live
+// (non-terminal) operations, and how many CLI subprocesses may execute at
+// once regardless of queue depth.
+const (
+	defaultMaxLiveOperations     = 500
+	defaultMaxConcurrentExecutes = 8
+)
+
 // maxEventDataBytes bounds one event's payload before it is persisted. JSON
 // escaping of control characters can expand a raw line ~6x in its encoded
 // form, and the event reader scans with a 1 MiB limit — an unbounded log
@@ -55,13 +65,20 @@ type Options struct {
 	MaxOperations int
 	// MaxQueuedPerTarget bounds the number of non-terminal operations
 	// admitted per target before enqueues are rejected with
-	// ErrAdmissionBudget (0 = package default; negative disables the bound).
+	// ErrAdmissionBudget (0 = package default, negative disables the bound).
 	// Non-terminal operations are never deleted or dropped — they are
 	// refused at admission (A12/A27 remainder).
 	MaxQueuedPerTarget int
-	Resolver           Resolver
-	ProjectResolver    ProjectResolver
-	Executor           Executor
+	// MaxLiveOperations bounds TOTAL non-terminal operations across every
+	// target (R17; 0 = package default, negative disables).
+	MaxLiveOperations int
+	// MaxConcurrentExecutions bounds how many operations may execute their
+	// CLI subprocess at the same time across all targets (R17; 0 = package
+	// default, negative disables).
+	MaxConcurrentExecutions int
+	Resolver                Resolver
+	ProjectResolver         ProjectResolver
+	Executor                Executor
 }
 
 // job is one admitted operation waiting for or receiving execution on its
@@ -98,9 +115,14 @@ type Manager struct {
 	maxOperations   int
 	// maxQueuedPerTarget is the per-target admission budget (A12/A27).
 	maxQueuedPerTarget int
-	admissionSeq       uint64
-	retireMu           sync.Mutex
-	lastSweep          time.Time
+	// maxLive bounds total non-terminal operations (R17); executorSlots
+	// bounds simultaneous executions (R17). A nil/nil pair disables the
+	// respective bound.
+	maxLive       int
+	executorSlots chan struct{}
+	admissionSeq  uint64
+	retireMu      sync.Mutex
+	lastSweep     time.Time
 	// runners tracks live target-worker goroutines so Shutdown can join
 	// them (A39/A47).
 	runners sync.WaitGroup
@@ -175,6 +197,12 @@ func New(dataDir string, options Options) (*Manager, error) {
 	if options.MaxQueuedPerTarget == 0 {
 		options.MaxQueuedPerTarget = defaultMaxQueuedPerTarget
 	}
+	if options.MaxLiveOperations == 0 {
+		options.MaxLiveOperations = defaultMaxLiveOperations
+	}
+	if options.MaxConcurrentExecutions == 0 {
+		options.MaxConcurrentExecutions = defaultMaxConcurrentExecutes
+	}
 	if options.Executor == nil {
 		return nil, fmt.Errorf("operation executor is required")
 	}
@@ -209,6 +237,10 @@ func New(dataDir string, options Options) (*Manager, error) {
 		maxHistoryAge:      options.MaxHistoryAge,
 		maxOperations:      options.MaxOperations,
 		maxQueuedPerTarget: options.MaxQueuedPerTarget,
+		maxLive:            options.MaxLiveOperations,
+	}
+	if options.MaxConcurrentExecutions > 0 {
+		m.executorSlots = make(chan struct{}, options.MaxConcurrentExecutions)
 	}
 	for id, op := range operations {
 		if op.Metadata.Mode == "" {
@@ -257,11 +289,31 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	if req.Kind == KindDeploy && req.Mode == "" {
 		req.Mode = "ad-hoc"
 	}
-	command, admitted, target, err := Build(req, m.resolver, m.projectResolver)
+	hash, err := requestHash(req)
 	if err != nil {
 		return nil, false, err
 	}
-	hash, err := requestHash(req)
+
+	// R21: the idempotency lookup runs BEFORE Build. A replay of an already
+	// admitted request must succeed even when the dependencies Build would
+	// consult (server discovery, manifest resolution, capability probes)
+	// are currently failing — recovery after a lost HTTP response was the
+	// point of the key. Build still runs (unlocked, potentially slow) for
+	// genuinely new work, and the replay check runs AGAIN inside the
+	// admission transaction below because a concurrent caller may have
+	// admitted the same key while Build ran.
+	m.mu.Lock()
+	if m.admissionClosed {
+		m.mu.Unlock()
+		return nil, false, ErrShuttingDown
+	}
+	if existing, replayed, err := m.lookupReplayLocked(idempotencyKey, hash); replayed || err != nil {
+		m.mu.Unlock()
+		return existing, replayed, err
+	}
+	m.mu.Unlock()
+
+	command, admitted, target, err := Build(req, m.resolver, m.projectResolver)
 	if err != nil {
 		return nil, false, err
 	}
@@ -275,17 +327,9 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		m.mu.Unlock()
 		return nil, false, ErrShuttingDown
 	}
-	if idempotencyKey != "" {
-		if id, ok := m.idempotency[idempotencyKey]; ok {
-			existing := m.operations[id]
-			if existing.requestHash != hash {
-				m.mu.Unlock()
-				return nil, false, ErrIdempotencyConflict
-			}
-			copy := cloneOperation(existing)
-			m.mu.Unlock()
-			return copy, true, nil
-		}
+	if existing, replayed, err := m.lookupReplayLocked(idempotencyKey, hash); replayed || err != nil {
+		m.mu.Unlock()
+		return existing, replayed, err
 	}
 	// Admission budget (A12/A27 remainder): same-target execution is FIFO,
 	// so the count of non-terminal operations for the target is exactly its
@@ -301,6 +345,21 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		if depth >= m.maxQueuedPerTarget {
 			m.mu.Unlock()
 			return nil, false, ErrAdmissionBudget
+		}
+	}
+	// R17: the global live bound caps total admitted (non-terminal) work
+	// across every target, so spraying distinct targets cannot admit
+	// unbounded queues and subprocess state.
+	if m.maxLive > 0 {
+		live := 0
+		for _, o := range m.operations {
+			if !o.Status.Terminal() {
+				live++
+			}
+		}
+		if live >= m.maxLive {
+			m.mu.Unlock()
+			return nil, false, ErrGlobalAdmissionBudget
 		}
 	}
 	id, err := newID()
@@ -324,7 +383,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		HasSecrets:     len(command.Secrets) > 0,
 		AdmittedServer: &snapshot,
 		AdmissionSeq:   m.admissionSeq,
-		Actor:          actor,
+		Actor:          cloneActor(actor),
 		requestHash:    hash,
 	}
 
@@ -370,6 +429,35 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 // admitToTarget appends the job to its target's FIFO queue and starts the
 // target worker if idle. Caller must hold m.mu; execution happens on the
 // worker goroutine.
+// lookupReplayLocked returns the stored operation for an idempotency key
+// when it matches the submitted request hash (R21). A key held by a
+// DIFFERENT request surfaces ErrIdempotencyConflict. Caller must hold m.mu.
+func (m *Manager) lookupReplayLocked(idempotencyKey, hash string) (*Operation, bool, error) {
+	if idempotencyKey == "" {
+		return nil, false, nil
+	}
+	id, ok := m.idempotency[idempotencyKey]
+	if !ok {
+		return nil, false, nil
+	}
+	existing := m.operations[id]
+	if existing == nil {
+		// Stale index entry (the record was retired); drop it so the key
+		// can be reused cleanly.
+		delete(m.idempotency, idempotencyKey)
+		return nil, false, nil
+	}
+	if existing.requestHash != hash {
+		return nil, false, ErrIdempotencyConflict
+	}
+	return cloneOperation(existing), true, nil
+}
+
+// ErrGlobalAdmissionBudget reports that the manager-wide live-operation
+// bound is exhausted (R17) — distinct from the per-target budget, but the
+// same back-off contract for callers.
+var ErrGlobalAdmissionBudget = errors.New("admission budget exceeded — too many operations already queued; retry after some complete")
+
 func (m *Manager) admitToTarget(target string, j job) {
 	runner := m.targets[target]
 	if runner == nil {
@@ -409,6 +497,19 @@ func (m *Manager) execute(j job) {
 	if j.ctx.Err() != nil {
 		m.finish(j.id, StatusCanceled, -1, m.cancelReason())
 		return
+	}
+	// R17: execution capacity is a global bound. The slot is acquired
+	// WITHOUT the manager mutex; a canceled or shutdown-bound operation
+	// waiting for a slot resolves immediately instead of queueing forever.
+	// Shutdown's force-cancel path cancels j.ctx, which unblocks the wait.
+	if m.executorSlots != nil {
+		select {
+		case m.executorSlots <- struct{}{}:
+			defer func() { <-m.executorSlots }()
+		case <-j.ctx.Done():
+			m.finish(j.id, StatusCanceled, -1, m.cancelReason())
+			return
+		}
 	}
 	m.mu.Lock()
 	op := m.operations[j.id]
@@ -989,7 +1090,36 @@ func cloneOperation(op *Operation) *Operation {
 	}
 	copy := *op
 	copy.Request = cloneRequest(op.Request)
+	// R27: every pointer field is deep-copied so a returned snapshot shares
+	// nothing mutable with manager-owned state — an in-process caller
+	// mutating a Get/List/Enqueue result (or the Actor pointer it passed to
+	// Enqueue) can no longer reach the live operation.
+	copy.Actor = cloneActor(op.Actor)
+	if op.AdmittedServer != nil {
+		snapshot := *op.AdmittedServer
+		copy.AdmittedServer = &snapshot
+	}
+	if op.StartedAt != nil {
+		t := *op.StartedAt
+		copy.StartedAt = &t
+	}
+	if op.FinishedAt != nil {
+		t := *op.FinishedAt
+		copy.FinishedAt = &t
+	}
+	if op.ExitCode != nil {
+		c := *op.ExitCode
+		copy.ExitCode = &c
+	}
 	return &copy
+}
+
+func cloneActor(actor *Actor) *Actor {
+	if actor == nil {
+		return nil
+	}
+	snapshot := *actor
+	return &snapshot
 }
 
 func cloneRequest(req Request) Request {

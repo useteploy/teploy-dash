@@ -988,3 +988,156 @@ func TestShutdownForceCancelsStragglers(t *testing.T) {
 	}
 	manager.Shutdown(context.Background())
 }
+
+// R17: the GLOBAL live bound rejects work across distinct targets once the
+// total number of non-terminal operations reaches the cap.
+func TestGlobalLiveAdmissionBudget(t *testing.T) {
+	dir := t.TempDir()
+	block := make(chan struct{})
+	var started sync.WaitGroup
+	started.Add(2)
+	manager, err := New(dir, Options{
+		Resolver: testResolver,
+		// Two targets' work will hold two live operations.
+		MaxLiveOperations:  2,
+		MaxQueuedPerTarget: -1,
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			started.Done()
+			<-block
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { close(block); manager.Shutdown(context.Background()) })
+
+	for _, app := range []string{"a", "b"} {
+		if _, _, err := manager.Enqueue(deployRequest(app, "img"), "", nil); err != nil {
+			t.Fatalf("enqueue within budget: %v", err)
+		}
+	}
+	started.Wait() // both live before the third admission attempt
+
+	_, _, err = manager.Enqueue(deployRequest("c", "img"), "", nil)
+	if !errors.Is(err, ErrGlobalAdmissionBudget) {
+		t.Fatalf("expected ErrGlobalAdmissionBudget, got %v", err)
+	}
+}
+
+// R17: execution concurrency is capped regardless of how many targets have
+// work — the executor observes at most MaxConcurrentExecutions simultaneous
+// invocations, and waiting work still completes.
+func TestExecutorConcurrencyCap(t *testing.T) {
+	dir := t.TempDir()
+	const cap = 2
+	var running, peak int32
+	var mu sync.Mutex
+	manager, err := New(dir, Options{
+		Resolver:                testResolver,
+		MaxQueuedPerTarget:      -1,
+		MaxLiveOperations:       -1,
+		MaxConcurrentExecutions: cap,
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			n := atomic.AddInt32(&running, 1)
+			mu.Lock()
+			if n > peak {
+				peak = n
+			}
+			mu.Unlock()
+			time.Sleep(30 * time.Millisecond)
+			atomic.AddInt32(&running, -1)
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apps := []string{"a", "b", "c", "d", "e", "f", "g", "h"}
+	var ids []string
+	for _, app := range apps {
+		op, _, err := manager.Enqueue(deployRequest(app, "img"), "", nil)
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", app, err)
+		}
+		ids = append(ids, op.ID)
+	}
+	for _, id := range ids {
+		waitForStatus(t, manager, id, StatusSucceeded, StatusFailed)
+	}
+	manager.Shutdown(context.Background())
+
+	mu.Lock()
+	maxObserved := peak
+	mu.Unlock()
+	if maxObserved > cap {
+		t.Fatalf("observed %d simultaneous executions, cap is %d", maxObserved, cap)
+	}
+}
+
+// R21: an idempotent replay succeeds even when Build's dependencies now
+// fail — recovery after a lost HTTP response must not depend on current
+// discovery or probe availability.
+func TestIdempotentReplaySkipsFailingBuild(t *testing.T) {
+	dir := t.TempDir()
+	manager, err := New(dir, Options{
+		Resolver: testResolver,
+		Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := deployRequest("replay-app", "img")
+	first, replayed, err := manager.Enqueue(req, "release-42", nil)
+	if err != nil || replayed {
+		t.Fatalf("initial enqueue: replayed=%v err=%v", replayed, err)
+	}
+	waitForStatus(t, manager, first.ID, StatusSucceeded)
+
+	// Break every dependency Build would consult.
+	manager.mu.Lock()
+	manager.resolver = func(string) (Server, error) {
+		return Server{}, errors.New("discovery down")
+	}
+	manager.mu.Unlock()
+
+	again, replayed, err := manager.Enqueue(req, "release-42", nil)
+	if err != nil || !replayed {
+		t.Fatalf("replay must succeed without Build: replayed=%v err=%v", replayed, err)
+	}
+	if again == nil || again.ID != first.ID {
+		t.Fatalf("replay must return the original operation, got %+v", again)
+	}
+}
+
+// R27: returned snapshots share no mutable pointer fields with the
+// manager's internal state.
+func TestCloneOperationIsolatesPointerFields(t *testing.T) {
+	actor := &Actor{Kind: "local", Subject: "alice"}
+	exit := 0
+	started := time.Now()
+	op := &Operation{
+		Actor:          actor,
+		AdmittedServer: &Server{Name: "prod", Host: "h", User: "root"},
+		ExitCode:       &exit,
+		StartedAt:      &started,
+	}
+	clone := cloneOperation(op)
+	if clone.Actor == op.Actor || clone.AdmittedServer == op.AdmittedServer ||
+		clone.ExitCode == op.ExitCode || clone.StartedAt == op.StartedAt {
+		t.Fatal("clone must not share pointer fields")
+	}
+	clone.Actor.Subject = "mallory"
+	*clone.AdmittedServer = Server{}
+	*clone.ExitCode = 9
+	if op.Actor.Subject != "alice" || op.AdmittedServer.Host != "h" || *op.ExitCode != 0 {
+		t.Fatal("mutating the clone must not reach the original")
+	}
+	cloneActor := cloneActor(actor)
+	if cloneActor == actor {
+		t.Fatal("cloneActor must copy")
+	}
+}

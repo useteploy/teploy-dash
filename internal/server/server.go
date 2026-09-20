@@ -86,6 +86,11 @@ type Config struct {
 	// enqueues are rejected (A12/A27 remainder; 0 = package default,
 	// negative disables).
 	OperationMaxQueued int
+	// OperationMaxLive bounds TOTAL non-terminal operations across targets,
+	// and OperationMaxConcurrent bounds simultaneous CLI executions (R17;
+	// 0 = package default, negative disables).
+	OperationMaxLive       int
+	OperationMaxConcurrent int
 	// CLI/read hooks keep machine-contract handling testable without changing
 	// production behavior.
 	CLIRunner          func(context.Context, ...string) (*cli.Result, error)
@@ -258,12 +263,14 @@ func New(config Config) *Server {
 	operation.SetVarStdinSupport(cli.VarStdinSupport)
 	operation.SetLegacySecretArgVAllowed(cli.LegacySecretArgVAllowed)
 	s.operations, s.operationInitErr = operation.New(config.DataDir, operation.Options{
-		MaxEvents:          config.OperationMaxEvents,
-		MaxJournalBytes:    config.OperationMaxJournalBytes,
-		MaxHistoryAge:      config.OperationMaxHistoryAge,
-		MaxOperations:      config.OperationMaxOperations,
-		MaxQueuedPerTarget: config.OperationMaxQueued,
-		Resolver:           resolver,
+		MaxEvents:               config.OperationMaxEvents,
+		MaxJournalBytes:         config.OperationMaxJournalBytes,
+		MaxHistoryAge:           config.OperationMaxHistoryAge,
+		MaxOperations:           config.OperationMaxOperations,
+		MaxQueuedPerTarget:      config.OperationMaxQueued,
+		MaxLiveOperations:       config.OperationMaxLive,
+		MaxConcurrentExecutions: config.OperationMaxConcurrent,
+		Resolver:                resolver,
 		ProjectResolver: func(server, app, revision string) (string, error) {
 			if s.manifests == nil {
 				return "", fmt.Errorf("manifest service unavailable")

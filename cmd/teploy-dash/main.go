@@ -82,6 +82,10 @@ func run() error {
 	// Per-target admission budget (A12/A27): how many non-terminal operations
 	// may be queued for one server before further enqueues are rejected.
 	opMaxQueued := int(envInt64("TEPLOY_DASH_MAX_QUEUED_PER_TARGET", 0))
+	// Global admission + execution bounds (R17): total live operations and
+	// simultaneous CLI executions across every target.
+	opMaxLive := int(envInt64("TEPLOY_DASH_MAX_LIVE_OPERATIONS", 0))
+	opMaxConcurrent := int(envInt64("TEPLOY_DASH_MAX_CONCURRENT_OPERATIONS", 0))
 
 	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
 	// nor a saved auth.json exist, the server starts in setup mode so the user
@@ -191,6 +195,8 @@ func run() error {
 		OperationMaxHistoryAge:   time.Duration(opHistoryDays) * 24 * time.Hour,
 		OperationMaxOperations:   opMaxOperations,
 		OperationMaxQueued:       opMaxQueued,
+		OperationMaxLive:         opMaxLive,
+		OperationMaxConcurrent:   opMaxConcurrent,
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.

@@ -185,7 +185,7 @@ func writeOperationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, operation.ErrNotFound):
 		writeErrorStatus(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, operation.ErrAdmissionBudget):
+	case errors.Is(err, operation.ErrAdmissionBudget), errors.Is(err, operation.ErrGlobalAdmissionBudget):
 		writeErrorStatus(w, err.Error(), http.StatusTooManyRequests)
 	case errors.Is(err, operation.ErrShuttingDown):
 		// F022: admission closed by shutdown — a clean, retryable refusal
