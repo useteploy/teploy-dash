@@ -28,7 +28,7 @@ RUN apk add --no-cache ca-certificates tzdata wget
 # source build uses, so the image running in production was the one NOT
 # checking what it executed.
 ARG TARGETARCH
-ARG TEPLOY_VERSION=v0.1.33
+ARG TEPLOY_VERSION=v0.1.35
 RUN set -eux; \
     archive="teploy_linux_${TARGETARCH:-amd64}.tar.gz"; \
     release_url="https://github.com/useteploy/teploy-cli/releases/download/${TEPLOY_VERSION}"; \
