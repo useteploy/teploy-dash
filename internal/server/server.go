@@ -107,6 +107,13 @@ type fleetCache struct {
 	apps    []remote.AppState
 	builtAt time.Time
 	ttl     time.Duration
+	// observations is the per-server envelope sweep (D01): one envelope per
+	// configured server, present whether the probe succeeded or not.
+	// obsBuiltAt tracks when the envelope sweep ran; the apps caches track
+	// when a SUCCESSFUL app list was gathered — a fully-degraded sweep
+	// refreshes the envelopes but must not clobber the last-known app list.
+	observations []ServerObservation
+	obsBuiltAt   time.Time
 	// generation is the invalidation token (R50): a refresh captures it
 	// before collecting and publishes only if it still matches — a sweep
 	// that started BEFORE a mutation (which invalidates) must not re-publish
@@ -115,7 +122,8 @@ type fleetCache struct {
 	// lastGood survives both TTL expiry and invalidation. The TTL exists to keep
 	// app *status* fresh; consumers that only read stable facts (where a sibling
 	// dashboard lives) want the last known answer rather than none.
-	lastGood []remote.AppState
+	lastGood    []remote.AppState
+	lastGoodObs []ServerObservation
 	// refreshing is a single-flight latch: a background refresh SSHes every
 	// server, so concurrent stale reads must not each start their own sweep.
 	refreshing bool
@@ -149,19 +157,33 @@ func (fc *fleetCache) snapshotGeneration() uint64 {
 	return fc.generation
 }
 
-// publish stores a completed refresh only when its captured generation is
-// still current (R50). Reports whether the snapshot was published.
-func (fc *fleetCache) publish(generation uint64, apps []remote.AppState) bool {
+// publish stores a completed sweep only when its captured generation is
+// still current (R50). The envelope cache always refreshes (a degraded sweep
+// is the current truth about the fleet); the app caches refresh only when the
+// sweep produced a successful app list — a zero-success sweep must leave the
+// last-known apps serving, exactly as a failed refresh did before envelopes
+// existed. Reports whether the snapshot was published.
+func (fc *fleetCache) publish(generation uint64, envelopes []ServerObservation) bool {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if generation != fc.generation {
 		return false
 	}
-	fc.apps = apps
-	if apps == nil {
+	if envelopes == nil {
+		fc.apps = nil
 		fc.builtAt = time.Time{} // zero time forces cache miss on next read
-	} else {
-		fc.builtAt = time.Now()
+		fc.observations = nil
+		fc.obsBuiltAt = time.Time{}
+		return true
+	}
+	now := time.Now()
+	fc.observations = envelopes
+	fc.obsBuiltAt = now
+	fc.lastGoodObs = envelopes
+	apps := flattenFleetApps(envelopes)
+	if len(apps) > 0 || !fleetAllFailed(envelopes) {
+		fc.apps = apps
+		fc.builtAt = now
 		fc.lastGood = apps
 	}
 	return true
@@ -175,6 +197,8 @@ func (fc *fleetCache) invalidate() {
 	fc.generation++
 	fc.apps = nil
 	fc.builtAt = time.Time{}
+	fc.observations = nil
+	fc.obsBuiltAt = time.Time{}
 }
 
 // snapshot returns the last successfully collected fleet regardless of age.
@@ -184,6 +208,15 @@ func (fc *fleetCache) snapshot() []remote.AppState {
 	return fc.lastGood
 }
 
+// snapshotObservations returns the last collected envelope sweep regardless
+// of age — the per-server last-known state that keeps unreachable hosts
+// visible in /api/fleet responses.
+func (fc *fleetCache) snapshotObservations() []ServerObservation {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.lastGoodObs
+}
+
 func (fc *fleetCache) get() ([]remote.AppState, bool) {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
@@ -191,6 +224,15 @@ func (fc *fleetCache) get() ([]remote.AppState, bool) {
 		return nil, false
 	}
 	return fc.apps, true
+}
+
+func (fc *fleetCache) getObservations() ([]ServerObservation, bool) {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	if time.Since(fc.obsBuiltAt) > fc.ttl {
+		return nil, false
+	}
+	return fc.observations, true
 }
 
 // Server is the teploy-dash HTTP server.
@@ -407,12 +449,15 @@ func (s *Server) refreshFleetAsync() {
 		defer s.fleet.endRefresh()
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		apps, err := s.collectFleetApps(ctx)
+		envelopes, err := s.collectFleetObservations(ctx, s.fleet.snapshotObservations())
 		if err != nil {
 			log.Printf("[fleet] background refresh failed (serving last known state): %v", err)
 			return
 		}
-		if !s.fleet.publish(generation, apps) {
+		if fleetAllFailed(envelopes) {
+			log.Printf("[fleet] background refresh observed errors on all %d server(s) (serving last known state)", len(envelopes))
+		}
+		if !s.fleet.publish(generation, envelopes) {
 			log.Printf("[fleet] background refresh discarded: the fleet changed while it was running")
 		}
 	}()
@@ -439,12 +484,15 @@ func (s *Server) warmFleet() {
 		defer s.fleet.endRefresh()
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		apps, err := s.collectFleetApps(ctx)
+		envelopes, err := s.collectFleetObservations(ctx, nil)
 		if err != nil {
 			log.Printf("[fleet] startup warm failed (will fill on first request): %v", err)
 			return
 		}
-		if !s.fleet.publish(generation, apps) {
+		if fleetAllFailed(envelopes) {
+			log.Printf("[fleet] startup warm observed errors on all %d server(s)", len(envelopes))
+		}
+		if !s.fleet.publish(generation, envelopes) {
 			log.Printf("[fleet] startup warm discarded: the fleet changed while it was running")
 		}
 	}()
@@ -1410,6 +1458,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/servers/", s.handleServerDetail)
 	s.mux.HandleFunc("/api/apps", s.handleApps)
 	s.mux.HandleFunc("/api/apps/", s.handleAppAction)
+	// D01: per-server observation envelopes (all servers, every response).
+	s.mux.HandleFunc("/api/fleet", s.handleFleet)
 	s.mux.HandleFunc("/api/deploy", s.handleDeploy)
 	s.mux.HandleFunc("/api/operations", s.handleOperations)
 	s.mux.HandleFunc("/api/operations/", s.handleOperation)
@@ -1491,84 +1541,51 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apps, err := s.collectFleetApps(r.Context())
+	envelopes, err := s.collectFleetObservations(r.Context(), nil)
 	if err != nil {
 		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.fleet.publish(s.fleet.snapshotGeneration(), apps)
+	s.fleet.publish(s.fleet.snapshotGeneration(), envelopes)
+	apps, err := fleetAppsOrError(envelopes)
+	if err != nil {
+		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	writeData(w, apps)
 }
 
-// collectFleetApps gathers app state from all servers in parallel.
-func (s *Server) collectFleetApps(ctx context.Context) ([]remote.AppState, error) {
-	// R47: the whole-sweep deadline is created BEFORE discovery so the
-	// advertised 30s budget actually bounds the server-list lookup too —
-	// it previously started only after discovery completed.
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+// handleFleet is the D01 truth-telling endpoint: one observation envelope per
+// configured server, EVERY server every time. An unreachable or degraded
+// server is present with its partial error, its freshness, and its last-known
+// apps — it never vanishes from a successful partial response. /api/apps
+// keeps the historical flat contract (current sweep's successful apps only);
+// this endpoint carries the per-server honesty the fleet view needs.
+func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
+	if envelopes, ok := s.fleet.getObservations(); ok {
+		writeData(w, buildFleetResponse(envelopes, time.Now().UTC()))
+		return
+	}
 
-	servers, err := s.resolveServers(ctx)
+	// Same stale-while-revalidate contract as /api/apps: serve the last known
+	// envelopes at once, refresh behind the request.
+	if stale := s.fleet.snapshotObservations(); len(stale) > 0 {
+		s.refreshFleetAsync()
+		w.Header().Set("X-Fleet-Cache", "stale")
+		writeData(w, buildFleetResponse(stale, time.Now().UTC()))
+		return
+	}
+
+	// Cold path: no fleet endpoint exists for a fleet whose server set
+	// cannot even be discovered — the same 502 /api/apps answers. A dead
+	// fleet (discovery OK, every probe failing) still gets envelopes.
+	envelopes, err := s.collectFleetObservations(r.Context(), nil)
 	if err != nil {
-		// A discovery failure must not fall through to the local-state path
-		// (A34) — it would render a broken fleet as "local installation".
-		return nil, fmt.Errorf("server discovery failed: %w", err)
+		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
+		return
 	}
-
-	if len(servers) == 0 {
-		// Fall back to local state files when no servers configured. R49
-		// (partial): a failed local-state read is an error, not an empty
-		// success — the deployment list would silently lose every local app.
-		localApps, err := s.state.ListApps()
-		if err != nil {
-			return nil, fmt.Errorf("local deployment state unavailable: %w", err)
-		}
-		var apps []remote.AppState
-		for _, a := range localApps {
-			apps = append(apps, remote.AppState{
-				App:          a.App,
-				Server:       "local",
-				Domain:       a.Domain,
-				CurrentHash:  a.CurrentHash,
-				PreviousHash: a.PreviousHash,
-				Status:       a.Status,
-			})
-		}
-		return apps, nil
-	}
-
-	type result struct {
-		apps []remote.AppState
-		err  error
-	}
-
-	ch := make(chan result, len(servers))
-	for _, srv := range servers {
-		srv := srv
-		go func() {
-			apps, err := s.readMachineApps(ctx, srv)
-			ch <- result{apps, err}
-		}()
-	}
-
-	var all []remote.AppState
-	errCount := 0
-	for range servers {
-		r := <-ch
-		if r.err != nil {
-			// Previously every per-server error was silently dropped, so a
-			// fully-unreachable fleet rendered as an empty success with no clue
-			// why. Log each failure so the operator can see it.
-			errCount++
-			log.Printf("[fleet] server query failed: %v", r.err)
-			continue
-		}
-		all = append(all, r.apps...)
-	}
-	if errCount == len(servers) && len(all) == 0 {
-		return nil, fmt.Errorf("fleet app collection failed for all %d server(s)", len(servers))
-	}
-	return all, nil
+	s.fleet.publish(s.fleet.snapshotGeneration(), envelopes)
+	writeData(w, buildFleetResponse(envelopes, time.Now().UTC()))
 }
 
 // resolveServers returns server connections from the CLI's servers.yml via the CLI delegate.

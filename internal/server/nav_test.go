@@ -7,10 +7,21 @@ import (
 	"github.com/useteploy/teploy-dash/internal/remote"
 )
 
+// publishFleetApps publishes a synthetic all-successful sweep carrying apps,
+// the envelope-shape equivalent of the old direct apps publish.
+func publishFleetApps(s *Server, apps []remote.AppState) {
+	if apps == nil {
+		apps = []remote.AppState{}
+	}
+	s.fleet.publish(s.fleet.snapshotGeneration(), []ServerObservation{
+		{ID: serverStableID("infra"), Server: "infra", Apps: apps},
+	})
+}
+
 func navServer(t *testing.T, apps []remote.AppState) *Server {
 	t.Helper()
 	s := New(Config{DataDir: t.TempDir(), NoAuth: true})
-	s.fleet.publish(s.fleet.snapshotGeneration(), apps)
+	publishFleetApps(s, apps)
 	return s
 }
 
@@ -79,7 +90,7 @@ func TestNavCurrentProductHasNoURL(t *testing.T) {
 // fresh, which nav never reads.
 func TestNavSurvivesStaleFleetCache(t *testing.T) {
 	s := New(Config{DataDir: t.TempDir(), NoAuth: true})
-	s.fleet.publish(s.fleet.snapshotGeneration(), []remote.AppState{
+	publishFleetApps(s, []remote.AppState{
 		{App: "observe", Server: "infra", Domain: "observe.acme.com", CurrentPort: 3000, Status: "running"},
 	})
 	// Expire the cache the way time would.

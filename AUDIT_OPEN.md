@@ -245,7 +245,10 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
   requiring CLI coordination. Save-error surfacing landed.
 - A37 - fleet observation envelope (stale/partial/errors): protocol + UI
   redesign; the fleet cache already preserves last-known state and logs
-  per-server failures.
+  per-server failures. FIRST SLICE LANDED 2026-09-21 (see the D01 section
+  below): /api/fleet per-server envelopes with bounded concurrency and
+  per-server timeout; remaining scope recorded there (readiness-vs-running
+  separation, backoff, UI depth, R40 inventory envelopes).
 - A39 (residual) - FIXED in the residual cluster session (2026-09-18):
   readiness vs liveness separation landed (/healthz cheap liveness;
   /readyz readiness — store reachable via Ping on both backends, operation
@@ -937,3 +940,56 @@ prompt appeared mid-session on the dev host; builds/commits used
   residuals recorded), 2 partial claims dismissed with evidence, remainder
   deferred with rationale mapped to the standing list. Conventional commits
   reference the round-4 finding IDs.
+
+## 2026-09-21 D01 first slice — fleet observation envelope (A37/R49, part)
+
+Bounded backend slice of programme workstream D01 ("a fleet view that tells
+the truth"). NOT a closure of A37/R49/R40 — the protocol redesign continues;
+what landed:
+
+- `GET /api/fleet` returns one observation envelope per configured server,
+  every server every time. Envelope: stable ID (deterministic
+  `srv-<sha256(name)[:16]>` — server names are the only identity the CLI
+  server list exposes, so the ID is name-derived; cross-rename stability
+  needs the A35 server-scoped AppRef migration in the CLI contract), last
+  success timestamp, collection timestamp, freshness enum
+  (fresh/stale/unknown, threshold `fleetFreshAfter` = 2m, aligned with
+  observationStaleAfter), partial error, source, and last-known apps.
+- An unreachable/degraded server is present with its error + last-known apps
+  (previous envelope merged per sweep by ID); it never vanishes from a
+  successful partial response. Evidence pre-fix: the old collector logged
+  the per-server error and dropped the server, and `publish` overwrote
+  `lastGood` with the successful subset, destroying the flapping host's
+  last-known apps too (server.go:1556-1571 at 84fdc6d).
+- Bounded concurrency (`fleetMaxConcurrentProbes` = 8 worker pool; was one
+  goroutine per server, unbounded) and a per-server probe timeout
+  (`fleetServerProbeTimeout` = 10s) so one slow host delays only itself;
+  the 30s R47 sweep deadline still bounds discovery + sweep.
+- `/api/apps` and the MCP list tool keep their exact flat contract (current
+  sweep's successful apps only; all-servers-failed still errors 502) — the
+  honesty lives on the new endpoint; zero-success sweeps no longer clobber
+  the last-known app cache.
+- Tests: internal/server/fleet_test.go — all-healthy; unreachable host
+  present with error + freshness unknown while siblings stay fresh (the
+  load-bearing assertion, red-first: /api/fleet 404 + the vanished host
+  captured at 84fdc6d); failed sweep retains last-known apps/last-success;
+  slow host bounded under timeout x 4; the cap forces >= 2 waves over 16
+  probes; duplicate app names across servers stay distinct in both shapes.
+
+Remaining D01 scope (next slices): readiness-vs-running-vs-desired-state
+separation per app and operation-progress projection (needs the CLI machine
+contract to expose desired state); per-server refresh backoff (a flapping
+host is currently re-probed at the same 60s cadence as healthy ones);
+groups.json migration onto server-scoped AppRefs (A35, CLI coordination);
+UI depth — per-server freshness/error rendering on the fleet page (the
+envelope endpoint exists; the frontend still reads /api/apps, deliberately
+unchanged in this slice); R40's inventory-level partial-error envelopes for
+the remaining list reads.
+
+## Resolution log (D01 slice)
+
+- 2026-09-21: first bounded slice landed as described above. Gates at the
+  working tree (uncommitted): `go vet ./...` clean; `gofmt -l` clean;
+  `go test ./... -count=1` all packages ok; `go test -race -count=1
+  ./internal/server/` ok; `make build` ok. Frontend untouched (no bundle
+  change to node --check). No push performed.

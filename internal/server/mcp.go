@@ -76,11 +76,15 @@ func (b mcpBackend) ListApps(ctx context.Context) (string, error) {
 	if apps, ok := b.s.fleet.get(); ok {
 		return jsonText(apps)
 	}
-	apps, err := b.s.collectFleetApps(ctx)
+	envelopes, err := b.s.collectFleetObservations(ctx, nil)
 	if err != nil {
 		return "", err
 	}
-	b.s.fleet.publish(b.s.fleet.snapshotGeneration(), apps)
+	b.s.fleet.publish(b.s.fleet.snapshotGeneration(), envelopes)
+	apps, err := fleetAppsOrError(envelopes)
+	if err != nil {
+		return "", err
+	}
 	return jsonText(apps)
 }
 

@@ -10,7 +10,7 @@ import (
 
 func TestFleetCacheServesStaleAfterExpiry(t *testing.T) {
 	fc := &fleetCache{ttl: 60 * time.Second}
-	fc.publish(0, []remote.AppState{{App: "web"}})
+	fc.publish(0, []ServerObservation{{Server: "web", Apps: []remote.AppState{{App: "web"}}}})
 	fc.mu.Lock()
 	fc.builtAt = time.Now().Add(-time.Hour) // age it out
 	fc.mu.Unlock()
@@ -28,7 +28,7 @@ func TestFleetCacheServesStaleAfterExpiry(t *testing.T) {
 // the stale-serve path go blank right after every deploy.
 func TestFleetCacheInvalidationKeepsLastGood(t *testing.T) {
 	fc := &fleetCache{ttl: 60 * time.Second}
-	fc.publish(0, []remote.AppState{{App: "web"}})
+	fc.publish(0, []ServerObservation{{Server: "web", Apps: []remote.AppState{{App: "web"}}}})
 	fc.invalidate()
 
 	if _, fresh := fc.get(); fresh {
@@ -73,7 +73,7 @@ func TestFleetCacheRefreshIsSingleFlight(t *testing.T) {
 // snapshot as freshly built afterwards — the generation token drops it.
 func TestFleetCacheStaleRefreshCannotPublishAfterInvalidation(t *testing.T) {
 	fc := &fleetCache{ttl: 60 * time.Second}
-	fc.publish(0, []remote.AppState{{App: "old"}})
+	fc.publish(0, []ServerObservation{{Server: "old", Apps: []remote.AppState{{App: "old"}}}})
 
 	generation, ok := fc.beginRefresh()
 	if !ok {
@@ -81,7 +81,7 @@ func TestFleetCacheStaleRefreshCannotPublishAfterInvalidation(t *testing.T) {
 	}
 	// A mutation lands while the refresh is in flight.
 	fc.invalidate()
-	if fc.publish(generation, []remote.AppState{{App: "stale-sweep"}}) {
+	if fc.publish(generation, []ServerObservation{{Server: "x", Apps: []remote.AppState{{App: "stale-sweep"}}}}) {
 		t.Fatal("a sweep predating the invalidation must not publish")
 	}
 	if _, fresh := fc.get(); fresh {
@@ -97,7 +97,7 @@ func TestFleetCacheStaleRefreshCannotPublishAfterInvalidation(t *testing.T) {
 	if !ok {
 		t.Fatal("refresh should be reclaimable")
 	}
-	if !fc.publish(generation, []remote.AppState{{App: "new"}}) {
+	if !fc.publish(generation, []ServerObservation{{Server: "x", Apps: []remote.AppState{{App: "new"}}}}) {
 		t.Fatal("current-generation sweep must publish")
 	}
 	if got, _ := fc.get(); len(got) != 1 || got[0].App != "new" {

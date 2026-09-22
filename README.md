@@ -311,6 +311,7 @@ so the direct role claim is available here and takes precedence over groups.
 | GET | `/status`, `/api/status` | Public status page + JSON (auth-exempt; 404 unless `--public-status`). Exposes only name/up-down/24h-uptime. |
 | GET | `/api/cli/status` | Whether the `teploy` CLI is on `$PATH` and its version. |
 | GET | `/api/apps` | Fleet app list across all configured servers. |
+| GET | `/api/fleet` | Per-server observation envelopes: every configured server on every response, each with a stable ID, freshness (`fresh`/`stale`/`unknown`, threshold 2m), collection + last-success timestamps, partial error, and last-known apps. Unreachable servers stay visible. |
 | GET | `/api/apps/{server}/{app}/status` | Single app status. |
 | POST | `/api/apps/{server}/{app}/{action}` | `stop`, `start`, `restart`, `rollback`, `lock`, `unlock`, `maintenance/on`, `maintenance/off`. |
 | GET / POST | `/api/apps/{server}/{app}/env` | List / set env vars. |
