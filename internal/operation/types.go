@@ -93,6 +93,14 @@ type Request struct {
 	Action           string            `json:"action,omitempty"`
 	Purge            bool              `json:"purge,omitempty"`
 	Redirect         string            `json:"redirect,omitempty"`
+	// SourceID/SourceCommit pin a source-triggered operation to the forge
+	// delivery that admitted it (D04): SourceID names the registered
+	// source, SourceCommit is the AUTHENTICATED payload commit (the
+	// delivery pin — never a mutable branch tip). They participate in the
+	// request hash, so the same delivery replays while a new commit is new
+	// work. Absent on every human/CI-submitted operation.
+	SourceID     string `json:"source_id,omitempty"`
+	SourceCommit string `json:"source_commit,omitempty"`
 }
 
 type Operation struct {
@@ -247,9 +255,11 @@ var (
 // Actor attributes an operation to the principal that admitted it (A27
 // remainder). It is deliberately NOT part of Request: the request hash keys
 // idempotency, and who queued a request must not change its identity — only
-// record it. Kind is "local" (password account), "sso" (OIDC principal), or
-// "mcp" (API token). A nil Actor (records predating the field, or internal
-// callers with no principal) means unknown.
+// record it. Kind is "local" (password account), "sso" (OIDC principal),
+// "mcp" (API token), or "webhook" (an authenticated forge delivery; Subject
+// is "source/<id>" — its own idempotency namespace, D04). A nil Actor
+// (records predating the field, or internal callers with no principal)
+// means unknown.
 type Actor struct {
 	Kind    string `json:"kind"`
 	Subject string `json:"subject,omitempty"`

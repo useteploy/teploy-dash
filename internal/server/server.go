@@ -37,6 +37,7 @@ import (
 	"github.com/useteploy/teploy-dash/internal/outbox"
 	"github.com/useteploy/teploy-dash/internal/remote"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
+	"github.com/useteploy/teploy-dash/internal/source"
 	sshclient "github.com/useteploy/teploy-dash/internal/ssh"
 	"github.com/useteploy/teploy-dash/internal/state"
 	"github.com/useteploy/teploy-dash/internal/store"
@@ -109,6 +110,11 @@ type Config struct {
 	CLIInstalled       func() bool
 	RemoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
 	RemoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
+	// SourceCredentialVerifier checks a source's credential reference
+	// against its forge (D04 revoked-permission handling). Nil (the default
+	// this slice) leaves credentials unverified — never silently degraded;
+	// the verify endpoint answers explicitly that no verifier exists.
+	SourceCredentialVerifier func(context.Context, *source.Source) error
 }
 
 // fleetCache caches aggregated multi-server app state to avoid SSH on every request.
@@ -262,6 +268,9 @@ type Server struct {
 	operationInitErr   error
 	manifests          *manifest.Store
 	manifestInitErr    error
+	sources            *source.Store
+	sourceInitErr      error
+	sourceVerifier     func(context.Context, *source.Source) error
 	runCLI             cliRunner
 	cliInstalled       func() bool
 	remoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
@@ -332,6 +341,11 @@ func New(config Config) *Server {
 	if s.manifestInitErr != nil {
 		log.Printf("manifests: disabled: %v", s.manifestInitErr)
 	}
+	s.sources, s.sourceInitErr = source.New(config.DataDir)
+	if s.sourceInitErr != nil {
+		log.Printf("sources: disabled: %v", s.sourceInitErr)
+	}
+	s.sourceVerifier = config.SourceCredentialVerifier
 	resolver := config.OperationResolver
 	if resolver == nil {
 		resolver = s.resolveOperationServer
@@ -941,6 +955,19 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// D04: the inbound forge webhook authenticates itself (HMAC or
+		// provider token against the source's secret) — no session, like
+		// the MCP endpoint's bearer auth. Non-browser deliveries carry no
+		// Origin header and pass the mutation guard; a browser page can't
+		// forge the signature.
+		if strings.HasPrefix(r.URL.Path, "/hooks/sources/") {
+			if isMutating(r.Method) && !sameOrigin(r) {
+				http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		ip := g.clientIP(r)
 		cookie, cookieErr := r.Cookie(sessionCookie)
@@ -1497,6 +1524,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/operations/", s.handleOperation)
 	s.mux.HandleFunc("/api/manifests", s.handleManifests)
 	s.mux.HandleFunc("/api/manifests/", s.handleManifest)
+	// D04: registered git sources + the inbound forge delivery endpoint.
+	// The hook path enforces its own HMAC/token authentication, like /api/mcp.
+	s.mux.HandleFunc("/api/sources", s.handleSources)
+	s.mux.HandleFunc("/api/sources/", s.handleSource)
+	s.mux.HandleFunc("/hooks/sources/", s.handleSourceWebhook)
 	s.mux.HandleFunc("/api/config/servers", s.handleConfigServers)
 	s.mux.HandleFunc("/api/config/servers/", s.handleConfigServerAction)
 	s.mux.HandleFunc("/api/notifications", s.handleNotifications)

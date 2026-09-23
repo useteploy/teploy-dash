@@ -51,12 +51,13 @@ func capabilitiesForProfile(profile string, explicit []string, role string) caps
 
 // administerCredentialsPrefixes manage credential-bearing configuration.
 // Reads are included: their payloads carry secrets (registry passwords,
-// SMTP/webhook targets, token metadata).
+// SMTP/webhook targets, token metadata, source webhook secrets).
 var administerCredentialsPrefixes = []string{
 	"/api/mcp-tokens",
 	"/api/config/servers",
 	"/api/registries",
 	"/api/notifications",
+	"/api/sources",
 }
 
 // requiredCapabilities returns the capability(s) a route requires. It fails

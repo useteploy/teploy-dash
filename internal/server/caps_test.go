@@ -229,6 +229,15 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"POST", "/api/registries", []string{caps.AdministerCredentials}},
 		{"GET", "/api/notifications", []string{caps.AdministerCredentials}},
 		{"PATCH", "/api/notifications", []string{caps.AdministerCredentials}},
+		// D04 sources carry webhook secrets and credential references —
+		// the same credential-administration class as registries.
+		{"GET", "/api/sources", []string{caps.AdministerCredentials}},
+		{"POST", "/api/sources", []string{caps.AdministerCredentials}},
+		{"GET", "/api/sources/src-0123456789abcdef", []string{caps.AdministerCredentials}},
+		{"PATCH", "/api/sources/src-0123456789abcdef", []string{caps.AdministerCredentials}},
+		{"DELETE", "/api/sources/src-0123456789abcdef", []string{caps.AdministerCredentials}},
+		{"POST", "/api/sources/src-0123456789abcdef/verify", []string{caps.AdministerCredentials}},
+		{"POST", "/api/sources/src-0123456789abcdef/rotate-secret", []string{caps.AdministerCredentials}},
 
 		// Dashboard-config mutations (monitors, groups, homepage,
 		// manifests) are execute.mutate.

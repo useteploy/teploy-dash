@@ -1565,3 +1565,149 @@ for); the A42-residual capability-view is subsumed by whoami capabilities.
   on internal/caps, internal/mcp, internal/server ok; `make build` ok;
   `node --check` on both bundles; all three node component tests
   (servers_page, onboarding_preflight, env_caps) pass. No push performed.
+
+## 2026-09-23 D04 first slice — git-source identity + webhook delivery (backend-first)
+
+Bounded backend-first slice of programme workstream D04 ("store canonical
+forge/repository identity, immutable revision, credential scope and webhook
+delivery identity; handle revoked permissions, private repos, monorepos,
+changed default branches and deleted refs"). Recon showed dash had NO
+git-source model, so this slice CREATES the foundation; it is not a closure
+of D04 (remainder below).
+
+**Recon (file:line at base 3e9a782):** deploys reference sources as image
+refs only (`Request.Image` through `teploy deploy --image`,
+internal/operation/build.go:106); the closest existing surface is the
+manifest store's `GitReference{Repository, Revision, ManifestPath}`
+(internal/manifest/store.go:41) — a bare URL string with no forge identity,
+no credential scope, no delivery record. The only webhook code was
+OUTBOUND alert delivery (internal/alert). teploy-cli already owns the
+SERVER-SIDE inbound path end to end (`teploy autodeploy setup/serve`): C02
+landed its admission ledger
+(`/deployments/<app>/.autodeploy-ledger.jsonl`, ack-after-fsync, bounded
+newest-wins queue, restart resume) and commit pinning (`PushCommit`:
+checkout_sha preferred, tags/deletions/zeros/malformed pin nothing). Dash
+therefore LAYERS ON TOP rather than duplicating: dash's webhook admits
+DASH operations (manifest applies) with its own delivery ledger following
+the same C02 disciplines; the CLI's listener and its ledger are untouched
+(converging the two trigger paths is recorded C02 cross-repo scope).
+
+**What landed — the identity model (new `internal/source` package):**
+
+- Canonical identity = forge kind + normalized clone URL. Normalization
+  (url.go): credentials/userinfo stripped BEFORE anything persists, scp
+  (`git@host:path`) and `ssh://` forms folded onto the https form,
+  `.git`/trailing slashes dropped, scheme+host lowercased with path case
+  preserved for display, default ports dropped, http kept as a distinct
+  identity, query/fragment/control chars rejected. The dedupe KEY folds
+  full URL case (forges match owner/repo case-insensitively); forge kind
+  is a separate axis — two forges with the same owner/repo, or two kinds
+  over one URL, are two identities (the F03 lesson from teploy-ship
+  docs/AUDIT_2026-09-21.md: bare owner/repo lookups returned a different
+  forge's configuration). Stable ID = `src-<sha256(identity)[:16]>`, the
+  fleet-envelope convention.
+- Records under `<dataDir>/sources/<id>/` (data-dir store in BOTH backend
+  modes, like manifests): `metadata.json` (0600, durable.Replace,
+  DisallowUnknownFields, canonical-URL revalidation on load) carries
+  identity, an as-of-added DefaultBranch snapshot, the CredentialRef
+  (opaque scoped-token reference — never a token value; bound 128 chars,
+  no whitespace), mutable DisplayName separate from identity, and the
+  D01-convention degradation envelope (Degraded/DegradeReason/
+  DegradeCheckedAt). The webhook secret lives in its own 0600 file,
+  returned exactly once on create/rotate, never in any later read
+  (pinned by test reading the raw metadata.json).
+- Delivery ledger per source (`deliveries.jsonl`, append + fsync, torn
+  tail dropped, mid-file corruption fails loudly, compacted at 2x the
+  250-record retention): provider delivery id, normalized event, branch,
+  authenticated commit, disposition (admitted/duplicate/ignored/degraded/
+  superseded/refused) and reason. "Refused" deliveries deliberately do
+  NOT join the seen index — the forge's retry re-runs admission instead
+  of being swallowed as a duplicate (C02's rollback rule).
+
+**What landed — webhook delivery identity (internal/server/sources.go):**
+
+- `POST /hooks/sources/{id}` — unauthenticated by design (the signature
+  is the auth), gate-allowlisted like /api/mcp outside sessions; verifies
+  `X-Hub-Signature-256` (constant-time HMAC-SHA256 over the raw body) or
+  `X-Gitlab-Token`. Unauthenticated deliveries are NEVER recorded (an
+  attacker could spray fabricated delivery ids into the ledger) — 401 +
+  log only. Delivery id from `X-GitHub-Delivery`/`X-Gitlab-Event-UUID`,
+  else derived from the body digest so retries still dedupe.
+- Authenticated deliveries: dedupe by delivery id (200 `duplicate`);
+  non-push events, unpinnable pushes (tags/deletions/malformed — the CLI
+  PushCommit rules, reimplemented in source.ParsePush), unwatched
+  branches (as-of-added default-branch snapshot: a forge-side default
+  change never silently retargets deploys) and degraded sources are
+  RECORDED-and-ignored with the exact reason — never silently dropped.
+  Deleted refs produce no commit pin, hence recorded-and-ignored.
+- Forwarding rides the EXISTING D02 operation queue (no second queue):
+  the delivery joins git-managed manifests whose `git.repository`
+  canonical URL matches (transport+case-folded; an uncanonicalizable
+  manifest repository fails the whole delivery loudly), then enqueues one
+  `manifest_apply` per bound manifest carrying the CURRENT registered
+  manifest revision (admission pins it — a moving branch cannot change an
+  admitted build) plus new `Request.SourceID`/`SourceCommit` fields
+  (additive, omitempty — old request hashes unchanged; they join the
+  request hash so a new commit is new work and a replayed delivery
+  converges), attributed to `Actor{kind: webhook, subject:
+  source/<id>}` (its own idempotency namespace) under the delivery-
+  scoped key `wh:<delivery>:<server>/<app>`. Admission refusals are
+  recorded as refused without marking the delivery seen and answered
+  429/503 so the forge retries.
+- Reorder convergence: a newer delivery cancels the still-QUEUED
+  operations its source admitted for the same target (ledger marks them
+  superseded-by; the queued record resolves canceled per D02 semantics)
+  and admits its own — C02's newest-wins on top of FIFO. The RUNNING
+  operation is never interrupted (C02's deliberate posture); a
+  ledger-failure retry is identified by its idempotency key and replays
+  instead of superseding itself.
+- API surface (administer.credentials class — payloads carry webhook
+  secrets and credential refs, the registries/notifications precedent):
+  GET/POST `/api/sources`, GET/PATCH/DELETE `/api/sources/{id}`,
+  POST `.../verify` (runs the injected SourceCredentialVerifier; failure
+  → source degraded with the exact reason, visible on every read;
+  success clears it; nil verifier answers 501 explicitly — never a
+  silent degradation and never a silent pass), POST `.../rotate-secret`.
+  Route matrix extended in caps_test.
+
+**TDD evidence:** internal/source tests (url/store/deliveries) written
+compile-red first; internal/server/sources_test.go written against the
+not-yet-existing API (compile red captured). All three mutation checks
+verified red then restored: credential-failure swallowed (MarkCredentialState
+neutered) → TestSourceRevokedCredentialDegradesVisibly fails on the missing
+`degraded:true` envelope; delivery id ignored (DeliverySeen neutered) →
+TestSourceWebhookDedupeAndReorderConverge fails (the duplicate delivery
+admitted a second operation); supersede skipped → the same test fails
+(superseded operation succeeded instead of canceled).
+
+**Remaining D04 scope (next slices):**
+
+- GitHub App flow (installation tokens, per-installation credential
+  verification) and the production SourceCredentialVerifier (forge API
+  calls per kind; today verify answers 501 without one).
+- Builds FROM git: the admitted manifest_apply applies dash's registered
+  manifest revision; a checkout-of-commit flow (clone at the pinned SHA
+  server-side or via the CLI's autodeploy contract) is the actual
+  git-build path — needs a CLI contract decision (which side checks out).
+- PR preview lifecycle: status, access, expiry, secret isolation,
+  cleanup, link back to the source review (C06 dependency); non-push
+  events are currently recorded-and-ignored.
+- Monorepo path filters via the CLI contract (the CLI's changed-file
+  rule); private-repo credential USE (the scoped reference is stored and
+  verified-but-unused; actual authenticated fetches ride the build flow).
+- Delivery identity depth: per-forge timestamp freshness on HMAC
+  (delivery-id dedupe bounds replay today), payload size beyond the
+  1 MiB mutation cap (large push payloads 413 before the handler),
+  GitLab X-Gitlab-Signature (SHA-256 variant) alongside the token
+  header, and a UI surface (sources page, delivery history rendering).
+- Convergence of dash-webhook vs CLI-autodeploy triggers for the same
+  app (C02's recorded cross-repo remainder).
+
+## Resolution log (D04 slice)
+
+- 2026-09-23: first bounded slice landed as described above (working
+  tree, uncommitted). Gates: `go vet ./...` clean; `gofmt -l` clean;
+  `go test ./... -count=1` all 14 packages ok; `go test -race -count=1`
+  on internal/source, internal/operation, internal/server ok; `make
+  build` ok. Frontend untouched (no bundle change to node --check). No
+  push performed.

@@ -342,6 +342,11 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / DELETE | `/api/restore-tests/{id}` | Detail / delete. |
 | POST | `/api/restore-tests/{id}/run` | Verify the latest backup now (restores into a scratch container via `teploy accessory verify-backup`). Returns HTTP 409 when a run for this test is already in flight — retry when it completes. |
 | GET / POST | `/api/notifications` | Read / write alert config. |
+| GET / POST | `/api/sources` | List / register git sources (D04): `{forge, clone_url, default_branch?, credential_ref?, display_name?}` — `forge` is `github`/`forgejo`/`gitea`/`gitlab`/`generic`; the clone URL is canonicalized (credentials stripped, scp/ssh forms folded onto https, `.git` dropped) and identity is forge + URL, so same-named repos on two forges never collide. Create returns the webhook secret exactly once. |
+| GET / PATCH / DELETE | `/api/sources/{id}` | Detail (with recent webhook deliveries and their dispositions) / update display name, default branch, credential reference / delete. Identity fields are immutable. |
+| POST | `/api/sources/{id}/verify` | Run the credential verifier; a failure marks the source degraded with the exact reason (visible everywhere, deliveries are then recorded-and-refused, never silently dropped). Answers 501 when no verifier is configured. |
+| POST | `/api/sources/{id}/rotate-secret` | Replace the webhook secret; returns the new value exactly once. |
+| POST | `/hooks/sources/{id}` | Inbound forge webhook (no session — the signature IS the auth: `X-Hub-Signature-256` HMAC-SHA256, or `X-Gitlab-Token`). Authenticated pushes to the watched default branch that carry a pinnable commit are recorded in a durable per-source ledger (dedupe by delivery id) and admitted onto the operation queue as `git-managed` manifest applies carrying the source id and the authenticated commit; a newer delivery supersedes still-queued work from the same source. Duplicate deliveries answer `{"status":"duplicate"}`; pings/tags/deletions/unwatched branches are recorded-and-ignored. |
 | GET | `/api/sso` | List SSO principals (admin). |
 | POST | `/api/sso/revoke` | Revoke all sessions of one SSO principal `{subject}` (admin). |
 | POST | `/api/users/{username}/revoke-sessions` | Revoke all sessions of one local account (admin). |
@@ -367,7 +372,7 @@ reveal.secrets capability"}`).
 | `execute.deploy` | Deploy, rollback, container lifecycle, maintenance, remove, lock/unlock, template install, operation cancel/retry. |
 | `execute.mutate` | env/KV writes and dashboard config mutations (monitors, groups, homepage, manifests). |
 | `restore.data` | Restore-test create/edit/delete/run (destructive against backup data). |
-| `administer.credentials` | MCP tokens, server config, image registries, notification channels. |
+| `administer.credentials` | MCP tokens, server config, image registries, notification channels, git sources. |
 | `administer.users` | Accounts and SSO principals. |
 | `view.logs` | Container/service logs and replay (deliberate access per the audit trail policy). |
 
