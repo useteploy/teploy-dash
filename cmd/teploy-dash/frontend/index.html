@@ -119,7 +119,17 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading && visibleItems.length === 0 && !editing">
+      <!-- D07: a failed load is an error state with a retry — never the
+           empty state, and never data that paints as fresh. -->
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && visibleItems.length === 0 && !editing">
         <div class="empty-state">
           <p>No shortcuts yet.</p>
           <button class="btn btn-primary" style="margin-top:12px;" @click="editing = true; openAdd()">Add your first shortcut</button>
@@ -340,7 +350,15 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed">
         <div>
           <div class="page-header">
             <div>
@@ -450,8 +468,15 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
+      <template x-if="!loading && !app && loadFailed">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="reload()">Retry</button></div>
+      </template>
+
       <template x-if="!loading && app">
         <div>
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+          </template>
           <div class="page-header">
             <h1 class="page-title" x-text="app.name"></h1>
             <span class="card-meta" x-text="app.server"></span>
@@ -942,7 +967,16 @@
             <div class="loading"><div class="spinner"></div></div>
           </template>
 
-          <!-- Monitor List -->
+          <template x-if="!loading && loadFailed && !showingStale">
+            <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="loadMonitors()">Retry</button></div>
+          </template>
+
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+          </template>
+
+          <!-- Monitor List (also renders under a stale banner: earlier data
+               stays visible when a refresh fails — D07) -->
           <template x-if="!loading && monitors.length > 0">
             <div class="monitor-list">
               <template x-for="m in monitors" :key="m.id">
@@ -969,7 +1003,7 @@
           </template>
 
           <!-- Empty State -->
-          <template x-if="!loading && monitors.length === 0">
+          <template x-if="!loading && !loadFailed && monitors.length === 0">
             <div class="empty-state">
               <div class="empty-icon">
                 <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1157,6 +1191,14 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="loadTests()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
       <template x-if="!loading && tests.length > 0">
         <div class="monitor-list">
           <template x-for="t in tests" :key="t.id">
@@ -1201,7 +1243,7 @@
         </div>
       </template>
 
-      <template x-if="!loading && tests.length === 0">
+      <template x-if="!loading && !loadFailed && tests.length === 0">
         <div class="empty-state">
           <h3>No restore tests yet</h3>
           <p>A restore test regularly restores an accessory's latest backup into a scratch container and verifies it's usable — so a backup that can't restore gets caught before you need it.</p>
@@ -1280,7 +1322,15 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading && (!servers || servers.length === 0)">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && (!servers || servers.length === 0)">
         <div class="empty-state"><p>No servers configured. Add servers in Settings.</p></div>
       </template>
 
@@ -1319,6 +1369,10 @@
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && !status && loadFailed">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="reload()">Retry</button></div>
       </template>
 
       <template x-if="!loading && status">
@@ -1485,7 +1539,15 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading && (templates || []).length === 0">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && (templates || []).length === 0">
         <div class="empty-state">
           <p>No templates available. Check that teploy CLI is installed and `teploy template list` returns results.</p>
         </div>
@@ -1581,7 +1643,15 @@
         </div>
       </div>
 
-      <template x-if="!loading && ops.length === 0">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && ops.length === 0">
         <div class="empty-state">
           <p>No operations yet.</p>
           <p style="color: var(--text-muted); font-size: 12px; margin-top: 6px;">
@@ -1628,6 +1698,14 @@
   <template x-if="$store.router.page === 'operation-detail'">
     <div x-data="operationDetailPage">
       <a href="#" class="back-link" @click.prevent="$store.router.navigate('operations')">&larr; Operations</a>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && !op && loadFailed">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="init()">Retry</button></div>
+      </template>
 
       <template x-if="!loading && op">
         <div>

@@ -174,6 +174,33 @@ function withDeployReadiness(component) {
   return component;
 }
 
+// ── Async view states (D07: misleading states are P0) ──
+// withAsyncLoad gives a page the four-state discipline every async surface
+// must distinguish: loading / error / empty / stale.
+//   - loadError: the last FAILED load's message (null after a success);
+//   - loadedAt:  the last SUCCESSFUL load's time (null until one lands).
+// Derived:
+//   - loadFailed:   a failure with no data behind it — render the error
+//     state with a Retry, never the empty state (which used to claim "no
+//     monitors yet" while the API was down);
+//   - showingStale: a failure with earlier data still displayed — keep the
+//     data and name its age and the exact failure; it must not paint as
+//     fresh and it must not vanish.
+// The empty state renders only after a successful load.
+function withAsyncLoad(component) {
+  component.loadError = null;
+  component.loadedAt = null;
+  Object.defineProperties(component, {
+    loadFailed: { get() { return !!this.loadError; }, enumerable: true },
+    showingStale: { get() { return !!this.loadError && !!this.loadedAt; }, enumerable: true },
+  });
+  component.staleBannerText = function () {
+    if (!this.showingStale) return '';
+    return 'Showing data from ' + formatObservedAt(this.loadedAt) + ' — refresh failed: ' + this.loadError;
+  };
+  return component;
+}
+
 // ── Toast ──
 function showToast(message, type = 'info') {
   const container = document.getElementById('toast-container');
@@ -207,6 +234,15 @@ function toggleTheme() {
   document.documentElement.setAttribute('data-theme', next);
   try { localStorage.setItem('teploy-theme', next); } catch {}
   return next;
+}
+
+// formatObservedAt renders a timestamp for humans; unparseable values pass
+// through verbatim rather than rendering "Invalid Date". Top-level so both
+// the fleet pages and the shared async-state helper (withAsyncLoad) use one
+// formatter.
+function formatObservedAt(iso) {
+  const date = new Date(iso);
+  return isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
 }
 
 // ── Accessibility helpers ──
@@ -635,7 +671,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Project Detail Page ──
-  Alpine.data('projectDetailPage', () => withDeployReadiness({
+  Alpine.data('projectDetailPage', () => withDeployReadiness(withAsyncLoad({
     apps: [],
     groups: [],
     serverList: [],
@@ -655,23 +691,29 @@ document.addEventListener('alpine:init', () => {
 
     async load() {
       this.loading = true;
-      try {
-        const [apps, groups, servers] = await Promise.all([
-          api.get('/api/apps').catch(() => []),
-          api.get('/api/groups').catch(() => []),
-          // /api/servers is viewer-readable; /api/config/servers is admin-only
-          // and left a 403-catch producing an empty dropdown for editors.
-          api.get('/api/servers').catch(() => ({})),
-        ]);
-        this.apps = apps || [];
-        this.groups = groups || [];
-        this.serverList = Object.keys(servers || {});
-        const group = (this.groups || []).find(g => g.name === this.groupName);
-        const proj = group ? (group.projects || []).find(p => p.name === this.projectName) : null;
-        const projAppNames = proj ? (proj.apps || []) : [];
-        this.projectApps = (this.apps || []).filter(a => projAppNames.includes(a.name));
-      } catch (e) {
-        showToast(e.message, 'error');
+      // Each fetch fails independently; the first failure is the page's
+      // error state (the old per-fetch .catch(() => []) painted a dead API
+      // as "No apps in this project yet" — D07).
+      let failure = null;
+      const [apps, groups, servers] = await Promise.all([
+        api.get('/api/apps').catch(e => { failure = failure || e; return []; }),
+        api.get('/api/groups').catch(e => { failure = failure || e; return []; }),
+        // /api/servers is viewer-readable; /api/config/servers is admin-only
+        // and left a 403-catch producing an empty dropdown for editors.
+        api.get('/api/servers').catch(e => { failure = failure || e; return ({}); }),
+      ]);
+      this.apps = apps || [];
+      this.groups = groups || [];
+      this.serverList = Object.keys(servers || {});
+      const group = (this.groups || []).find(g => g.name === this.groupName);
+      const proj = group ? (group.projects || []).find(p => p.name === this.projectName) : null;
+      const projAppNames = proj ? (proj.apps || []) : [];
+      this.projectApps = (this.apps || []).filter(a => projAppNames.includes(a.name));
+      if (failure) {
+        this.loadError = `Could not load the project fully: ${failure.message}`;
+      } else {
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       }
       this.loading = false;
     },
@@ -751,10 +793,10 @@ document.addEventListener('alpine:init', () => {
         this.deploying = false;
       }
     },
-  }));
+  })));
 
   // ── App Detail Page ──
-  Alpine.data('appDetailPage', () => ({
+  Alpine.data('appDetailPage', () => withAsyncLoad({
     tab: 'general',
     // resource is the IMMUTABLE identity this page was opened for (A49).
     // Every path and destructive action reads it — never the live router
@@ -845,6 +887,8 @@ document.addEventListener('alpine:init', () => {
       this.drift = null;
       this.stats = [];
       this.health = null;
+      this.loadError = null;
+      this.loadedAt = null;
       this.newEnvKey = '';
       this.newEnvValue = '';
       this.resetKvScope(); // bumps kvGeneration: in-flight KV reads for the old app are dropped
@@ -950,8 +994,12 @@ document.addEventListener('alpine:init', () => {
         const app = await api.get(`${this.appPath()}/status`);
         if (this.resource !== target) return; // route changed mid-flight (A50)
         this.app = app;
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        if (this.resource === target) showToast(e.message, 'error');
+        // D07: a failed status read renders the error state with a retry —
+        // the old path left the page blank below the back link (toast only).
+        if (this.resource === target) this.loadError = `Could not load ${target.name}: ${e.message}`;
       }
       if (this.resource === target) this.loading = false;
     },
@@ -1332,7 +1380,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Restore Tests Page ──
-  Alpine.data('restoreTestsPage', () => ({
+  Alpine.data('restoreTestsPage', () => withAsyncLoad({
     tests: [],
     servers: [],
     loading: true,
@@ -1340,6 +1388,7 @@ document.addEventListener('alpine:init', () => {
     creating: false,
     running: null,
     refreshInterval: null,
+    _loadGeneration: 0,
     newTest: {
       server: '',
       app: '',
@@ -1359,17 +1408,26 @@ document.addEventListener('alpine:init', () => {
 
     destroy() {
       this._alive = false;
+      this._loadGeneration++; // a response still in flight is stale on destroy
       if (this.refreshInterval) clearInterval(this.refreshInterval);
     },
 
     async loadTests() {
+      const generation = ++this._loadGeneration;
       try {
         const data = await rawFetch.get('/api/restore-tests');
+        if (!this._alive || generation !== this._loadGeneration) return;
         this.tests = data || [];
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        console.error('Failed to load restore tests:', e);
+        // D07: failed refresh keeps the last list and reports it as stale;
+        // failed first load is an error state, never "No restore tests yet".
+        if (this._alive && generation === this._loadGeneration) {
+          this.loadError = `Could not load restore tests: ${e.message}`;
+        }
       }
-      this.loading = false;
+      if (this._alive && generation === this._loadGeneration) this.loading = false;
     },
 
     async loadServers() {
@@ -1471,7 +1529,7 @@ document.addEventListener('alpine:init', () => {
   // envelope ID. Unreachable servers stay visible with their last-known
   // state instead of vanishing. Additive: if /api/fleet is unavailable the
   // cards render exactly as before, and /api/apps consumers are untouched.
-  Alpine.data('serversPage', () => ({
+  Alpine.data('serversPage', () => withAsyncLoad({
     servers: [],
     loading: true,
 
@@ -1485,9 +1543,12 @@ document.addEventListener('alpine:init', () => {
         // /api/servers returns a { name: {host, user} } map; the card x-for
         // keys on s.name, so flatten the map into an array with name. Without
         // this the keys are all undefined and Alpine's x-for crashes the page.
-        const raw = (await api.get('/api/servers').catch(() => ({}))) || {};
+        // A failure here is the page's error state — swallowing it (the old
+        // .catch(() => ({}))) painted a dead API as "No servers configured".
+        const raw = (await api.get('/api/servers')) || {};
         // The fleet envelopes carry each server's truth; a failure here must
-        // not take the page down (additive switch — D01).
+        // not take the page down (additive switch — D01): cards render
+        // without freshness chrome instead.
         const fleet = await api.get('/api/fleet').catch(() => null);
         const observed = new Map(((fleet && fleet.servers) || []).map(env => [env.server, env]));
         const merged = (Array.isArray(raw) ? raw : Object.entries(raw).map(([name, s]) => ({ name, ...s })))
@@ -1500,8 +1561,12 @@ document.addEventListener('alpine:init', () => {
           }
         }
         this.servers = merged;
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        this.servers = [];
+        // D07: keep earlier cards and report them as stale; a failed first
+        // load is an error state, not the "No servers configured" empty one.
+        this.loadError = `Could not load servers: ${e.message}`;
       }
       this.loading = false;
     },
@@ -1552,13 +1617,8 @@ document.addEventListener('alpine:init', () => {
     };
   }
 
-  function formatObservedAt(iso) {
-    const date = new Date(iso);
-    return isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
-  }
-
   // ── Server Detail Page ──
-  Alpine.data('serverDetailPage', () => ({
+  Alpine.data('serverDetailPage', () => withAsyncLoad({
     status: null,
     proxy: null,
     tab: 'overview',
@@ -1569,10 +1629,18 @@ document.addEventListener('alpine:init', () => {
       this.loading = true;
       try {
         this.status = await api.get(`/api/servers/${name}/status`);
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        showToast(e.message, 'error');
+        // D07: a failed status read is an error state with a retry — the old
+        // path left the page blank below the back link (toast only).
+        this.loadError = `Could not load server status: ${e.message}`;
       }
       this.loading = false;
+    },
+
+    async reload() {
+      await this.init();
     },
 
     async switchTab(t) {
@@ -2008,7 +2076,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Templates Page ──
-  Alpine.data('templatesPage', () => ({
+  Alpine.data('templatesPage', () => withAsyncLoad({
     templates: [],
     serverList: [],
     selected: null,
@@ -2017,17 +2085,26 @@ document.addEventListener('alpine:init', () => {
     installForm: { domain: '', server: '', vars: {} },
 
     async init() {
+      await this.load();
+    },
+
+    async load() {
+      this.loading = true;
       try {
         const [tpls, servers] = await Promise.all([
-          api.get('/api/templates').catch(() => []),
+          api.get('/api/templates'),
           // /api/servers is viewer-readable; /api/config/servers is admin-only
           // and left a 403-catch producing an empty dropdown for editors.
           api.get('/api/servers').catch(() => ({})),
         ]);
         this.templates = tpls || [];
         this.serverList = Object.keys(servers || {});
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        showToast(e.message, 'error');
+        // D07: a failed catalog read is an error state with a retry — it
+        // must not paint as the "No templates available" empty state.
+        this.loadError = `Could not load templates: ${e.message}`;
       }
       this.loading = false;
     },
@@ -2070,7 +2147,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Monitors Page ──
-  Alpine.data('monitorsPage', () => ({
+  Alpine.data('monitorsPage', () => withAsyncLoad({
     monitors: [],
     selectedMonitor: null,
     showCreateDialog: false,
@@ -2081,6 +2158,7 @@ document.addEventListener('alpine:init', () => {
     testing: false,
     testResult: null,
     editingId: null,
+    _loadGeneration: 0,
     newMonitor: {
       name: '',
       type: 'http',
@@ -2102,17 +2180,27 @@ document.addEventListener('alpine:init', () => {
 
     destroy() {
       this._alive = false;
+      this._loadGeneration++; // a response still in flight is stale on destroy
       if (this.refreshInterval) clearInterval(this.refreshInterval);
     },
 
     async loadMonitors() {
+      const generation = ++this._loadGeneration;
       try {
         const data = await rawFetch.get('/api/monitors');
+        if (!this._alive || generation !== this._loadGeneration) return;
         this.monitors = data || [];
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        console.error('Failed to load monitors:', e);
+        // D07: the 30s poller keeps the last list on a failed refresh and
+        // reports it as stale; a failed FIRST load is an error state, not
+        // the "No monitors yet" empty state.
+        if (this._alive && generation === this._loadGeneration) {
+          this.loadError = `Could not load monitors: ${e.message}`;
+        }
       }
-      this.loading = false;
+      if (this._alive && generation === this._loadGeneration) this.loading = false;
     },
 
     async loadCLIStatus() {
@@ -2266,7 +2354,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Homepage ──
-  Alpine.data('homepagePage', () => ({
+  Alpine.data('homepagePage', () => withAsyncLoad({
     items: [],
     loading: true,
     editing: false,
@@ -2284,13 +2372,21 @@ document.addEventListener('alpine:init', () => {
     get visibleItems() { return this.items.filter(i => !i.hidden); },
 
     async init() {
+      await this.load();
+    },
+
+    async load() {
       try {
         const meta = {};
         const raw = (await api.get('/api/homepage', {_meta: meta})) || [];
         this._etag = meta.etag || '';
         this.items = raw.map(i => ({ ...i, _faviconFailed: false }));
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch(e) {
-        showToast(e.message, 'error');
+        // D07: a failed load keeps any earlier shortcuts on screen (stale)
+        // and never renders as "No shortcuts yet".
+        this.loadError = `Could not load shortcuts: ${e.message}`;
       }
       this.loading = false;
     },
