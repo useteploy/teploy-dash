@@ -1798,3 +1798,71 @@ surfacing slice lands, its importer must route era=legacy+candidates
 through explicit-binding refusal and extend
 `contracts_corpus_test.go`.
 
+## D05 bounded slice — templates as reviewed versioned packages + database-action distinction — 2026-09-23
+
+Two commits (see log): the dash side of D05's template packaging, and the
+database-action inventory. What landed, what is honestly NOT landed:
+
+### Templates (dash side of the layer rule)
+
+- `internal/templates`: the D05 manifest shape validated on dash's side —
+  semver versions, required-secrets-must-be-declared-variables, duplicate
+  names rejected, unknown additive fields tolerated (forward compat). An
+  invalid entry fails the WHOLE catalog render (502): a catalog dash
+  cannot validate is a dependency failure, not a shorter list.
+- `/api/templates` renders version_state ("unversioned" for today's
+  catalog — never an invented version), installed state (from dash's own
+  succeeded template_install records) and upgrade info (from/to/notes/
+  backup_scope from the package's own fields) when the catalog advanced.
+- Version pinning on instantiate: optional `template_version` on
+  `/api/templates/install`, enforced as admission-time equality with the
+  catalog (409 + upgrade pointer on drift; 409 pinning an unversioned
+  catalog; 502 fail-closed when unverifiable), recorded on the operation
+  request (participates in the idempotency hash).
+
+Deferred tails (dash cannot close them alone):
+
+- **CLI-side pin enforcement (TOCTOU):** between dash's admission check
+  and `teploy template install`'s registry fetch the catalog can still
+  move — dash's pin is selection-truth, not fetch-truth. The real fix is
+  a `template install --version`/digest flag in teploy-cli; until then
+  the UI states exactly what the pin guarantees.
+- **Catalog versioning itself:** the community catalog (useteploy/
+  templates index.json) carries no version/architecture/upgrade-notes
+  fields and no producer emits them; dash renders "unversioned" until the
+  CLI-first catalog bump lands (templates repo AUDIT: useteploy__templates
+  -01/-02 deferred items). Dash must not be the first mover on shape.
+- **CompareVersions prerelease ordering** is lexical, not semver
+  numeric-identifier order; documented in code, no versioned catalog
+  exists to exercise it.
+
+### Database actions (distinct operations, no pretending)
+
+- `internal/server/dbactions.go` + GET `/api/apps/{server}/{app}/db-actions`:
+  the five D05 classes (restart, version upgrade, credential rotation,
+  data restore, destructive removal) each with support status grounded in
+  the ACTUAL teploy-cli accessory surface (stop/start/logs/exec/
+  verify-backup accept --app server-state mode; upgrade/backup/restore
+  are cwd/teploy.yml-bound; no accessory restart, no credential rotation,
+  removal is app-scope only). Unsupported classes render the exact
+  remedy; none is wired to a closest-match command. Tests pin the
+  no-pretend invariants (supported ⇒ command+dash action; unsupported ⇒
+  remedy, no dash action, no confirmation) and pin the CURRENT surface
+  (all five unsupported from dash today) so a flip is deliberate.
+- Accessory stop/start in the UI got DISTINCT confirmations with their
+  own blast-radius text (stop: data connection lost; start: cold start,
+  no data change) — previously both ran with NO confirmation at all.
+
+Deferred tails (CLI-side or later slices):
+
+- The five classes' execution from dash awaits teploy-cli server-state
+  modes (accessory upgrade/backup/restore with --app, an accessory
+  restart, a rotation story, per-accessory removal). Data restore's
+  non-destructive cousin is already wired via Restore Tests
+  (`accessory verify-backup` scratch-container verification).
+- D05 remainder beyond this lane: stacks service-dependency and
+  persistent-volume consequences (D06-adjacent), worker/replica/scaling
+  and maintenance-mode surfacing, storage/networking/history tabs — the
+  full one-place resource page is the D05/D07 arc, not this slice.
+
+

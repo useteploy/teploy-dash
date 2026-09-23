@@ -2058,6 +2058,12 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeRawJSON(w, result.Stdout)
 
+	// D05: the database-action inventory (restart / version upgrade /
+	// credential rotation / data restore / destructive removal) with
+	// support status, blast radius and remedies — read-only metadata.
+	case action == "db-actions" && r.Method == "GET":
+		s.handleDatabaseActions(w, r)
+
 	case r.Method == "POST":
 		s.handleAppPost(w, r, serverName, appName, action)
 

@@ -765,6 +765,11 @@ document.addEventListener('alpine:init', () => {
     envVars: [],
     deployLog: [],
     accessories: [],
+    // D05 database-action inventory state: dbActions holds the server's
+    // action classes (support status, blast radius, remedy); dbActionsFor
+    // is the accessory row the panel was opened for.
+    dbActions: [],
+    dbActionsFor: null,
     loading: true,
     actionLoading: false,
     newEnvKey: '',
@@ -1213,6 +1218,47 @@ document.addEventListener('alpine:init', () => {
     accessoryName(containerName) {
       const prefix = `${this.app?.name || ''}-`;
       return containerName.startsWith(prefix) ? containerName.slice(prefix.length) : containerName;
+    },
+
+    // D05: accessory stop/start are DISTINCT operations, each with its own
+    // confirmation stating its blast radius — a database stop and an app
+    // restart are different agreements, and confirming them with the same
+    // generic prompt is how the wrong one gets approved.
+    async accessoryAction(accessory, action) {
+      const name = this.accessoryName(accessory.name);
+      if (action === 'stop') {
+        if (!confirm(`Stop database ${name} on ${this.resource.server}?\n\nApps using ${name} lose their data connection until it is started again. In-flight queries abort. Persisted data is untouched.`)) return;
+      } else if (action === 'start') {
+        if (!confirm(`Start database ${name} on ${this.resource.server}?\n\nIt comes back empty-memory: connection pools and caches warm up from scratch. No data is changed.`)) return;
+      }
+      this.actionLoading = true;
+      try {
+        await api.post(`${this.appPath()}/accessories/${encodeURIComponent(name)}/${action}`);
+        showToast(`${name} ${action} sent`, 'success');
+        await this.loadAccessories();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.actionLoading = false;
+    },
+
+    // Opens the D05 database-action inventory panel for one accessory,
+    // fetching the server-side inventory (support status is the CLI's
+    // command surface, not a client guess).
+    async toggleDbActions(accessory) {
+      if (this.dbActionsFor && this.dbActionsFor.id === accessory.id) {
+        this.dbActionsFor = null;
+        return;
+      }
+      this.dbActionsFor = accessory;
+      this.dbActions = [];
+      try {
+        const data = await api.get(`${this.appPath()}/db-actions`);
+        this.dbActions = (data && data.actions) || [];
+      } catch (e) {
+        showToast(e.message, 'error');
+        this.dbActionsFor = null;
+      }
     },
   }));
 

@@ -325,6 +325,7 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / POST / DELETE | `/api/apps/{server}/{app}/kv` | List keys (`?pattern=`) / set (`{key,value,ttl}`) / delete (`?key=`) in the shared Nucleus KV store. `?accessory=` defaults to `nucleus`. |
 | GET | `/api/apps/{server}/{app}/kv/value` | Read one value (`?key=`; requires `reveal.secrets`). Returns `exists:false` for an unset key. |
 | GET | `/api/apps/{server}/{app}/accessories` | List accessories (DBs, queues, etc). |
+| GET | `/api/apps/{server}/{app}/db-actions` | D05 database-action inventory: restart / version-upgrade / credential-rotation / data-restore / destructive-removal, each with `supported` (from dash's server-state mode), blast radius, and — for the unsupported classes — the exact remedy. The dashboard does not wire unsupported actions to closest-match commands. |
 | GET | `/api/logs/{server}/{app}` | Live log stream (SSE; `?process=`, `?lines=`). Same-origin only. |
 | GET / POST / DELETE | `/api/config/servers` `/api/config/servers/{name}` | Manage servers via CLI. |
 | GET / POST | `/api/registries` | List / login to image registries. |
