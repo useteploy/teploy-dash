@@ -60,7 +60,7 @@ func (s *Server) resolveOperationServerByID(id string) (operation.Server, bool) 
 
 func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if !s.operationsAvailable(w) {
+	if !s.operationsAvailableFor(w, r.Method) {
 		return
 	}
 	switch r.Method {
@@ -103,7 +103,9 @@ func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if !s.operationsAvailable(w) {
+	// Reads survive a read-only manager; the mutation verbs below do not
+	// (X02 §5 row 6: refuse-downgrade keeps history inspectable).
+	if !s.operationsAvailableFor(w, r.Method) {
 		return
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/operations/"), "/")
@@ -164,7 +166,7 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) enqueueOperation(w http.ResponseWriter, r *http.Request, request operation.Request) {
 	noStore(w)
-	if !s.operationsAvailable(w) {
+	if !s.operationsAvailableFor(w, http.MethodPost) {
 		return
 	}
 	op, replayed, err := s.operations.Enqueue(request, r.Header.Get("Idempotency-Key"), actorFromRequest(r))
@@ -186,7 +188,21 @@ func writeAcceptedOperation(w http.ResponseWriter, op *operation.Operation, repl
 }
 
 func (s *Server) operationsAvailable(w http.ResponseWriter) bool {
+	return s.operationsAvailableFor(w, "")
+}
+
+// operationsAvailableFor gates the operation service. A read-only manager
+// (records newer than this build, X02 §5 row 6) keeps GETs working and
+// refuses mutations with the upgrade remedy; pass mutation="" for reads,
+// or the attempted verb for the mutation gate.
+func (s *Server) operationsAvailableFor(w http.ResponseWriter, mutation string) bool {
 	if s.operations != nil {
+		if mutation != "" {
+			if reason := s.operations.Health().ReadOnly; reason != "" {
+				writeErrorStatus(w, reason, http.StatusServiceUnavailable)
+				return false
+			}
+		}
 		return true
 	}
 	message := "operation service unavailable"

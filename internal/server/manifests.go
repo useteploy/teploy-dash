@@ -190,7 +190,7 @@ func (s *Server) exportManifest(w http.ResponseWriter, server, app, revision str
 }
 
 func (s *Server) enqueueManifestOperation(w http.ResponseWriter, r *http.Request, server, app string, kind operation.Kind) {
-	if !s.operationsAvailable(w) {
+	if !s.operationsAvailableFor(w, http.MethodPost) {
 		return
 	}
 	document, err := s.manifests.Get(server, app)

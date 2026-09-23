@@ -559,7 +559,7 @@ func TestCancelPersistsIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operations, err := store.loadOperations()
+	operations, _, err := store.loadOperations()
 	if err != nil {
 		t.Fatal(err)
 	}

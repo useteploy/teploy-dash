@@ -250,6 +250,11 @@ var (
 	// retry is refused until the answer lands so nobody re-runs work whose
 	// effect may already stand.
 	ErrReconciliationPending = errors.New("operation outcome is being reconciled against the server; retry after reconciliation completes")
+	// ErrReadOnly reports that operation records were written by a newer
+	// teploy-dash (X02 §5 row 6 refuse-downgrade): mutations are refused —
+	// executing or rewriting records this build cannot fully interpret
+	// could corrupt them. Reads remain available; the remedy is upgrading.
+	ErrReadOnly = errors.New("operation records were written by a newer teploy-dash; mutations are refused until the dashboard is upgraded")
 	// ErrAdmissionBudget reports that the target's admission budget is
 	// exhausted: too many non-terminal operations are already queued for it
 	// (A12/A27 remainder). Bounded queues keep a runaway client (or a stuck

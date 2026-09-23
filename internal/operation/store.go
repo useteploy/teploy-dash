@@ -76,41 +76,64 @@ func openFileStore(dataDir string, cfg journalConfig) (*fileStore, error) {
 	return s, nil
 }
 
+// currentRecordVersion is the operation record schema version this build
+// writes and fully understands (X02 §5 row 6). Absent/0 means version 1 —
+// records from before the field existed. A record carrying a HIGHER
+// version cannot be safely interpreted or rewritten: the manager starts
+// read-only instead of executing or mutating records it may corrupt.
+const currentRecordVersion = 2
+
 type persistedOperation struct {
 	Operation
-	RequestHash string `json:"request_hash,omitempty"`
+	RequestHash   string `json:"request_hash,omitempty"`
+	RecordVersion int    `json:"record_version,omitempty"`
 }
 
-func (s *fileStore) loadOperations() (map[string]*Operation, error) {
+// futureRecord names one stored operation record whose record_version
+// exceeds currentRecordVersion.
+type futureRecord struct {
+	File    string
+	Version int
+}
+
+func (s *fileStore) loadOperations() (map[string]*Operation, []futureRecord, error) {
 	entries, err := os.ReadDir(s.recordsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	operations := make(map[string]*Operation)
+	var future []futureRecord
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(s.recordsDir, entry.Name()))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var stored persistedOperation
 		if err := json.Unmarshal(data, &stored); err != nil {
-			return nil, fmt.Errorf("load operation %s: %w", entry.Name(), err)
+			return nil, nil, fmt.Errorf("load operation %s: %w", entry.Name(), err)
 		}
 		fileID := strings.TrimSuffix(entry.Name(), ".json")
 		if !operationIDPattern.MatchString(stored.ID) || stored.ID != fileID {
-			return nil, fmt.Errorf("load operation %s: invalid operation id", entry.Name())
+			return nil, nil, fmt.Errorf("load operation %s: invalid operation id", entry.Name())
+		}
+		if stored.RecordVersion > currentRecordVersion {
+			// Readable enough to display, not safe to mutate: flag it and
+			// let the manager refuse mutations (X02 §5 row 6's
+			// refuse-downgrade rule — never a hard startup failure, which
+			// would take the reads away too).
+			future = append(future, futureRecord{File: entry.Name(), Version: stored.RecordVersion})
 		}
 		stored.Operation.requestHash = stored.RequestHash
 		operations[stored.ID] = &stored.Operation
 	}
-	return operations, nil
+	return operations, future, nil
 }
 
 func (s *fileStore) saveOperation(op *Operation) error {
-	stored := persistedOperation{Operation: *cloneOperation(op), RequestHash: op.requestHash}
+	stored := persistedOperation{Operation: *cloneOperation(op), RequestHash: op.requestHash, RecordVersion: currentRecordVersion}
 	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
 		return err

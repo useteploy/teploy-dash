@@ -209,6 +209,10 @@ type Manager struct {
 	reconcileWG     sync.WaitGroup
 	// receiptReader is Options.ReceiptReader (nil = cannot reconcile).
 	receiptReader ReceiptReader
+	// readOnly is non-empty when stored records carry a schema version
+	// newer than this build supports (X02 §5 row 6): reads work, every
+	// mutation refuses with this reason. Set once at New; never cleared.
+	readOnly string
 }
 
 // noteRecordErrLocked records an operation-record persistence failure for
@@ -285,7 +289,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 	if removed := store.sweepRetention(time.Now().UTC(), options.MaxHistoryAge, options.MaxOperations); len(removed) > 0 {
 		log.Printf("[operation] retention removed %d terminal operation(s)", len(removed))
 	}
-	operations, err := store.loadOperations()
+	operations, future, err := store.loadOperations()
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +313,20 @@ func New(dataDir string, options Options) (*Manager, error) {
 		maxQueuedPerTarget: options.MaxQueuedPerTarget,
 		maxLive:            options.MaxLiveOperations,
 		idempotencyWindow:  options.IdempotencyWindow,
+	}
+	if len(future) > 0 {
+		// X02 §5 row 6 refuse-downgrade: records written by a newer
+		// teploy-dash stay readable, but executing or rewriting them with
+		// an older reader could corrupt them — mutations are refused with
+		// the upgrade remedy, reads keep working.
+		var maxV int
+		for _, f := range future {
+			if f.Version > maxV {
+				maxV = f.Version
+			}
+		}
+		m.readOnly = fmt.Sprintf("%d operation record(s) were written by a newer teploy-dash (highest schema version %d, e.g. %s; this build supports %d); mutations are refused until teploy-dash is upgraded — history remains readable", len(future), maxV, future[0].File, currentRecordVersion)
+		log.Printf("[operation] READ-ONLY: %s", m.readOnly)
 	}
 	if options.MaxConcurrentExecutions > 0 {
 		m.executorSlots = make(chan struct{}, options.MaxConcurrentExecutions)
@@ -403,6 +421,9 @@ func (m *Manager) Enqueue(req Request, idempotencyKey string, actor *Actor) (*Op
 }
 
 func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt int, actor *Actor) (*Operation, bool, error) {
+	if m.readOnly != "" {
+		return nil, false, ErrReadOnly
+	}
 	if len(idempotencyKey) > 255 || strings.ContainsAny(idempotencyKey, "\r\n") {
 		return nil, false, fmt.Errorf("invalid idempotency key")
 	}
@@ -1136,6 +1157,10 @@ type Health struct {
 	EventErrorAt    time.Time `json:"event_error_at,omitempty"`
 	JournalError    string    `json:"journal_error,omitempty"`
 	LiveOperations  int       `json:"live_operations"`
+	// ReadOnly is non-empty when stored records carry a schema version
+	// newer than this build supports (X02 §5 row 6): reads work, mutations
+	// refuse with this reason. Surfaced through /api/health as the banner.
+	ReadOnly string `json:"read_only,omitempty"`
 }
 
 func (m *Manager) Health() Health {
@@ -1147,6 +1172,7 @@ func (m *Manager) Health() Health {
 		RecordErrorAt:   m.recordErrAt,
 		EventError:      m.eventErr,
 		EventErrorAt:    m.eventErrAt,
+		ReadOnly:        m.readOnly,
 	}
 	for _, op := range m.operations {
 		if !op.Status.Terminal() {
@@ -1240,6 +1266,9 @@ func (m *Manager) Shutdown(ctx context.Context) {
 // still fires so a live worker stops promptly; "canceled" as a final status
 // is the worker's observation, and already-applied remote changes may remain.
 func (m *Manager) Cancel(id string) (*Operation, error) {
+	if m.readOnly != "" {
+		return nil, ErrReadOnly
+	}
 	m.mu.Lock()
 	op := m.operations[id]
 	if op == nil {
@@ -1281,6 +1310,9 @@ func (m *Manager) Cancel(id string) (*Operation, error) {
 // attributed to the actor that re-authorized it (not the original enqueuer) —
 // RetryOf preserves the lineage.
 func (m *Manager) Retry(id string, actor *Actor) (*Operation, error) {
+	if m.readOnly != "" {
+		return nil, ErrReadOnly
+	}
 	m.mu.Lock()
 	op := m.operations[id]
 	if op == nil {
