@@ -93,6 +93,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .navbar-nav a { display: block; padding: 5px 11px; border-radius: 6px; color: var(--text-muted); font-size: 13px; text-decoration: none; white-space: nowrap; }
 .navbar-nav a:hover { background: var(--bg-card); color: var(--text); }
 .navbar-nav a.active { background: var(--bg-card); color: var(--text); }
+/* D07 IA regroup: quiet separators between destination groups — resource
+   work (Projects/Fleet/Activity), service operations, Settings. Structure,
+   not styling: same type, same colors, one rule. */
+.navbar-nav .nav-sep { align-self: center; width: 1px; height: 15px; background: var(--border); }
 .navbar-spacer { flex: 1; }
 /* Pinned service links (top-right). Icon-only: the header is chrome, so these
    read as quiet affordances, not as navigation competing with the nav items. */

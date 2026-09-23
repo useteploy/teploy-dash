@@ -317,6 +317,13 @@ document.addEventListener('alpine:init', () => {
   // views are linkable, reloadable, and back/forward work. The server serves
   // index.html for unknown routes (SPA fallback), so deep links resolve.
   // The store API (page/params/navigate) is unchanged — pages don't know.
+  //
+  // D07 IA regroup: the canonical paths are unchanged (stable URLs), and
+  // task-named ALIASES follow the same pages — /projects, /fleet,
+  // /activity deep-link to the same views. Canonical entries stay FIRST in
+  // the table so navigate() keeps pushing canonical URLs; aliases only add
+  // matchURL recognition. Remove an alias and its links break, so treat them
+  // as stable as the canonical paths.
   const ROUTES = [
     { page: 'homepage', path: '/' },
     { page: 'projects', path: '/deployments' },
@@ -331,6 +338,12 @@ document.addEventListener('alpine:init', () => {
     { page: 'operations', path: '/operations' },
     { page: 'operation-detail', path: '/operations/:id' },
     { page: 'settings', path: '/settings' },
+    // Task-named aliases (D07): same pages, task-meaningful paths.
+    { page: 'projects', path: '/projects' },
+    { page: 'servers', path: '/fleet' },
+    { page: 'server-detail', path: '/fleet/:name' },
+    { page: 'operations', path: '/activity' },
+    { page: 'operation-detail', path: '/activity/:id' },
   ];
 
   function routeToURL(page, params) {
