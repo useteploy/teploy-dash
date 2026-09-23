@@ -458,13 +458,15 @@ func ParseJSON(raw string) (interface{}, error) {
 }
 
 // MaxSupportedMachineInterface is the newest teploy machine interface this
-// build of dash understands (X02 D8/D16, contracts corpus rev 1). A decoded
-// envelope advertising a newer interface is REFUSED here — centrally, in the
-// decode both the direct and injected-runner paths share — because
-// interpreting unknown envelope semantics is how a skew becomes silent data
-// corruption. Envelopes with no machine_interface field are pre-MI legacy
-// producers, the documented legacy decode path.
-const MaxSupportedMachineInterface = 1
+// build of dash understands (X02 D8/D16, contracts corpus rev 4). MI 2 is
+// MI 1 plus the server-list envelope reshape — dash adopts it by decoding
+// BOTH server-list shapes (see DecodeServerList) during the transition. A
+// decoded envelope advertising a newer interface is REFUSED here —
+// centrally, in the decode both the direct and injected-runner paths share
+// — because interpreting unknown envelope semantics is how a skew becomes
+// silent data corruption. Envelopes with no machine_interface field are
+// pre-MI legacy producers, the documented legacy decode path.
+const MaxSupportedMachineInterface = 2
 
 // assertMachineInterfaceSupported fails closed on an envelope from a newer
 // machine interface. json.Number keeps the comparison exact.

@@ -39,6 +39,11 @@ if (!corpusDir || !pinnedCorpusRev) {
 const artifacts = {
   "version-handshake": { schema: "version-handshake.schema.json", classes: { valid: "validate", invalid: "refuse" } },
   "app-list-envelope": { schema: "app-list-envelope.schema.json", classes: { valid: "validate", legacy: "decode-only" } },
+  // server-list-envelope arrived with corpus rev 4 (the MI 2 bump): the
+  // valid class is the envelope; the legacy class is the bare
+  // map-of-servers root a pre-MI-2 CLI emitted — a different root shape
+  // this schema deliberately refuses, so the Go decode tests own it.
+  "server-list-envelope": { schema: "server-list-envelope.schema.json", classes: { valid: "validate", legacy: "decode-only" } },
   // server-status fixtures are "pending S2 tail" in the MANIFEST; the
   // producer pre-created the valid/ class dir, so it is classified now --
   // the moment fixtures land they are asserted, with no dash-side change.
