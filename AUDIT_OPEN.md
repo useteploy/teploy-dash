@@ -450,12 +450,14 @@ dash side was ours to do.
 - A12 - CORE LANDED 2026-09-18 (commit bb519ce): durable FIFO admission
   sequence + per-target ordered execution (same as pass-6 A12/A27).
   Admission budgets LANDED in the residual cluster session (per-target,
-  TEPLOY_DASH_MAX_QUEUED_PER_TARGET). Still deferred: idempotency-key
-  namespacing per principal (client coordination).
+  TEPLOY_DASH_MAX_QUEUED_PER_TARGET). Idempotency-key namespacing per
+  principal LANDED 2026-09-22 (second D02 slice, see below); still deferred:
+  per-PRINCIPAL budget carving (needs the role/policy matrix).
 - A13 - actor-attribution fields LANDED in the residual cluster session
-  (see pass-6 A27). Still deferred: idempotency keys namespaced per
-  principal and wired into UI/MCP — additive API + operation-schema change
-  needing client coordination.
+  (see pass-6 A27). Idempotency keys namespaced per principal LANDED
+  2026-09-22 (see the D02 section below); wiring a key through the MCP
+  surface remains additive client coordination (tokens already carry their
+  own namespace the moment a tool starts sending one).
 - A15 (residual) - routing env/kv/lock mutations through the operation
   queue and unifying template-vs-app lock targets: single-mutation-boundary
   redesign; the env/kv direct paths are single SSH round trips with typed
@@ -891,8 +893,8 @@ were found (no new upstream records needed).
   changes the frontend contract).
 - R19 (pinned-target CLI contract) - A27 residual alias-fingerprint work;
   execution-time re-resolution already fails closed (pass 7 A14).
-- R20 (principal-scoped idempotency) - A12/A13 residual (client
-  coordination).
+- R20 (principal-scoped idempotency) - LANDED 2026-09-22, second D02 slice
+  (see the D02 idempotency-namespacing section below).
 - R22 (per-operation terminal-record repair queue) - F021/dash-03 family.
 - R26 (byte-based event-cache budgets + LRU eviction) - design work
   needing memory measurements; count/window bounds landed earlier
@@ -981,10 +983,9 @@ separation per app and operation-progress projection (needs the CLI machine
 contract to expose desired state); per-server refresh backoff (a flapping
 host is currently re-probed at the same 60s cadence as healthy ones);
 groups.json migration onto server-scoped AppRefs (A35, CLI coordination);
-UI depth — per-server freshness/error rendering on the fleet page (the
-envelope endpoint exists; the frontend still reads /api/apps, deliberately
-unchanged in this slice); R40's inventory-level partial-error envelopes for
-the remaining list reads.
+UI depth LANDED 2026-09-22 (second slice below — per-server
+freshness/error rendering on the Servers page); R40's inventory-level
+partial-error envelopes for the remaining list reads.
 
 ## Resolution log (D01 slice)
 
@@ -1066,8 +1067,8 @@ neutered) each fail their test; restored, all pass.
 
 **Remaining D02 scope (next slices):**
 
-- Idempotency namespacing by principal/resource (A12/A13/R20 — client
-  coordination; keys are still a single global namespace).
+- Idempotency namespacing by principal/resource: LANDED 2026-09-22 (see the
+  D02 idempotency-namespacing section below).
 - Queue bounds by PRINCIPAL (per-target and global budgets exist; the
   role/policy matrix prerequisite stands).
 - Pin target identity + manifest revision at admission is partially there
@@ -1099,3 +1100,103 @@ neutered) each fail their test; restored, all pass.
   `go test ./... -count=1` all packages ok; `go test -race -count=1
   ./internal/operation/ ./internal/server/` ok; `make build` ok. Frontend
   untouched (no bundle change to node --check). No push performed.
+
+## 2026-09-22 D02 second slice — idempotency namespacing (A12/A13/R20)
+
+Keys are scoped to the principal that submitted them (programme demand:
+"namespace idempotency by principal/resource"). Closes the collision defect
+(two principals using the same client key — one received the other's
+operation, live and across restarts) and the unbounded key namespace.
+
+**Design:**
+
+- Namespace = `IdempotencyScope(actor)`: `local:<username>`, `sso:<subject>`,
+  `mcp:mcp-token/<id>`, or the explicit `local:no-auth` principal
+  (`NoAuthScope`) for nil actors. In auth mode every API request carries a
+  session before enqueue, so nil actor at the boundary IS no-auth mode —
+  named explicitly so its keys never collide with any authenticated
+  principal's. Derived inside Enqueue; `Actor` (attribution) is unchanged.
+- The in-memory index keys on `idemKey{principal, key}` (a struct — no
+  separator-character collision is forgeable). Same principal + same key =
+  replay/conflict exactly as before; different principals, same key =
+  independent operations, never shared.
+- Persisted namespace: the record carries `IdempotencyPrincipal` next to
+  `IdempotencyKey`; restart restores the index from records within the same
+  namespace. Legacy pre-namespacing records restore into a `""` namespace no
+  namespaced replay matches — an upgrade can never replay one principal's
+  operation to another; the cost (a replay in flight across the upgrade
+  enqueues new work) is bounded by the window and accepted.
+- Bounded window: `IdempotencyWindow` (default 24h; negative disables;
+  env `TEPLOY_DASH_IDEMPOTENCY_WINDOW`), measured from the admitted
+  operation's creation. Enforced at lookup, at restart restore, and on the
+  retention-sweep cadence (expired entries pruned). Past the window the key
+  is reusable for new work. MCP tokens already carry per-token namespaces
+  the moment a tool starts sending a key (A19 residual wiring).
+
+**TDD evidence (internal/operation/idempotency_test.go,
+internal/server/operations_test.go):** red-first against pre-slice behavior
+— `TestIdempotencyKeyNamespacedByPrincipal`,
+`TestIdempotencyNamespacingSurvivesRestart`,
+`TestIdempotencyNoAuthScopeIsItsOwnPrincipal`,
+`TestOperationIdempotencyNamesBySessionPrincipal` all failed on the
+un-namespaced code (bob received alice's operation, `replayed=true`, both
+live and post-restart) before implementation; green after. Mutations
+verified: principal dropped from the index key → the three namespacing
+tests fail; window check removed from lookupReplayLocked →
+`TestIdempotencyWindowExpiresKeys` fails; restored, all pass.
+
+**Remaining D02 scope:** per-PRINCIPAL queue bounds (per-target + global
+budgets exist; needs the role/policy matrix); operation-stream UI depth +
+stream resume-by-sequence hardening on the events surface (replay machinery
+exists; rendering reconciliation states / hiding Retry-while-reconciling is
+frontend work); terminal-outcome repair queue (R22/F021 family); receipt
+coverage for rollback/template_install/manifest_apply/app_lifecycle/
+maintenance; sequential startup reconciliation + needs-manual-check
+backoff; re-reconcile surface for terminal records and the cancel_requested
+recovery path (A09); MCP key-passing adoption (additive, client
+coordination).
+
+## 2026-09-22 D01 second slice — fleet UI depth (A37, UI half)
+
+The Servers page consumes `/api/fleet` additively: cards merge the
+`/api/servers` config with each server's observation envelope —
+freshness chip (fresh green / stale amber / unknown red; hidden when fleet
+data is unavailable), the exact error of an unreachable host, its
+last-known app count ("N apps (last known)") and last successful
+observation time ("never observed successfully" when it has none), the
+stable envelope ID, and a dot that reflects observation truth. Unreachable
+servers remain visible — D01's core promise, now user-facing. Fleet-only
+servers (the local fallback) also stay visible. `/api/fleet` failure leaves
+the cards exactly as before (catch → null, no freshness/error chrome);
+`/api/apps` consumers untouched.
+
+**Tests:** `cmd/teploy-dash/frontend-test/servers_page.test.mjs` — zero-
+dependency node component test per the repo's no-build/no-CI-Node
+convention: loads app.js under stubbed browser globals, captures the Alpine
+factories, drives `serversPage.load()` against stubbed `/api/servers` +
+`/api/fleet`. Asserts: unknown-freshness server exposes its exact error +
+last-known count + last-success time and distinct dot classes; fresh server
+carries no error chrome; fleet-unavailable renders no freshness chrome on
+any card; fleet-only servers stay visible; plus a static template tripwire
+(the card must bind freshnessLabel/unreachableMeta/s.error). Red-first:
+failed on the pre-slice component (no freshness surface). Mutations
+verified: merge ignoring envelope freshness/error → 4 failures; template
+bindings stripped → 3 tripwire failures; restored, all pass. Live-browser
+verification: Chromium DOM (stubbed APIs) shows alpha=Fresh/no error block,
+beta=Unknown + exact ssh error + "3 apps (last known) — last successful
+observation ...", gamma=Stale.
+
+**Remaining D01 scope:** readiness-vs-running-vs-desired-state separation
+per app + operation-progress projection (both need the CLI machine contract
+to expose desired state); per-server refresh backoff; groups.json migration
+onto server-scoped AppRefs (A35, CLI coordination); R40 inventory-level
+partial-error envelopes for remaining list reads.
+
+## Resolution log (2026-09-22 second slices)
+
+- 2026-09-22: D02 idempotency namespacing + D01 fleet UI depth landed as
+  described above (working tree, uncommitted). Gates: `go vet ./...` clean;
+  `gofmt -l` clean; `go test ./... -count=1` all packages ok;
+  `go test -race -count=1 ./internal/operation/ ./internal/server/` ok;
+  `make build` ok; `node --check` on both bundles; node component test ok.
+  No push performed.

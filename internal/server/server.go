@@ -93,6 +93,10 @@ type Config struct {
 	// 0 = package default, negative disables).
 	OperationMaxLive       int
 	OperationMaxConcurrent int
+	// OperationIdempotencyWindow bounds how long an admitted idempotency key
+	// is honored, measured from the admitted operation's creation (D02
+	// namespacing; 0 = package default 24h, negative disables expiry).
+	OperationIdempotencyWindow time.Duration
 	// CLI/read hooks keep machine-contract handling testable without changing
 	// production behavior.
 	CLIRunner          func(context.Context, ...string) (*cli.Result, error)
@@ -348,6 +352,7 @@ func New(config Config) *Server {
 		MaxQueuedPerTarget:      config.OperationMaxQueued,
 		MaxLiveOperations:       config.OperationMaxLive,
 		MaxConcurrentExecutions: config.OperationMaxConcurrent,
+		IdempotencyWindow:       config.OperationIdempotencyWindow,
 		Resolver:                resolver,
 		ProjectResolver: func(server, app, revision string) (string, error) {
 			if s.manifests == nil {

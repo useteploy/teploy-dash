@@ -1322,6 +1322,12 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Servers Page ──
+  // D01 UI depth: cards merge the /api/servers config with /api/fleet's
+  // per-server observation envelopes — freshness (fresh|stale|unknown), the
+  // error of an unreachable host, its last-known app count, and the stable
+  // envelope ID. Unreachable servers stay visible with their last-known
+  // state instead of vanishing. Additive: if /api/fleet is unavailable the
+  // cards render exactly as before, and /api/apps consumers are untouched.
   Alpine.data('serversPage', () => ({
     servers: [],
     loading: true,
@@ -1337,19 +1343,76 @@ document.addEventListener('alpine:init', () => {
         // keys on s.name, so flatten the map into an array with name. Without
         // this the keys are all undefined and Alpine's x-for crashes the page.
         const raw = (await api.get('/api/servers').catch(() => ({}))) || {};
-        this.servers = Array.isArray(raw)
-          ? raw
-          : Object.entries(raw).map(([name, s]) => ({ name, ...s }));
+        // The fleet envelopes carry each server's truth; a failure here must
+        // not take the page down (additive switch — D01).
+        const fleet = await api.get('/api/fleet').catch(() => null);
+        const observed = new Map(((fleet && fleet.servers) || []).map(env => [env.server, env]));
+        const merged = (Array.isArray(raw) ? raw : Object.entries(raw).map(([name, s]) => ({ name, ...s })))
+          .map(s => withObservation(s, observed.get(s.name)));
+        // A server the fleet observed but the config list lacks (e.g. the
+        // local-state fallback) stays visible — servers never vanish.
+        for (const env of (fleet && fleet.servers) || []) {
+          if (!merged.some(s => s.name === env.server)) {
+            merged.push(withObservation({ name: env.server, host: env.host }, env));
+          }
+        }
+        this.servers = merged;
       } catch (e) {
         this.servers = [];
       }
       this.loading = false;
     },
 
+    freshnessLabel(s) {
+      return ({ fresh: 'Fresh', stale: 'Stale', unknown: 'Unknown' })[s.freshness] || '';
+    },
+
+    // The dot reflects observation truth when the fleet answered, and the
+    // legacy online flag otherwise.
+    cardDotClass(s) {
+      if (s.freshness === 'fresh') return 'online';
+      if (s.freshness === 'stale') return 'unknown';
+      if (s.freshness === 'unknown') return 'offline';
+      return s.online ? 'online' : 'offline';
+    },
+
+    // One honest line under an unreachable server's error: how many apps it
+    // had when last seen, and when that was.
+    unreachableMeta(s) {
+      const parts = [];
+      if (s.appCount !== null && s.appCount !== undefined) {
+        parts.push(`${s.appCount} app${s.appCount === 1 ? '' : 's'} (last known)`);
+      }
+      if (s.lastSuccessAt) parts.push(`last successful observation ${formatObservedAt(s.lastSuccessAt)}`);
+      else parts.push('never observed successfully');
+      return parts.join(' — ');
+    },
+
     openServer(name) {
       Alpine.store('router').navigate('server-detail', { name });
     },
   }));
+
+  // withObservation projects one fleet envelope onto a server card. No
+  // envelope (fleet unavailable, or a config-only server): freshness is null
+  // so the card renders no freshness or error chrome at all.
+  function withObservation(server, env) {
+    if (!env) return { ...server, freshness: null, error: '', appCount: null, lastSuccessAt: null };
+    return {
+      ...server,
+      id: env.id,
+      host: server.host || env.host,
+      freshness: env.freshness || null,
+      error: env.error || '',
+      appCount: Array.isArray(env.apps) ? env.apps.length : 0,
+      lastSuccessAt: env.last_success_at && !String(env.last_success_at).startsWith('0001') ? env.last_success_at : null,
+    };
+  }
+
+  function formatObservedAt(iso) {
+    const date = new Date(iso);
+    return isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
+  }
 
   // ── Server Detail Page ──
   Alpine.data('serverDetailPage', () => ({

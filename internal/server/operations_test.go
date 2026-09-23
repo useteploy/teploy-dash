@@ -406,3 +406,53 @@ func TestOperationAdmissionBudgetMapsTo429(t *testing.T) {
 	waitForTerminalOperation(t, server, firstID)
 	server.DrainOperations(context.Background())
 }
+
+// D02 idempotency namespacing (A12/A13/R20): the Idempotency-Key header is
+// scoped to the authenticated principal. Two sessions submitting the SAME key
+// enqueue two independent operations; the same session replays.
+func TestOperationIdempotencyNamesBySessionPrincipal(t *testing.T) {
+	server := operationTestServer(t, true)
+	bcryptCost = bcrypt.MinCost
+	t.Cleanup(func() { bcryptCost = bcrypt.DefaultCost })
+	if err := server.gate.createUser("dana", "danapass123", RoleEditor); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.gate.createUser("evan", "evanpass123", RoleEditor); err != nil {
+		t.Fatal(err)
+	}
+	dana := loginCookie(t, server.gate, "dana", "danapass123")
+	evan := loginCookie(t, server.gate, "evan", "evanpass123")
+
+	post := func(cookie *http.Cookie, image, key string) (int, string, string) {
+		body := bytes.NewBufferString(`{"kind":"deploy","server":"prod","app":"web","image":"` + image + `"}`)
+		request := httptest.NewRequest(http.MethodPost, "/api/operations", body)
+		request.AddCookie(cookie)
+		request.Header.Set("Idempotency-Key", key)
+		response := httptest.NewRecorder()
+		server.handler().ServeHTTP(response, request)
+		var envelope struct {
+			Data operation.Operation `json:"data"`
+		}
+		_ = json.Unmarshal(response.Body.Bytes(), &envelope)
+		return response.Code, envelope.Data.ID, response.Header().Get("Idempotency-Replayed")
+	}
+
+	code, danaID, replayed := post(dana, "example/web:1", "release-7")
+	if code != http.StatusAccepted || danaID == "" || replayed == "true" {
+		t.Fatalf("dana's enqueue: code=%d id=%s replayed=%s", code, danaID, replayed)
+	}
+	waitForTerminalOperation(t, server, danaID)
+
+	// Same key, DIFFERENT principal: a distinct operation, not a replay.
+	code, evanID, replayed := post(evan, "example/web:1", "release-7")
+	if code != http.StatusAccepted || evanID == "" || evanID == danaID || replayed == "true" {
+		t.Fatalf("evan's same-key enqueue must be independent: code=%d dana=%s evan=%s replayed=%s", code, danaID, evanID, replayed)
+	}
+	waitForTerminalOperation(t, server, evanID)
+
+	// Same principal, same key: replay.
+	code, replayID, replayed := post(dana, "example/web:1", "release-7")
+	if code != http.StatusAccepted || replayID != danaID || replayed != "true" {
+		t.Fatalf("dana's replay: code=%d id=%s replayed=%s", code, replayID, replayed)
+	}
+}

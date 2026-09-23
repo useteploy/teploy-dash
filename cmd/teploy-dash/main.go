@@ -118,6 +118,17 @@ func run() error {
 	if historyErr != nil {
 		return historyErr
 	}
+	// D02 idempotency window: how long an admitted Idempotency-Key is
+	// honored, per principal (0/unset = 24h default; a negative duration
+	// disables expiry).
+	opIdempotencyWindow := time.Duration(0)
+	if raw := strings.TrimSpace(os.Getenv("TEPLOY_DASH_IDEMPOTENCY_WINDOW")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed < 0 {
+			return fmt.Errorf("TEPLOY_DASH_IDEMPOTENCY_WINDOW must be a non-negative duration (e.g. 24h), got %q", raw)
+		}
+		opIdempotencyWindow = parsed
+	}
 
 	// Auth: read bootstrap credentials from env. If neither TEPLOY_DASH_PASSWORD
 	// nor a saved auth.json exist, the server starts in setup mode so the user
@@ -223,26 +234,27 @@ func run() error {
 
 	// Initialize HTTP server
 	srv := server.New(server.Config{
-		Host:                     *host,
-		Port:                     *port,
-		DeploymentsDir:           *deploymentsDir,
-		DataDir:                  *dataDir,
-		Monitor:                  mon,
-		Restore:                  rst,
-		Store:                    st,
-		AuthUser:                 authUser,
-		AuthPass:                 authPass,
-		NoAuth:                   *noAuth,
-		PublicStatus:             *publicStatus,
-		Frontend:                 uiFS,
-		Version:                  version,
-		Backend:                  backend,
-		OperationMaxJournalBytes: opJournalBytes,
-		OperationMaxHistoryAge:   opHistoryAge,
-		OperationMaxOperations:   opMaxOperations,
-		OperationMaxQueued:       opMaxQueued,
-		OperationMaxLive:         opMaxLive,
-		OperationMaxConcurrent:   opMaxConcurrent,
+		Host:                       *host,
+		Port:                       *port,
+		DeploymentsDir:             *deploymentsDir,
+		DataDir:                    *dataDir,
+		Monitor:                    mon,
+		Restore:                    rst,
+		Store:                      st,
+		AuthUser:                   authUser,
+		AuthPass:                   authPass,
+		NoAuth:                     *noAuth,
+		PublicStatus:               *publicStatus,
+		Frontend:                   uiFS,
+		Version:                    version,
+		Backend:                    backend,
+		OperationMaxJournalBytes:   opJournalBytes,
+		OperationMaxHistoryAge:     opHistoryAge,
+		OperationMaxOperations:     opMaxOperations,
+		OperationMaxQueued:         opMaxQueued,
+		OperationMaxLive:           opMaxLive,
+		OperationMaxConcurrent:     opMaxConcurrent,
+		OperationIdempotencyWindow: opIdempotencyWindow,
 	})
 
 	// Load alert config and wire to monitors so state transitions fire notifications.

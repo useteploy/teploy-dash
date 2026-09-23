@@ -96,20 +96,30 @@ type Request struct {
 }
 
 type Operation struct {
-	ID             string     `json:"id"`
-	Request        Request    `json:"request"`
-	Metadata       Metadata   `json:"metadata"`
-	Target         string     `json:"target"`
-	Status         Status     `json:"status"`
-	IdempotencyKey string     `json:"idempotency_key,omitempty"`
-	RetryOf        string     `json:"retry_of,omitempty"`
-	Attempt        int        `json:"attempt"`
-	ExitCode       *int       `json:"exit_code,omitempty"`
-	Error          string     `json:"error,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	HasSecrets     bool       `json:"has_secrets,omitempty"`
+	ID             string   `json:"id"`
+	Request        Request  `json:"request"`
+	Metadata       Metadata `json:"metadata"`
+	Target         string   `json:"target"`
+	Status         Status   `json:"status"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+	// IdempotencyPrincipal is the principal namespace the IdempotencyKey was
+	// issued in (D02 namespacing, A12/A13/R20): IdempotencyScope of the actor
+	// that admitted the operation. Replays and conflicts resolve only within
+	// one principal's namespace — two principals sharing a client key are two
+	// independent operations. Empty on records written before namespacing
+	// landed: those keys restore into a legacy namespace no namespaced replay
+	// matches, so an upgrade can never replay one principal's operation to
+	// another (the cost: a replay in flight across the upgrade enqueues new
+	// work, bounded by the idempotency window).
+	IdempotencyPrincipal string     `json:"idempotency_principal,omitempty"`
+	RetryOf              string     `json:"retry_of,omitempty"`
+	Attempt              int        `json:"attempt"`
+	ExitCode             *int       `json:"exit_code,omitempty"`
+	Error                string     `json:"error,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	StartedAt            *time.Time `json:"started_at,omitempty"`
+	FinishedAt           *time.Time `json:"finished_at,omitempty"`
+	HasSecrets           bool       `json:"has_secrets,omitempty"`
 	// AdmittedServer is the resolved host/user snapshot taken when the
 	// operation was admitted. Before execution the current resolution is
 	// compared against it; a server whose alias was repointed (or removed)
@@ -244,4 +254,23 @@ type Actor struct {
 	Kind    string `json:"kind"`
 	Subject string `json:"subject,omitempty"`
 	Label   string `json:"label,omitempty"`
+}
+
+// NoAuthScope is the explicit idempotency principal for --no-auth installs
+// and manager-internal callers with no authenticated actor (D02). In auth
+// mode every API request carries a session before it can enqueue, so a nil
+// actor at the boundary means no-auth: one local operator, named explicitly
+// so its keys never collide with any authenticated principal's keys.
+const NoAuthScope = "local:no-auth"
+
+// IdempotencyScope derives an operation's idempotency namespace from the
+// admitting actor (D02 namespacing): "local:<username>", "sso:<subject>",
+// "mcp:mcp-token/<id>", or the explicit NoAuthScope for nil actors. The
+// scope is persisted on the record so restart-time dedupe resolves within
+// the same namespace.
+func IdempotencyScope(actor *Actor) string {
+	if actor == nil {
+		return NoAuthScope
+	}
+	return actor.Kind + ":" + actor.Subject
 }

@@ -47,6 +47,24 @@ const maxEventDataBytes = 16 << 10
 // or the startup reconcile loop.
 const receiptReadTimeout = 15 * time.Second
 
+// defaultIdempotencyWindow bounds how long an admitted idempotency key is
+// honored (D02): replays and conflicts resolve against the admitted
+// operation while it is within this window of its ADMISSION time; after that
+// the key is reusable for new work. The window bounds the in-memory index
+// AND the restart-time restore — without it the key namespace grows for as
+// long as the retained operation history (30d by default), which is the
+// unbounded-growth half of the pre-namespacing defect.
+const defaultIdempotencyWindow = 24 * time.Hour
+
+// idemKey is the namespaced idempotency index key: one principal's key
+// never aliases another's (D02). A struct (not string concatenation) so no
+// separator character in a principal or key can forge a cross-namespace
+// collision.
+type idemKey struct {
+	principal string
+	key       string
+}
+
 // boundedEventData sanitizes and truncates event data at ingestion.
 func boundedEventData(data string) string {
 	data = strings.ToValidUTF8(data, "\uFFFD")
@@ -82,9 +100,15 @@ type Options struct {
 	// CLI subprocess at the same time across all targets (R17; 0 = package
 	// default, negative disables).
 	MaxConcurrentExecutions int
-	Resolver                Resolver
-	ProjectResolver         ProjectResolver
-	Executor                Executor
+	// IdempotencyWindow bounds how long an admitted idempotency key is
+	// honored, measured from the admitted operation's creation time (D02
+	// namespacing). 0 = package default (24h); negative disables expiry.
+	// Replays past the window are new operations; the restart-time restore
+	// skips keys whose operations are older than the window.
+	IdempotencyWindow time.Duration
+	Resolver          Resolver
+	ProjectResolver   ProjectResolver
+	Executor          Executor
 	// ReceiptReader answers whether an admitted operation's effect reached
 	// its target (D02). Reconciliation after a restart, and the honest
 	// resolution of a mid-flight cancellation, both consult it. Nil means
@@ -115,7 +139,7 @@ type Manager struct {
 	store           *fileStore
 	operations      map[string]*Operation
 	events          map[string][]Event
-	idempotency     map[string]string
+	idempotency     map[idemKey]string
 	cancels         map[string]context.CancelFunc
 	targets         map[string]*targetRunner
 	subscribers     map[string]map[chan struct{}]struct{}
@@ -133,8 +157,11 @@ type Manager struct {
 	maxLive       int
 	executorSlots chan struct{}
 	admissionSeq  uint64
-	retireMu      sync.Mutex
-	lastSweep     time.Time
+	// idempotencyWindow bounds how long a key is honored (D02); <= 0 rules:
+	// 0 was defaulted in New, negative disables expiry.
+	idempotencyWindow time.Duration
+	retireMu          sync.Mutex
+	lastSweep         time.Time
 	// runners tracks live target-worker goroutines so Shutdown can join
 	// them (A39/A47).
 	runners sync.WaitGroup
@@ -235,6 +262,9 @@ func New(dataDir string, options Options) (*Manager, error) {
 	if options.MaxConcurrentExecutions == 0 {
 		options.MaxConcurrentExecutions = defaultMaxConcurrentExecutes
 	}
+	if options.IdempotencyWindow == 0 {
+		options.IdempotencyWindow = defaultIdempotencyWindow
+	}
 	if options.Executor == nil {
 		return nil, fmt.Errorf("operation executor is required")
 	}
@@ -258,7 +288,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 		store:              store,
 		operations:         operations,
 		events:             make(map[string][]Event),
-		idempotency:        make(map[string]string),
+		idempotency:        make(map[idemKey]string),
 		cancels:            make(map[string]context.CancelFunc),
 		targets:            make(map[string]*targetRunner),
 		subscribers:        make(map[string]map[chan struct{}]struct{}),
@@ -272,10 +302,14 @@ func New(dataDir string, options Options) (*Manager, error) {
 		maxOperations:      options.MaxOperations,
 		maxQueuedPerTarget: options.MaxQueuedPerTarget,
 		maxLive:            options.MaxLiveOperations,
+		idempotencyWindow:  options.IdempotencyWindow,
 	}
 	if options.MaxConcurrentExecutions > 0 {
 		m.executorSlots = make(chan struct{}, options.MaxConcurrentExecutions)
 	}
+	// One clock reading for the whole restore so window comparisons are
+	// stable across the load loop.
+	loadTime := time.Now().UTC()
 	for id, op := range operations {
 		if op.Metadata.Mode == "" {
 			op.Metadata.Mode = op.Request.Mode
@@ -301,8 +335,11 @@ func New(dataDir string, options Options) (*Manager, error) {
 			events = events[len(events)-m.maxEvents:]
 		}
 		m.events[id] = events
-		if op.IdempotencyKey != "" {
-			m.idempotency[op.IdempotencyKey] = id
+		// D02 namespacing: restore the idempotency index from the persisted
+		// records (key + principal), bounded by the window — an expired key
+		// is not resurrected by a restart.
+		if op.IdempotencyKey != "" && m.idempotencyLive(op.CreatedAt, loadTime) {
+			m.idempotency[idemKey{op.IdempotencyPrincipal, op.IdempotencyKey}] = id
 		}
 	}
 	pending, err := m.recover()
@@ -346,6 +383,15 @@ func (m *Manager) retentionLoop(ctx context.Context) {
 	}
 }
 
+// idempotencyLive reports whether an admitted operation is still within the
+// idempotency window (D02). A non-positive window disables expiry.
+func (m *Manager) idempotencyLive(createdAt, now time.Time) bool {
+	if m.idempotencyWindow <= 0 {
+		return true
+	}
+	return now.Sub(createdAt) <= m.idempotencyWindow
+}
+
 func (m *Manager) Enqueue(req Request, idempotencyKey string, actor *Actor) (*Operation, bool, error) {
 	return m.enqueue(req, idempotencyKey, "", 1, actor)
 }
@@ -354,6 +400,11 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	if len(idempotencyKey) > 255 || strings.ContainsAny(idempotencyKey, "\r\n") {
 		return nil, false, fmt.Errorf("invalid idempotency key")
 	}
+	// D02 namespacing: the key resolves within the admitting principal's
+	// namespace only — different principals using the same client key are
+	// independent operations, never each other's replays.
+	scope := IdempotencyScope(actor)
+	namespaced := idemKey{principal: scope, key: idempotencyKey}
 	if req.Kind == KindDeploy && req.Mode == "" {
 		req.Mode = "ad-hoc"
 	}
@@ -375,7 +426,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		m.mu.Unlock()
 		return nil, false, ErrShuttingDown
 	}
-	if existing, replayed, err := m.lookupReplayLocked(idempotencyKey, hash); replayed || err != nil {
+	if existing, replayed, err := m.lookupReplayLocked(namespaced, hash, time.Now().UTC()); replayed || err != nil {
 		m.mu.Unlock()
 		return existing, replayed, err
 	}
@@ -395,7 +446,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		m.mu.Unlock()
 		return nil, false, ErrShuttingDown
 	}
-	if existing, replayed, err := m.lookupReplayLocked(idempotencyKey, hash); replayed || err != nil {
+	if existing, replayed, err := m.lookupReplayLocked(namespaced, hash, time.Now().UTC()); replayed || err != nil {
 		m.mu.Unlock()
 		return existing, replayed, err
 	}
@@ -445,14 +496,17 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 		Target:         target,
 		Status:         StatusQueued,
 		IdempotencyKey: idempotencyKey,
-		RetryOf:        retryOf,
-		Attempt:        attempt,
-		CreatedAt:      now,
-		HasSecrets:     len(command.Secrets) > 0,
-		AdmittedServer: &snapshot,
-		AdmissionSeq:   m.admissionSeq,
-		Actor:          cloneActor(actor),
-		requestHash:    hash,
+		// D02: the key's namespace is persisted with it so a restart
+		// restores dedupe within the SAME principal's namespace.
+		IdempotencyPrincipal: scope,
+		RetryOf:              retryOf,
+		Attempt:              attempt,
+		CreatedAt:            now,
+		HasSecrets:           len(command.Secrets) > 0,
+		AdmittedServer:       &snapshot,
+		AdmissionSeq:         m.admissionSeq,
+		Actor:                cloneActor(actor),
+		requestHash:          hash,
 	}
 
 	// Durable admission (A25): the queued RECORD is the commit point. The
@@ -483,7 +537,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	m.operations[id] = op
 	m.events[id] = []Event{initial}
 	if idempotencyKey != "" {
-		m.idempotency[idempotencyKey] = id
+		m.idempotency[namespaced] = id
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancels[id] = cancel
@@ -497,14 +551,16 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 // admitToTarget appends the job to its target's FIFO queue and starts the
 // target worker if idle. Caller must hold m.mu; execution happens on the
 // worker goroutine.
-// lookupReplayLocked returns the stored operation for an idempotency key
-// when it matches the submitted request hash (R21). A key held by a
-// DIFFERENT request surfaces ErrIdempotencyConflict. Caller must hold m.mu.
-func (m *Manager) lookupReplayLocked(idempotencyKey, hash string) (*Operation, bool, error) {
-	if idempotencyKey == "" {
+// lookupReplayLocked returns the stored operation for one principal's
+// idempotency key when it matches the submitted request hash (R21). A key
+// held by a DIFFERENT request surfaces ErrIdempotencyConflict. A key whose
+// admitted operation is past the idempotency window is expired: the entry is
+// dropped and the key is reusable for new work (D02). Caller must hold m.mu.
+func (m *Manager) lookupReplayLocked(namespaced idemKey, hash string, now time.Time) (*Operation, bool, error) {
+	if namespaced.key == "" {
 		return nil, false, nil
 	}
-	id, ok := m.idempotency[idempotencyKey]
+	id, ok := m.idempotency[namespaced]
 	if !ok {
 		return nil, false, nil
 	}
@@ -512,7 +568,12 @@ func (m *Manager) lookupReplayLocked(idempotencyKey, hash string) (*Operation, b
 	if existing == nil {
 		// Stale index entry (the record was retired); drop it so the key
 		// can be reused cleanly.
-		delete(m.idempotency, idempotencyKey)
+		delete(m.idempotency, namespaced)
+		return nil, false, nil
+	}
+	if !m.idempotencyLive(existing.CreatedAt, now) {
+		// Past the window: the principal may reuse the key for new work.
+		delete(m.idempotency, namespaced)
 		return nil, false, nil
 	}
 	if existing.requestHash != hash {
@@ -1370,6 +1431,7 @@ func (m *Manager) retire() {
 		return
 	}
 	m.mu.Lock()
+	now := time.Now().UTC()
 	for _, id := range removed {
 		op := m.operations[id]
 		if op == nil || !op.Status.Terminal() {
@@ -1378,7 +1440,15 @@ func (m *Manager) retire() {
 		delete(m.operations, id)
 		delete(m.events, id)
 		if op.IdempotencyKey != "" {
-			delete(m.idempotency, op.IdempotencyKey)
+			delete(m.idempotency, idemKey{op.IdempotencyPrincipal, op.IdempotencyKey})
+		}
+	}
+	// Expired keys are pruned on the same cadence (retire runs hourly and on
+	// count-cap crossings): live lookups enforce the window anyway, so this
+	// only reclaims index entries for records the window has outlived (D02).
+	for key, id := range m.idempotency {
+		if op := m.operations[id]; op == nil || !m.idempotencyLive(op.CreatedAt, now) {
+			delete(m.idempotency, key)
 		}
 	}
 	m.mu.Unlock()

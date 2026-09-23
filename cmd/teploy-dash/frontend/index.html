@@ -1213,11 +1213,22 @@
           <template x-for="s in servers" :key="s.name">
             <div class="card" @click="openServer(s.name)">
               <div class="card-title">
-                <span class="status-dot" :class="s.online ? 'online' : 'offline'"></span>
+                <span class="status-dot" :class="cardDotClass(s)"></span>
                 <span x-text="s.name"></span>
+                <!-- D01: observation freshness from /api/fleet; hidden when the
+                     fleet envelope is unavailable (s.freshness null). -->
+                <span class="freshness-chip" :class="s.freshness" x-show="s.freshness" x-text="freshnessLabel(s)"></span>
               </div>
               <div class="card-meta" x-text="s.host"></div>
               <div class="card-hash" x-text="s.role === 'lb' ? 'Load Balancer' : 'Standard'"></div>
+              <!-- D01: an unreachable server stays visible with its exact
+                   error and its last-known state. -->
+              <template x-if="s.error">
+                <div class="server-error">
+                  <div class="server-error-message" x-text="s.error"></div>
+                  <div class="server-error-meta" x-text="unreachableMeta(s)"></div>
+                </div>
+              </template>
             </div>
           </template>
         </div>
