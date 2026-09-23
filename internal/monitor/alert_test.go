@@ -17,11 +17,11 @@ type mockStore struct {
 
 func (m *mockStore) ListMonitors() ([]store.Monitor, error)       { return m.monitors, nil }
 func (m *mockStore) GetMonitor(id string) (*store.Monitor, error) { return nil, nil }
-func (m *mockStore) SaveMonitor(store.Monitor) error              { return nil }
+func (m *mockStore) SaveMonitor(*store.Monitor) error             { return nil }
 func (m *mockStore) DeleteMonitor(string) error                   { return nil }
-func (m *mockStore) SaveCheck(c store.CheckResult) error {
+func (m *mockStore) SaveCheck(c store.CheckResult) (bool, error) {
 	m.checks = append(m.checks, c)
-	return nil
+	return true, nil
 }
 func (m *mockStore) GetChecks(string, time.Time, int) ([]store.CheckResult, error) {
 	return nil, nil

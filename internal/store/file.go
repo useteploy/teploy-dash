@@ -31,6 +31,11 @@ type FileStore struct {
 	// reports it (A32).
 	initErr error
 	mu      sync.RWMutex
+	// incarnationClock (guarded by mu, like every Store mutation) guarantees
+	// assigned incarnations only move forward within a process, so a
+	// delete+recreate with the same ID never reuses the deleted monitor's
+	// number (D08: no ABA against an in-flight check's CAS).
+	incarnationClock uint64
 }
 
 // NewFileStore creates a file-based store in the given directory.
@@ -120,12 +125,28 @@ func (s *FileStore) GetMonitor(id string) (*Monitor, error) {
 	return &m, nil
 }
 
-func (s *FileStore) SaveMonitor(m Monitor) error {
+func (s *FileStore) SaveMonitor(m *Monitor) error {
 	if !ValidID(m.ID) {
 		return fmt.Errorf("invalid monitor id %q", m.ID)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// D08: the store assigns the incarnation — never trusting a payload
+	// value — and the per-store clock keeps it monotonic across edits AND
+	// delete+recreate (the stored file's value is only a floor; a recreated
+	// ID continues past the deleted incarnation).
+	next := s.incarnationClock + 1
+	if data, err := os.ReadFile(filepath.Join(s.dir, "monitors", m.ID+".json")); err == nil {
+		var stored Monitor
+		if json.Unmarshal(data, &stored) == nil && stored.Incarnation >= next {
+			next = stored.Incarnation + 1
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	m.Incarnation = next
+	s.incarnationClock = next
 
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -306,28 +327,58 @@ func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) (bool, 
 	return true, atomicWrite(path, out, 0644)
 }
 
-func (s *FileStore) SaveCheck(result CheckResult) error {
+// SaveCheck commits a result under the incarnation CAS (D08/A19/R34): the
+// monitor must still exist and its stored incarnation must equal the
+// result's. A check that was in flight across a delete would otherwise
+// re-create the history file via O_CREATE and land the dead incarnation's
+// row — which a same-ID recreate then inherits as a phantom transition
+// baseline and polluted stats.
+func (s *FileStore) SaveCheck(result CheckResult) (bool, error) {
 	if !ValidID(result.MonitorID) {
-		return fmt.Errorf("invalid monitor id %q", result.MonitorID)
+		return false, fmt.Errorf("invalid monitor id %q", result.MonitorID)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	monPath := filepath.Join(s.dir, "monitors", result.MonitorID+".json")
+	data, err := os.ReadFile(monPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Deleted mid-check: the result belongs to no monitor. Dropping
+			// it must not resurrect anything.
+			return false, nil
+		}
+		return false, err
+	}
+	var stored Monitor
+	if err := json.Unmarshal(data, &stored); err != nil {
+		// A damaged monitor entry is a storage failure, not a silent drop —
+		// the operator must see it (A31/A32 discipline).
+		return false, fmt.Errorf("reading stored monitor for check commit: %w", err)
+	}
+	if stored.Incarnation != result.Incarnation {
+		// Edited (or deleted and recreated) mid-check: the result describes
+		// a configuration that no longer exists.
+		return false, nil
+	}
 
 	f, err := os.OpenFile(
 		filepath.Join(s.dir, "history", result.MonitorID+".jsonl"),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer f.Close()
 
-	data, err := json.Marshal(result)
+	line, err := json.Marshal(result)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = fmt.Fprintf(f, "%s\n", data)
-	return err
+	if _, err := fmt.Fprintf(f, "%s\n", line); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *FileStore) GetChecks(monitorID string, since time.Time, limit int) ([]CheckResult, error) {

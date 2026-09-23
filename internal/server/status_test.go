@@ -14,20 +14,21 @@ func statusTestServer(t *testing.T, public bool) *Server {
 	t.Helper()
 	st := store.NewFileStore(t.TempDir())
 
-	mustSave := func(m store.Monitor) {
-		if err := st.SaveMonitor(m); err != nil {
+	mustSave := func(m store.Monitor) store.Monitor {
+		if err := st.SaveMonitor(&m); err != nil {
 			t.Fatalf("SaveMonitor: %v", err)
 		}
+		return m
 	}
-	mustSave(store.Monitor{ID: "web", Name: "Web", Type: "http", Target: "https://internal.example.com/health", Enabled: true})
-	mustSave(store.Monitor{ID: "api", Name: "API", Type: "http", Target: "http://10.0.0.5:8080", Enabled: true})
+	web := mustSave(store.Monitor{ID: "web", Name: "Web", Type: "http", Target: "https://internal.example.com/health", Enabled: true})
+	api := mustSave(store.Monitor{ID: "api", Name: "API", Type: "http", Target: "http://10.0.0.5:8080", Enabled: true})
 	mustSave(store.Monitor{ID: "hidden", Name: "Hidden", Type: "tcp", Target: "10.0.0.9:5432", Enabled: false})
 
 	now := time.Now()
-	if err := st.SaveCheck(store.CheckResult{MonitorID: "web", Status: "up", CheckedAt: now}); err != nil {
+	if _, err := st.SaveCheck(store.CheckResult{MonitorID: "web", Incarnation: web.Incarnation, Status: "up", CheckedAt: now}); err != nil {
 		t.Fatalf("SaveCheck: %v", err)
 	}
-	if err := st.SaveCheck(store.CheckResult{MonitorID: "api", Status: "down", CheckedAt: now}); err != nil {
+	if _, err := st.SaveCheck(store.CheckResult{MonitorID: "api", Incarnation: api.Incarnation, Status: "down", CheckedAt: now}); err != nil {
 		t.Fatalf("SaveCheck: %v", err)
 	}
 
@@ -121,11 +122,12 @@ func TestStatusAPI_StaleAndUnknownNeverOperational(t *testing.T) {
 	// version appended one old check after the fixture's fresh one and
 	// relied on append-order masking — the exact defect R43 removed.)
 	st := store.NewFileStore(t.TempDir())
-	if err := st.SaveMonitor(store.Monitor{ID: "web", Name: "Web", Type: "http", Target: "https://internal.example.com/health", Enabled: true}); err != nil {
+	web := store.Monitor{ID: "web", Name: "Web", Type: "http", Target: "https://internal.example.com/health", Enabled: true}
+	if err := st.SaveMonitor(&web); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-2 * time.Hour)
-	if err := st.SaveCheck(store.CheckResult{MonitorID: "web", Status: "up", CheckedAt: old}); err != nil {
+	if _, err := st.SaveCheck(store.CheckResult{MonitorID: "web", Incarnation: web.Incarnation, Status: "up", CheckedAt: old}); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{config: Config{PublicStatus: true}, store: st}

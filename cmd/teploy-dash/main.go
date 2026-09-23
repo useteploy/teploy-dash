@@ -19,6 +19,7 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/monitor"
+	"github.com/useteploy/teploy-dash/internal/outbox"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
 	"github.com/useteploy/teploy-dash/internal/server"
 	"github.com/useteploy/teploy-dash/internal/store"
@@ -257,21 +258,39 @@ func run() error {
 		OperationIdempotencyWindow: opIdempotencyWindow,
 	})
 
-	// Load alert config and wire to monitors so state transitions fire notifications.
+	// D08: durable alert delivery. The outbox journals every monitor-alert
+	// attempt in the data dir, retries with backoff, dead-letters after a
+	// bounded count, surfaces the last failure on the monitor API, and
+	// resumes pending deliveries after a restart without re-sending
+	// delivered ones. An unwritable journal is a broken persistence
+	// contract — refuse to start rather than silently degrade to
+	// best-effort (A32 discipline).
+	alertOutbox, err := outbox.New(*dataDir, outbox.Options{
+		ConfigFn: server.LoadNotificationsConfig,
+	})
+	if err != nil {
+		st.Close()
+		return fmt.Errorf("alert outbox: %w", err)
+	}
+	mon.SetAlerter(alertOutbox)
+
+	// Load alert config for the restore runner (which keeps the direct
+	// dispatcher; routing it through the outbox is recorded D08 remainder).
 	// R14: an unreadable/corrupt config is loud at startup — it previously
 	// read as "not configured" and a later partial save destroyed secrets.
 	notifCfg, notifErr := server.LoadNotificationsConfig()
 	if notifErr != nil {
 		log.Printf("Warning: %v (alerts disabled until the config is repaired; saving from Settings is refused in this state)", notifErr)
 	} else if notifCfg.WebhookURL != "" || notifCfg.SMTPHost != "" {
-		mon.SetAlerter(alert.New(notifCfg))
 		rst.SetAlerter(alert.New(notifCfg))
 		log.Printf("Alerts configured")
 	}
 
-	// Start monitor checks + restore-test schedules
+	// Start monitor checks + restore-test schedules, then the alert outbox
+	// worker (pending deliveries resume from the journal).
 	mon.Start()
 	rst.Start()
+	alertOutbox.Start()
 
 	// Start daily cleanup for file store (removes checks older than store.RetentionDays)
 	// Runs for ANY backend now (previously fileStore-only, so the Nucleus
@@ -359,6 +378,10 @@ func run() error {
 	workerCtx, workerCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	mon.Stop(workerCtx)
 	rst.Stop(workerCtx)
+	// D08: join in-flight alert-delivery attempts before the store closes
+	// (bounded by the same shared budget; a cut-short attempt is re-sent on
+	// next start — at-least-once).
+	alertOutbox.Stop(workerCtx)
 	// A39/A47: join in-flight operation work (bounded by the REMAINING
 	// shared budget) before the store closes — a hard exit used to kill CLI
 	// children mid-write and leave records for recovery to mark interrupted.

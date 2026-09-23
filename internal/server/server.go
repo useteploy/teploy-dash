@@ -33,6 +33,7 @@ import (
 	"github.com/useteploy/teploy-dash/internal/mcp"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
+	"github.com/useteploy/teploy-dash/internal/outbox"
 	"github.com/useteploy/teploy-dash/internal/remote"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
 	sshclient "github.com/useteploy/teploy-dash/internal/ssh"
@@ -55,6 +56,10 @@ type Config struct {
 	Monitor        *monitor.Runner
 	Restore        *restoretest.Runner
 	Store          store.Store
+	// Outbox is the durable alert delivery queue (D08). Optional: when nil,
+	// monitor responses carry no delivery status and the monitor runner
+	// should have been wired to a direct dispatcher instead.
+	Outbox *outbox.Outbox
 	// AuthUser and AuthPass are bootstrap credentials from env vars. If AuthPass
 	// is empty and no auth.json exists, the server starts in setup mode.
 	// If NoAuth is true, authentication is disabled entirely (dev mode).
@@ -251,6 +256,7 @@ type Server struct {
 	fleet              *fleetCache
 	frontend           fs.FS
 	mcpTokens          *mcp.TokenStore
+	outbox             *outbox.Outbox
 	operations         *operation.Manager
 	operationInitErr   error
 	manifests          *manifest.Store
@@ -279,6 +285,7 @@ func New(config Config) *Server {
 		store:    config.Store,
 		fleet:    &fleetCache{ttl: 60 * time.Second},
 		frontend: config.Frontend,
+		outbox:   config.Outbox,
 	}
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
@@ -3240,10 +3247,10 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err.Error())
 			return
 		}
-		// Update the runners' alert dispatchers with the new config.
-		if s.monitor != nil {
-			s.monitor.SetAlerter(alert.New(cfg))
-		}
+		// Update the restore runner's dispatcher with the new config. The
+		// MONITOR path needs no rewiring under D08: it goes through the
+		// alert outbox, which reads the live config at every attempt — a
+		// patch here fixes pending retries on their next attempt.
 		if s.restore != nil {
 			s.restore.SetAlerter(alert.New(cfg))
 		}
@@ -3424,6 +3431,9 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 		type monitorWithStats struct {
 			store.Monitor
 			Stats *store.UptimeStats `json:"stats,omitempty"`
+			// Delivery exposes the monitor's last alert-delivery state (D08):
+			// pending/delivered/dead-lettered with the last failure.
+			Delivery *outbox.DeliveryStatus `json:"delivery,omitempty"`
 		}
 
 		var result []monitorWithStats
@@ -3431,6 +3441,9 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 			mws := monitorWithStats{Monitor: m}
 			stats, _ := s.store.GetStats(m.ID, time.Now().Add(-24*time.Hour))
 			mws.Stats = stats
+			if s.outbox != nil {
+				mws.Delivery = s.outbox.LatestForMonitor(m.ID)
+			}
 			result = append(result, mws)
 		}
 		writeJSON(w, result)
@@ -3471,11 +3484,13 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err := s.store.SaveMonitor(m); err != nil {
+		if err := s.store.SaveMonitor(&m); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		if s.monitor != nil {
+			// m carries the store-assigned incarnation, so the new scheduler
+			// stamps its checks with it (D08 CAS).
 			s.monitor.Reload(m)
 		}
 		writeJSON(w, m)
@@ -3529,11 +3544,20 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 		}
 		checks, _ := s.store.GetChecks(id, time.Now().Add(-24*time.Hour), 100)
 		stats, _ := s.store.GetStats(id, time.Now().Add(-24*time.Hour))
-		writeJSON(w, map[string]interface{}{
+		resp := map[string]interface{}{
 			"monitor": m,
 			"checks":  checks,
 			"stats":   stats,
-		})
+		}
+		// D08: the monitor's last alert-delivery state (retry/backoff/
+		// dead-letter with the exact last failure) is part of the monitor's
+		// truth, not a separate screen to remember.
+		if s.outbox != nil {
+			if d := s.outbox.LatestForMonitor(id); d != nil {
+				resp["delivery"] = d
+			}
+		}
+		writeJSON(w, resp)
 
 	case "DELETE":
 		// Stop the checker first so it can't record a check mid-delete, then

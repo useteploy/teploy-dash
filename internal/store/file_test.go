@@ -8,6 +8,29 @@ import (
 	"time"
 )
 
+// mustMonitor stores a minimal enabled monitor and returns it with the
+// store-assigned incarnation, for tests that exercise check history under
+// the D08 incarnation CAS.
+func mustMonitor(t *testing.T, s *FileStore, id string) Monitor {
+	t.Helper()
+	m := Monitor{ID: id, Name: id, Type: "http", Target: "https://example.com", Interval: 60 * time.Second, Enabled: true}
+	if err := s.SaveMonitor(&m); err != nil {
+		t.Fatalf("SaveMonitor(%s): %v", id, err)
+	}
+	return m
+}
+
+func mustCheck(t *testing.T, s *FileStore, r CheckResult) {
+	t.Helper()
+	applied, err := s.SaveCheck(r)
+	if err != nil {
+		t.Fatalf("SaveCheck: %v", err)
+	}
+	if !applied {
+		t.Fatalf("SaveCheck for %s dropped by the incarnation CAS", r.MonitorID)
+	}
+}
+
 func TestFileStore_SaveListDeleteMonitor(t *testing.T) {
 	store := NewFileStore(t.TempDir())
 
@@ -15,7 +38,7 @@ func TestFileStore_SaveListDeleteMonitor(t *testing.T) {
 		ID: "m1", Name: "homepage", Type: "http",
 		Target: "https://example.com", Interval: 60 * time.Second, Enabled: true,
 	}
-	if err := store.SaveMonitor(m); err != nil {
+	if err := store.SaveMonitor(&m); err != nil {
 		t.Fatalf("SaveMonitor: %v", err)
 	}
 
@@ -50,19 +73,18 @@ func TestFileStore_SaveListDeleteMonitor(t *testing.T) {
 
 func TestFileStore_SaveAndReadChecks(t *testing.T) {
 	store := NewFileStore(t.TempDir())
+	m := mustMonitor(t, store, "m1")
 
 	now := time.Now()
 	for i := 0; i < 5; i++ {
-		err := store.SaveCheck(CheckResult{
+		mustCheck(t, store, CheckResult{
 			MonitorID:    "m1",
+			Incarnation:  m.Incarnation,
 			Status:       "up",
 			StatusCode:   200,
 			ResponseTime: 100 * time.Millisecond,
 			CheckedAt:    now.Add(time.Duration(i) * time.Second),
 		})
-		if err != nil {
-			t.Fatalf("SaveCheck: %v", err)
-		}
 	}
 
 	checks, err := store.GetChecks("m1", now.Add(-1*time.Hour), 100)
@@ -76,6 +98,7 @@ func TestFileStore_SaveAndReadChecks(t *testing.T) {
 
 func TestFileStore_StatsComputation(t *testing.T) {
 	store := NewFileStore(t.TempDir())
+	m := mustMonitor(t, store, "m1")
 
 	now := time.Now()
 	for i := 0; i < 10; i++ {
@@ -83,8 +106,9 @@ func TestFileStore_StatsComputation(t *testing.T) {
 		if i%3 == 0 {
 			status = "down"
 		}
-		store.SaveCheck(CheckResult{
+		mustCheck(t, store, CheckResult{
 			MonitorID:    "m1",
+			Incarnation:  m.Incarnation,
 			Status:       status,
 			ResponseTime: 100 * time.Millisecond,
 			CheckedAt:    now.Add(time.Duration(i) * time.Second),
@@ -125,10 +149,10 @@ func TestFileStore_RejectsTraversalID(t *testing.T) {
 	dir := t.TempDir()
 	s := NewFileStore(dir)
 
-	if err := s.SaveMonitor(Monitor{ID: "../../pwned", Name: "x", Type: "http", Target: "http://x"}); err == nil {
+	if err := s.SaveMonitor(&Monitor{ID: "../../pwned", Name: "x", Type: "http", Target: "http://x"}); err == nil {
 		t.Fatal("SaveMonitor accepted a traversal ID")
 	}
-	if err := s.SaveCheck(CheckResult{MonitorID: "../../pwned"}); err == nil {
+	if _, err := s.SaveCheck(CheckResult{MonitorID: "../../pwned"}); err == nil {
 		t.Fatal("SaveCheck accepted a traversal ID")
 	}
 	if _, err := s.GetMonitor("../../etc/passwd"); err == nil {
@@ -229,14 +253,11 @@ func TestCleanup_OversizedRecordPreservesOriginal(t *testing.T) {
 // A31/A32: a healthy cleanup drops expired records and keeps fresh ones.
 func TestCleanup_DropsExpiredKeepsFresh(t *testing.T) {
 	s := NewFileStore(t.TempDir())
+	m := mustMonitor(t, s, "m1")
 	old := time.Now().AddDate(0, 0, -(RetentionDays + 1))
 	fresh := time.Now()
-	if err := s.SaveCheck(CheckResult{MonitorID: "m1", Status: "up", CheckedAt: old}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SaveCheck(CheckResult{MonitorID: "m1", Status: "up", CheckedAt: fresh}); err != nil {
-		t.Fatal(err)
-	}
+	mustCheck(t, s, CheckResult{MonitorID: "m1", Incarnation: m.Incarnation, Status: "up", CheckedAt: old})
+	mustCheck(t, s, CheckResult{MonitorID: "m1", Incarnation: m.Incarnation, Status: "up", CheckedAt: fresh})
 	if err := s.Cleanup(); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
@@ -337,14 +358,11 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 // appended BEFORE an older one must still be the limit=1 result.
 func TestFileStore_GetChecks_OrdersByCheckedAtNotAppendOrder(t *testing.T) {
 	s := NewFileStore(t.TempDir())
+	m := mustMonitor(t, s, "m")
 	newer := time.Now()
 	older := newer.Add(-time.Hour)
-	if err := s.SaveCheck(CheckResult{MonitorID: "m", Status: "up", CheckedAt: newer}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SaveCheck(CheckResult{MonitorID: "m", Status: "down", CheckedAt: older}); err != nil {
-		t.Fatal(err)
-	}
+	mustCheck(t, s, CheckResult{MonitorID: "m", Incarnation: m.Incarnation, Status: "up", CheckedAt: newer})
+	mustCheck(t, s, CheckResult{MonitorID: "m", Incarnation: m.Incarnation, Status: "down", CheckedAt: older})
 	checks, err := s.GetChecks("m", time.Time{}, 1)
 	if err != nil {
 		t.Fatal(err)

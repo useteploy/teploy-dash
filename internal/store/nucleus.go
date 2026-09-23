@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -32,6 +35,12 @@ func randomID() int64 {
 // Uses time-series model for check history, SQL for monitor configs.
 type NucleusStore struct {
 	pool *pgxpool.Pool
+	// saveMu + incarnationClock serialize the read-bump-upsert in SaveMonitor
+	// so two concurrent saves never assign the same incarnation, and the
+	// number only moves forward within a process (D08: delete+recreate never
+	// reuses the deleted incarnation — no ABA against SaveCheck's CAS).
+	saveMu           sync.Mutex
+	incarnationClock uint64
 }
 
 // NewNucleusStore connects to a Nucleus instance and initializes tables.
@@ -85,6 +94,10 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 		// predates allow_internal — CREATE TABLE IF NOT EXISTS above is a
 		// no-op once the table already exists.
 		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS allow_internal BOOLEAN NOT NULL DEFAULT FALSE`,
+		// D08: incarnation column for the revision-conditional check commit
+		// (same additive pattern; pre-D08 rows read as incarnation 0 and are
+		// superseded by the first post-upgrade save).
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS incarnation BIGINT NOT NULL DEFAULT 0`,
 		`CREATE TABLE IF NOT EXISTS checks (
 			id BIGINT PRIMARY KEY,
 			monitor_id TEXT NOT NULL,
@@ -127,7 +140,7 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal FROM monitors")
+		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation FROM monitors")
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +154,7 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 		var method string
 
 		err := rows.Scan(&m.ID, &m.Name, &m.Type, &m.Target,
-			&intervalMs, &timeoutMs, &m.Enabled, &expectedStatus, &method, &m.AllowInternal)
+			&intervalMs, &timeoutMs, &m.Enabled, &expectedStatus, &method, &m.AllowInternal, &m.Incarnation)
 		if err != nil {
 			continue
 		}
@@ -167,9 +180,9 @@ func (s *NucleusStore) GetMonitor(id string) (*Monitor, error) {
 	var intervalMs, timeoutMs int64
 
 	err := s.pool.QueryRow(ctx,
-		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal FROM monitors WHERE id = $1", id,
+		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation FROM monitors WHERE id = $1", id,
 	).Scan(&m.ID, &m.Name, &m.Type, &m.Target,
-		&intervalMs, &timeoutMs, &m.Enabled, &m.ExpectedStatus, &m.Method, &m.AllowInternal)
+		&intervalMs, &timeoutMs, &m.Enabled, &m.ExpectedStatus, &m.Method, &m.AllowInternal, &m.Incarnation)
 	if err != nil {
 		return nil, err
 	}
@@ -179,20 +192,41 @@ func (s *NucleusStore) GetMonitor(id string) (*Monitor, error) {
 	return &m, nil
 }
 
-func (s *NucleusStore) SaveMonitor(m Monitor) error {
+// SaveMonitor upserts configuration and ASSIGNS the next incarnation under
+// saveMu (D08): monotonic across edits and delete+recreate, and never the
+// client's value.
+func (s *NucleusStore) SaveMonitor(m *Monitor) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO monitors (id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	var current uint64
+	err := s.pool.QueryRow(ctx,
+		"SELECT incarnation FROM monitors WHERE id = $1", m.ID).Scan(&current)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	next := s.incarnationClock + 1
+	if current >= next {
+		next = current + 1
+	}
+	m.Incarnation = next
+	s.incarnationClock = next
+
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO monitors (id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (id) DO UPDATE SET
 		   name = EXCLUDED.name, type = EXCLUDED.type, target = EXCLUDED.target,
 		   interval_ms = EXCLUDED.interval_ms, timeout_ms = EXCLUDED.timeout_ms,
 		   enabled = EXCLUDED.enabled, expected_status = EXCLUDED.expected_status,
-		   method = EXCLUDED.method, allow_internal = EXCLUDED.allow_internal`,
+		   method = EXCLUDED.method, allow_internal = EXCLUDED.allow_internal,
+		   incarnation = EXCLUDED.incarnation`,
 		m.ID, m.Name, m.Type, m.Target,
 		m.Interval.Milliseconds(), m.Timeout.Milliseconds(),
-		m.Enabled, m.ExpectedStatus, m.Method, m.AllowInternal,
+		m.Enabled, m.ExpectedStatus, m.Method, m.AllowInternal, m.Incarnation,
 	)
 	return err
 }
@@ -372,17 +406,26 @@ func (s *NucleusStore) DeleteRestoreTest(id string) error {
 	return err
 }
 
-func (s *NucleusStore) SaveCheck(result CheckResult) error {
+// SaveCheck commits a result only when the monitor row still exists at the
+// result's incarnation (D08/A19/R34): INSERT ... SELECT against the monitors
+// table is the CAS, and zero affected rows report an intentionally dropped
+// result (deleted, edited, or recreated mid-check).
+func (s *NucleusStore) SaveCheck(result CheckResult) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`INSERT INTO checks (id, monitor_id, status, status_code, response_time_ms, message, checked_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		 SELECT $1, $2, $3, $4, $5, $6, $7
+		 WHERE EXISTS (SELECT 1 FROM monitors WHERE id = $8 AND incarnation = $9)`,
 		randomID(), result.MonitorID, result.Status,
 		result.StatusCode, result.ResponseTime.Milliseconds(),
 		result.Message, result.CheckedAt,
+		result.MonitorID, result.Incarnation,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // Cleanup deletes check history older than RetentionDays. Without this the

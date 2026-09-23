@@ -1200,3 +1200,120 @@ partial-error envelopes for remaining list reads.
   `go test -race -count=1 ./internal/operation/ ./internal/server/` ok;
   `make build` ok; `node --check` on both bundles; node component test ok.
   No push performed.
+
+## 2026-09-22 D08 slice — monitor races + durable alert delivery
+
+Bounded slice of programme workstream D08 ("monitor edit/delete/recreate
+races, failed persistence, notification retry and backend restart preserve
+intended schedules and report failures"). Two pieces landed (recon showed
+restart schedule preservation itself was already covered by persisted
+monitor state + transactional delete; the live defects were the store-side
+CAS and the fire-and-forget alert path).
+
+**What landed — piece a: store-side incarnation CAS on check commits
+(pass-6 A19 / pass-7 A19 / round-3 F033 store half / round-4 R34, monitor
+half of the F037-R37 incarnation-token family):**
+
+- `Monitor.Incarnation` (store-assigned, monotonic per store across edits
+  AND delete+recreate — an in-process clock plus the stored value as floor,
+  so a recreated ID never reuses the deleted incarnation's number: no ABA
+  against an in-flight check). `SaveMonitor(m *Monitor)` assigns it and
+  updates the caller's copy; a client-supplied value is never trusted.
+- `SaveCheck` is now a compare-and-swap: `(applied bool, err error)`,
+  mirroring `SaveRestoreTestResult`. FileStore reads the stored monitor
+  inside the lock and drops the row when the monitor is absent (deleted
+  mid-check — the old O_APPEND|O_CREATE re-created the history file and the
+  dead incarnation's row survived, which a same-ID recreate then inherited
+  as a phantom transition baseline and polluted stats) or when the stored
+  incarnation differs (edited/recreated mid-check). NucleusStore does the
+  same with `INSERT ... SELECT WHERE EXISTS (monitors.id AND incarnation)`
+  and reports zero affected rows as applied=false (additive
+  `ADD COLUMN IF NOT EXISTS incarnation`, same pattern as allow_internal).
+- The runner stamps each check with the scheduler-captured configuration's
+  incarnation and honors applied=false: no baseline mutation, no alert, a
+  log line — the store is the commit authority (the R33 generation fence
+  stays as the in-memory guard; the CAS is the persisted one).
+
+**What landed — piece b: durable alert outbox (A40 / pass-7 A44 / F043,
+first slice):**
+
+- `internal/outbox`: every monitor alert enqueue persists to an append-only
+  JSONL journal in the data dir (`alert-outbox.jsonl`, one full record per
+  transition, folded by delivery id on load; torn tail dropped, corrupt
+  middle line fails loudly). A single worker attempts due deliveries
+  through `Dispatcher.SendSync` (new synchronous verdict API; the old
+  `Send` remains the documented fire-and-forget for the restore runner).
+- Retry with exponential backoff (base 30s, max 30m — configurable), dead-
+  letter after 5 attempts; the journal is compacted to the newest 250
+  records (durable.Replace), never dropping pending (undelivered) records.
+- Visibility: `GET /api/monitors` and `GET /api/monitors/{id}` carry a
+  `delivery` object per monitor — status (pending/delivered/dead_lettered),
+  attempts, the exact last failure, its timestamp, and the next retry time.
+- Restart: pending deliveries resume (attempt count carries over),
+  delivered ones are never re-sent (delivery-id dedupe = deterministic
+  sha256 of monitor+status+occurrence). Semantics are at-least-once per
+  channel; the config is re-read at every attempt so a Settings PATCH
+  fixes pending retries with no rewiring (the PATCH no longer replaces the
+  monitor runner's alerter — that would have bypassed the outbox).
+- Wiring: `main` refuses to start on an unwritable journal (A32
+  discipline); shutdown joins the worker inside the shared F023 budget.
+  Monitor transitions go through the outbox; restore-test alerts keep the
+  direct dispatcher (remainder below).
+
+**TDD evidence:** red-first — a pre-fix probe documented the resurrect-
+after-delete defect in behavior (`TestRedProbe_SaveCheckAfterDelete-
+ResurrectsHistory`, run red then removed; final form in
+internal/store/incarnation_test.go), and the outbox/monitor test files were
+written against the not-yet-existing API (compile red captured). Mutations
+verified then restored: CAS equality neutered in FileStore.SaveCheck →
+`TestSaveCheckRequiresCurrentIncarnation` fails; dead-letter bound neutered
+→ `TestRetriesWithBackoffThenDeadLetter` and
+`TestUnreadableConfigRetriesAndSurfaces` fail; delivery field hidden from
+the monitor detail response → `TestMonitorDetailExposesDeliveryStatus`
+fails. Restart preservation (piece c) pinned by
+`TestStart_PreservesIntendedSetAcrossRestart` (deleted stays unscheduled
+and checkless, edited monitor's incarnation carries into its restarted
+checks) and the outbox restart tests.
+
+**Audit items closed by this slice:** pass-6 A19 + pass-7 A19 (store-side
+revision-conditional check commits — the monitor/check half; the
+restore-result conditional commit was already F037-fixed), R34 (was the
+standing A19 deferral), the monitor half of the F037/R37 incarnation-token
+family. A40/A44/F043 move from "best-effort by design" to first durable
+slice (not fully closed — remainders below).
+
+**Remaining D08 scope (next slices):**
+
+- Restore-test alerts still bypass the outbox (direct dispatcher); routing
+  them through it needs the restore runner's Alerter widened like the
+  monitor runner's.
+- Per-channel delivery accounting: a webhook that succeeded before an
+  email failure is re-sent on retry (at-least-once per channel). Exposing
+  the delivery id in webhook/email payloads so receivers can dedupe is an
+  additive contract change.
+- Backend consistency contracts JSONL vs Nucleus: the outbox journal is a
+  data-dir file in BOTH backend modes (monitors/checks live in the store;
+  alert delivery state does not). Moving it onto the Store interface with a
+  Nucleus table is the alignment work, recorded here per the D08 mapping.
+- Capacity guidance: outbox defaults (5 attempts, 30s→30m backoff, 250
+  retained records, 5s poll) are asserted by tests but not documented in
+  README; alert volume beyond human-scale (flapping monitors at 10s
+  interval) is unbounded enqueue-wise — a per-monitor transition-rate limit
+  is future work.
+- Durable next_due_at for monitor schedules (pass-7 A25 residual,
+  store-schema addition): restarted monitors still fire their first check
+  immediately rather than waiting the true remainder (restore tests derive
+  from LastRunAt; monitors do not persist a schedule anchor).
+- The A23/R35 config-persist + scheduler-apply single-transition redesign
+  remains the standing umbrella for the residual interleavings the CAS now
+  bounds but does not eliminate (e.g. a reload whose SaveMonitor succeeded
+  but whose scheduler teardown was cut short by shutdown).
+
+## Resolution log (D08 slice)
+
+- 2026-09-22: D08 bounded slice landed as described above (working tree,
+  uncommitted). Gates: `go vet ./...` clean; `gofmt -l` clean;
+  `go test ./... -count=1` all 12 packages ok; `go test -race -count=1` on
+  internal/store, internal/monitor, internal/alert, internal/outbox, and
+  internal/server ok; `make build` ok. Frontend untouched (no bundle change
+  to node --check). No push performed.

@@ -13,10 +13,17 @@ import (
 	"github.com/useteploy/teploy-dash/internal/store"
 )
 
+// Alerter is what the runner notifies on state transitions. *alert.Dispatcher
+// satisfies it directly (restore tests, un-durabled paths); the alert outbox
+// satisfies it with durable delivery (D08).
+type Alerter interface {
+	Send(alert.Event)
+}
+
 // Runner manages uptime monitors and runs checks on their intervals.
 type Runner struct {
 	store    store.Store
-	alerter  *alert.Dispatcher
+	alerter  Alerter
 	client   *http.Client
 	timers   map[string]*time.Ticker
 	stopChs  map[string]chan struct{}
@@ -76,8 +83,9 @@ func (r *Runner) Start() {
 	log.Printf("[monitor] Started %d monitors", started)
 }
 
-// SetAlerter configures the alert dispatcher for state-change notifications.
-func (r *Runner) SetAlerter(d *alert.Dispatcher) {
+// SetAlerter configures the state-change notifier (a dispatcher, or the
+// durable alert outbox).
+func (r *Runner) SetAlerter(d Alerter) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.alerter = d
@@ -268,6 +276,12 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 		result.Status = "down"
 		result.Message = fmt.Sprintf("unknown monitor type: %s", m.Type)
 	}
+	// D08: stamp AFTER the probe helpers — they return fresh CheckResult
+	// values that would overwrite a pre-switch stamp. The check runs under
+	// the scheduler-captured configuration, so its incarnation is that
+	// configuration's; the store CAS commits only if the monitor is still at
+	// this incarnation (edit/delete/recreate mid-check drops the row).
+	result.Incarnation = m.Incarnation
 
 	// The check ran under the configuration captured above; if the monitor
 	// was removed or reloaded while it was in flight, the result is stale:
@@ -281,8 +295,16 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 		return
 	}
 
-	if err := r.store.SaveCheck(result); err != nil {
+	applied, err := r.store.SaveCheck(result)
+	if err != nil {
 		log.Printf("[monitor] Failed to save check for %s: %v", m.ID, err)
+	}
+	if !applied {
+		// The store's incarnation CAS dropped the result (monitor deleted,
+		// edited, or recreated while this check was in flight). The store is
+		// the commit authority: no baseline mutation, no alert (D08).
+		log.Printf("[monitor] Dropped check for %s: monitor changed while the check was in flight", m.ID)
+		return
 	}
 
 	// F033 (ours half): revalidate the generation BEFORE publishing the

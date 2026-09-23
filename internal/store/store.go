@@ -24,6 +24,10 @@ type CheckResult struct {
 	ResponseTime time.Duration `json:"response_time"`
 	Message      string        `json:"message,omitempty"`
 	CheckedAt    time.Time     `json:"checked_at"`
+	// Incarnation is the monitor incarnation the check ran under. Set by the
+	// runner from the scheduler-captured configuration; SaveCheck commits
+	// only when it still matches the stored monitor's incarnation (D08).
+	Incarnation uint64 `json:"incarnation,omitempty"`
 }
 
 // Monitor represents an uptime monitor configuration.
@@ -44,6 +48,13 @@ type Monitor struct {
 	// case — this makes that reachability an explicit admin choice per
 	// monitor rather than a default every monitor gets.
 	AllowInternal bool `json:"allow_internal,omitempty"`
+	// Incarnation is the store-assigned revision of this configuration.
+	// Every SaveMonitor assigns the next number (monotonic across edits AND
+	// delete+recreate, so the number is never reused — no ABA). A check
+	// committed under an older incarnation is dropped by SaveCheck's CAS:
+	// it describes a configuration that no longer exists (D08, A19/R34).
+	// The store assigns it; a client-supplied value is never trusted.
+	Incarnation uint64 `json:"incarnation,omitempty"`
 }
 
 // UptimeStats represents uptime statistics for a monitor over a period.
@@ -84,7 +95,10 @@ type Store interface {
 	// Monitors
 	ListMonitors() ([]Monitor, error)
 	GetMonitor(id string) (*Monitor, error)
-	SaveMonitor(m Monitor) error
+	// SaveMonitor persists configuration and ASSIGNS the next incarnation on
+	// m (the caller's copy is updated so schedulers capture it). The store is
+	// the only incarnation authority — payload values are overwritten.
+	SaveMonitor(m *Monitor) error
 	DeleteMonitor(id string) error
 
 	// Restore tests (scheduled backup verification)
@@ -105,7 +119,13 @@ type Store interface {
 	DeleteRestoreTest(id string) error
 
 	// Check results
-	SaveCheck(result CheckResult) error
+	// SaveCheck commits a result IFF the monitor still exists and its stored
+	// incarnation equals result.Incarnation (D08/A19: revision-conditional
+	// check commit). applied=false with a nil error means the result was
+	// intentionally dropped — the monitor was deleted, edited, or deleted and
+	// recreated while the check was in flight — and the caller must neither
+	// alert off it nor treat it as current. Mirrors SaveRestoreTestResult.
+	SaveCheck(result CheckResult) (bool, error)
 	GetChecks(monitorID string, since time.Time, limit int) ([]CheckResult, error)
 	GetStats(monitorID string, since time.Time) (*UptimeStats, error)
 

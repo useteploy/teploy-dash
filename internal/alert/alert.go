@@ -72,14 +72,37 @@ func New(config Config) *Dispatcher {
 	return &Dispatcher{config: config}
 }
 
-// Send dispatches an alert event to all configured channels.
+// Send dispatches an alert event to all configured channels, best-effort:
+// failures are logged, not retried, not surfaced anywhere (the pre-D08
+// contract, kept for callers that only want fire-and-forget — the monitor
+// runner goes through the durable outbox instead).
 func (d *Dispatcher) Send(event Event) {
+	if d.config.WebhookURL != "" || (d.config.SMTPHost != "" && d.config.EmailTo != "") {
+		go func() {
+			if err := d.SendSync(event); err != nil {
+				log.Printf("[alert] delivery failed: %v", err)
+			}
+		}()
+	}
+}
+
+// SendSync delivers to every configured channel synchronously and reports
+// the combined failure (D08: the outbox needs a verdict per attempt, not a
+// fire-and-forget goroutine). A nil return means every configured channel
+// acknowledged the delivery.
+func (d *Dispatcher) SendSync(event Event) error {
+	var errs []error
 	if d.config.WebhookURL != "" {
-		go d.sendWebhook(event)
+		if err := d.sendWebhook(event); err != nil {
+			errs = append(errs, fmt.Errorf("webhook: %w", err))
+		}
 	}
 	if d.config.SMTPHost != "" && d.config.EmailTo != "" {
-		go d.sendEmail(event)
+		if err := d.sendEmail(event); err != nil {
+			errs = append(errs, fmt.Errorf("email: %w", err))
+		}
 	}
+	return errors.Join(errs...)
 }
 
 // Webhook deliveries carry the same signature every teploy product sends:
@@ -105,36 +128,34 @@ func signWebhook(req *http.Request, secret string, body []byte) {
 	req.Header.Set("X-Teploy-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 }
 
-func (d *Dispatcher) sendWebhook(event Event) {
+func (d *Dispatcher) sendWebhook(event Event) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("[alert] Failed to marshal webhook payload: %v", err)
-		return
+		return err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, d.config.WebhookURL, bytes.NewReader(payload))
 	if err != nil {
-		log.Printf("[alert] Webhook request build failed: %v", err)
-		return
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	signWebhook(req, d.config.WebhookSecret, payload)
 
 	resp, err := webhookClient.Do(req)
 	if err != nil {
-		log.Printf("[alert] Webhook failed: %v", err)
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		// 3xx included: a redirect is a non-delivery, not a success —
 		// the receiver never saw the body (see webhookClient).
-		log.Printf("[alert] Webhook returned %d", resp.StatusCode)
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+	return nil
 }
 
-func (d *Dispatcher) sendEmail(event Event) {
+func (d *Dispatcher) sendEmail(event Event) error {
 	msg := buildEmailMessage(d.config.EmailFrom, d.config.EmailTo, event)
 
 	addr := net.JoinHostPort(d.config.SMTPHost, strconv.Itoa(d.config.SMTPPort))
@@ -143,9 +164,7 @@ func (d *Dispatcher) sendEmail(event Event) {
 		auth = smtp.PlainAuth("", d.config.SMTPUser, d.config.SMTPPass, d.config.SMTPHost)
 	}
 
-	if err := sendMailTimeout(addr, d.config.SMTPHost, auth, d.config.EmailFrom, []string{d.config.EmailTo}, []byte(msg), 10*time.Second, d.config.SMTPAllowInsecure); err != nil {
-		log.Printf("[alert] Email failed: %v", err)
-	}
+	return sendMailTimeout(addr, d.config.SMTPHost, auth, d.config.EmailFrom, []string{d.config.EmailTo}, []byte(msg), 10*time.Second, d.config.SMTPAllowInsecure)
 }
 
 // buildEmailMessage constructs the raw RFC 5322 message for an alert email.
