@@ -1276,6 +1276,49 @@ document.addEventListener('alpine:init', () => {
       return (this.app?.containers || []).filter(c => c.State === 'running').length;
     },
 
+    // ── Resource-page overview (D07 exemplar) ──
+    // The general tab answers the resource questions in one place: current
+    // release, freshness of the observation, and the most recent change.
+    // All of it derives from the status payload already on the page.
+
+    // Age of the observation behind the page, e.g. "4m ago"; empty when the
+    // server did not stamp one (older CLI). Not a health claim: a fresh
+    // observation of a stopped app is still fresh.
+    observedAge() {
+      const at = this.app?.observed_at;
+      if (!at || String(at).startsWith('0001')) return '';
+      const ms = Date.now() - new Date(at).getTime();
+      if (isNaN(ms) || ms < 0) return '';
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's ago';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      return Math.floor(s / 86400) + 'd ago';
+    },
+
+    observedWhen() {
+      const at = this.app?.observed_at;
+      if (!at || String(at).startsWith('0001')) return 'unknown';
+      return formatObservedAt(at);
+    },
+
+    // The most recent change line: when this release landed and what it
+    // replaced. deployed_at absent (never deployed / older CLI) says so
+    // rather than guessing.
+    lastChangeWhen() {
+      const at = this.app?.deployed_at;
+      if (!at || String(at).startsWith('0001')) return 'not recorded';
+      return formatObservedAt(at);
+    },
+
+    shortHash(h) {
+      return h ? String(h).slice(0, 12) : '';
+    },
+
+    openRestoreTests() {
+      Alpine.store('router').navigate('restore-tests');
+    },
+
     accessoryName(containerName) {
       const prefix = `${this.app?.name || ''}-`;
       return containerName.startsWith(prefix) ? containerName.slice(prefix.length) : containerName;
@@ -2345,6 +2388,24 @@ document.addEventListener('alpine:init', () => {
     getMonitorDot(m) {
       if (!m.stats || m.stats.total_checks === 0) return 'gray';
       return m.stats.uptime_percent >= 99 ? 'green' : m.stats.uptime_percent >= 95 ? 'yellow' : 'red';
+    },
+
+    // ── Alert delivery status (D08) ──
+    // The outbox exposes the last delivery per monitor: state, attempts,
+    // the exact last failure, and the next retry. A failed notification is
+    // operationally silent without this — the monitor page is where it must
+    // be visible.
+    deliveryLabel(d) {
+      if (!d) return '';
+      if (d.status === 'dead_lettered') return 'delivery dead-lettered';
+      if (d.status === 'pending') return d.attempts > 0 ? `delivery retrying (attempt ${d.attempts})` : 'delivery pending';
+      return '';
+    },
+
+    // Only failure-ish states earn the warning chip; plain "delivered" is
+    // history, not an alert.
+    deliveryWarns(d) {
+      return !!d && (d.status === 'dead_lettered' || (d.status === 'pending' && d.attempts > 0));
     },
 
     formatInterval(ns) {

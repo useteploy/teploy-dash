@@ -505,13 +505,21 @@
             <button class="tab" :class="{ active: tab === 'kv' }" role="tab" id="app-tab-kv" aria-controls="app-panel-kv" :aria-selected="(tab === 'kv').toString()" :tabindex="tab === 'kv' ? 0 : -1" @focus="switchTab('kv')">KV</button>
           </div>
 
-          <!-- General Tab -->
+          <!-- General Tab: the resource overview (D07 exemplar). One place
+               answers: what is running (release), how fresh that answer is,
+               what changed last, how to act, and how to recover. -->
           <template x-if="tab === 'general'">
             <div role="tabpanel" id="app-panel-general" aria-labelledby="app-tab-general" tabindex="-1">
               <div class="status-grid">
                 <div class="status-item">
-                  <div class="status-label">Version</div>
+                  <div class="status-label">Current release</div>
                   <div class="status-value mono" x-text="app.current_hash || 'N/A'"></div>
+                  <div class="card-meta" style="margin-top:4px;" x-show="app.previous_hash" x-text="'was ' + shortHash(app.previous_hash)"></div>
+                </div>
+                <div class="status-item">
+                  <div class="status-label">Deployed</div>
+                  <div class="status-value" style="font-size: 13px;" x-text="lastChangeWhen()"></div>
+                  <div class="card-meta" style="margin-top:4px;" x-text="observedAge() ? 'observed ' + observedAge() : 'observation age unknown'"></div>
                 </div>
                 <div class="status-item">
                   <div class="status-label">Port</div>
@@ -535,7 +543,22 @@
                 </div>
               </div>
 
-              <div class="btn-group" style="margin-bottom: 24px;">
+              <!-- Partial observation errors (D07 misleading states): the
+                   status payload carries per-scope errors (e.g. container
+                   listing failed while routes read fine). They were dropped
+                   entirely — a partially-blind read painted as complete. -->
+              <template x-if="app.errors && app.errors.length > 0">
+                <div role="alert" class="stale-banner" style="margin-bottom: 20px;">
+                  <strong>Partial observation</strong> — status read at <span x-text="observedWhen()"></span> with errors:
+                  <ul style="margin: 6px 0 0 16px;">
+                    <template x-for="(err, i) in app.errors" :key="i">
+                      <li><span class="mono" style="font-size: 12px;" x-text="err.scope"></span>: <span x-text="err.message"></span></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <div class="btn-group" style="margin-bottom: 8px;">
                 <button class="btn" x-show="app.port" @click="doAction('restart')" :disabled="actionLoading">Restart</button>
                 <button class="btn" x-show="app.port" @click="doAction('stop')" :disabled="actionLoading">Stop</button>
                 <button class="btn" x-show="app.port" @click="doAction('start')" :disabled="actionLoading">Start</button>
@@ -543,6 +566,17 @@
                 <button class="btn" @click="doAction(app.locked ? 'unlock' : 'lock')" :disabled="actionLoading" x-text="app.locked ? 'Unlock' : 'Lock'"></button>
                 <button class="btn" @click="doAction(app.maintenance ? 'maintenance/off' : 'maintenance/on')" :disabled="actionLoading" x-text="app.maintenance ? 'End Maintenance' : 'Maintenance'"></button>
                 <button class="btn btn-danger" @click="removeApp()" :disabled="actionLoading">Remove</button>
+              </div>
+
+              <!-- Recovery row (D07): rollback is above; these are the
+                   non-destructive recovery paths — the change history for
+                   this app and the scheduled restore verifications that
+                   prove its backups actually restore. -->
+              <div class="card-meta" style="margin-bottom: 24px; display: flex; gap: 16px;">
+                <a href="#" @click.prevent="switchTab('deploys')" style="color: var(--accent);">Deploy history</a>
+                <a href="#" @click.prevent="switchTab('logs')" style="color: var(--accent);">Live logs</a>
+                <a href="#" @click.prevent="openRestoreTests()" style="color: var(--accent);">Restore tests</a>
+                <span>Configuration: <a href="#" @click.prevent="switchTab('env')" style="color: var(--accent);">environment</a> · <a href="#" @click.prevent="switchTab('kv')" style="color: var(--accent);">KV</a></span>
               </div>
 
               <!-- Drift: live containers vs what was deployed -->
@@ -996,11 +1030,16 @@
               <template x-for="m in monitors" :key="m.id">
                 <div class="monitor-card" @click="selectMonitor(m.id)">
                   <div class="monitor-header">
-                    <div class="monitor-status">
-                      <span class="dot" :class="getMonitorDot(m)"></span>
-                      <span class="monitor-name" x-text="m.name"></span>
-                      <span class="monitor-type badge" x-text="m.type"></span>
-                    </div>
+                <div class="monitor-status">
+                  <span class="dot" :class="getMonitorDot(m)"></span>
+                  <span class="monitor-name" x-text="m.name"></span>
+                  <span class="monitor-type badge" x-text="m.type"></span>
+                  <!-- D08: a failing alert delivery warns at list level. -->
+                  <span class="badge" x-show="deliveryWarns(m.delivery)"
+                        style="background: transparent; border: 1px solid var(--yellow); color: var(--yellow);"
+                        :title="(m.delivery && m.delivery.last_error) || ''"
+                        x-text="deliveryLabel(m.delivery)"></span>
+                </div>
                     <div class="monitor-uptime">
                       <span class="uptime-pct" x-text="m.stats ? m.stats.uptime_percent.toFixed(1) + '%' : '--'"></span>
                       <span class="uptime-label">24h uptime</span>
@@ -1082,6 +1121,35 @@
               <div class="stat-card">
                 <div class="stat-value" x-text="selectedMonitor.stats.down_checks || 0"></div>
                 <div class="stat-label">Downtime Events</div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Alert delivery (D08): the durable outbox's last delivery for
+               this monitor — status, attempts, the exact last failure, and
+               the next retry. Hidden when there is nothing to say (no
+               delivery yet, or the last one landed). -->
+          <template x-if="selectedMonitor?.delivery">
+            <div class="section" style="margin-top: 4px;">
+              <h2>Alert delivery</h2>
+              <div class="table-wrap" style="padding: 12px 16px;">
+                <div style="display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;">
+                  <span class="badge"
+                        :class="selectedMonitor.delivery.status === 'delivered' ? 'green' : (selectedMonitor.delivery.status === 'dead_lettered' ? 'red' : 'yellow')"
+                        x-text="selectedMonitor.delivery.status"></span>
+                  <span x-text="'attempt ' + (selectedMonitor.delivery.attempts || 0)"></span>
+                  <span class="card-meta" style="margin: 0;"
+                        x-text="'event: ' + selectedMonitor.delivery.event_status + ' at ' + formatDate(selectedMonitor.delivery.occurred_at)"></span>
+                  <span class="card-meta" style="margin: 0;"
+                        x-show="selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at"
+                        x-text="'next retry: ' + formatDate(selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at)"></span>
+                </div>
+                <p x-show="selectedMonitor.delivery.last_error"
+                   style="margin: 10px 0 0; color: var(--red); font-size: 12px; font-family: var(--mono); word-break: break-word;"
+                   x-text="'last failure: ' + selectedMonitor.delivery.last_error"></p>
+                <p x-show="selectedMonitor.delivery.last_attempt_at"
+                   class="card-meta" style="margin: 4px 0 0;"
+                   x-text="'last attempt: ' + formatDate(selectedMonitor.delivery.last_attempt_at)"></p>
               </div>
             </div>
           </template>
