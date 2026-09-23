@@ -2543,10 +2543,27 @@ type groupData struct {
 	Groups []groupEntry `json:"groups"`
 }
 
+// groupAppRef is a server-scoped app reference (X02 §5 row 7): the app is
+// bound to a server by its envelope id — the CLI's stable id when present,
+// else the legacy name-hash — so a rename or a name swap never retargets
+// group membership, and the same app name on two servers stays two distinct
+// entries.
+type groupAppRef struct {
+	ServerID string `json:"server_id"`
+	App      string `json:"app"`
+}
+
 type groupEntry struct {
-	Name     string         `json:"name"`
-	Apps     []string       `json:"apps"`
-	Projects []projectEntry `json:"projects,omitempty"`
+	Name string   `json:"name"`
+	Apps []string `json:"apps"`
+	// ServerApps carries the server-scoped refs (X02 §5 row 7). Bare Apps
+	// entries from before the migration are preserved verbatim — they stay
+	// readable (downgrade-compatible) and are never silently converted to
+	// refs: binding an app to a server is an explicit act (`server` on the
+	// assign request), because a bare name that lives on two servers has no
+	// correct default binding. Mutations resolve against ServerApps first.
+	ServerApps []groupAppRef  `json:"server_apps,omitempty"`
+	Projects   []projectEntry `json:"projects,omitempty"`
 }
 
 type projectEntry struct {
@@ -2699,6 +2716,11 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 // transaction.
 var errGroupNotFound = errors.New("group not found")
 
+// errGroupAppAmbiguous is the transaction sentinel for an app name matching
+// more than one server-scoped binding in a group (X02 §5 row 7): the
+// mutation refuses rather than guessing which binding to touch.
+var errGroupAppAmbiguous = errors.New("app binding is ambiguous")
+
 func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/groups/")
 	parts := strings.Split(path, "/")
@@ -2776,11 +2798,32 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case resource == "apps" && len(parts) == 3 && r.Method == "DELETE":
-		// DELETE /api/groups/{name}/apps/{app} — unassign app from group
+		// DELETE /api/groups/{name}/apps/{app} — unassign app from group.
+		// X02 §5 row 7: the name may match server-scoped refs. Exactly one
+		// match removes that ref; multiple matches are ambiguous — the
+		// same app name on several servers has no correct default, so the
+		// mutation refuses naming the servers instead of guessing. Legacy
+		// bare entries keep the historical remove-by-name behavior.
 		appName := parts[2]
+		var ambiguous []string
 		_, terr := updateGroups(func(data *groupData) error {
 			for i, g := range data.Groups {
 				if g.Name == groupName {
+					var keptRefs []groupAppRef
+					for _, ref := range g.ServerApps {
+						if ref.App == appName {
+							ambiguous = append(ambiguous, ref.ServerID)
+							continue
+						}
+						keptRefs = append(keptRefs, ref)
+					}
+					if len(ambiguous) > 1 {
+						return errGroupAppAmbiguous
+					}
+					if len(ambiguous) == 1 {
+						data.Groups[i].ServerApps = keptRefs
+						return nil
+					}
 					filtered := make([]string, 0, len(g.Apps))
 					for _, a := range g.Apps {
 						if a != appName {
@@ -2794,6 +2837,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 			return errGroupNotFound
 		})
 		if terr != nil {
+			if errors.Is(terr, errGroupAppAmbiguous) {
+				writeErrorStatus(w, fmt.Sprintf("app %q is bound to %d servers in this group (%s); remove the specific binding instead of guessing", appName, len(ambiguous), strings.Join(ambiguous, ", ")), http.StatusConflict)
+				return
+			}
 			writeError(w, terr.Error())
 			return
 		}
@@ -2801,18 +2848,50 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 		return
 
 	case resource == "apps" && r.Method == "POST":
-		// POST /api/groups/{name}/apps — assign app to group
+		// POST /api/groups/{name}/apps — assign app to group. X02 §5 row 7:
+		// an optional `server` binds the app server-scoped, recording the
+		// server's envelope id (stable CLI id, else the name-hash fallback)
+		// so renames and name swaps never retarget the membership. Without
+		// `server` the assignment stays a legacy bare entry — a bare name
+		// that lives on two servers has no correct default binding, so
+		// binding is explicit, never guessed.
 		var body struct {
-			App string `json:"app"`
+			App    string `json:"app"`
+			Server string `json:"server"`
 		}
 		if err := strictDecode(r, &body); err != nil || body.App == "" {
 			writeError(w, "app is required")
 			return
 		}
+		var bindServerID string
+		if body.Server != "" {
+			var found bool
+			for _, srv := range s.serversBestEffort() {
+				if srv.Name == body.Server {
+					bindServerID = serverEnvelopeID(srv)
+					found = true
+					break
+				}
+			}
+			if !found {
+				writeErrorStatus(w, fmt.Sprintf("server %q is not configured", body.Server), http.StatusNotFound)
+				return
+			}
+		}
 		already := false
 		_, terr := updateGroups(func(data *groupData) error {
 			for i, g := range data.Groups {
 				if g.Name == groupName {
+					if bindServerID != "" {
+						for _, ref := range g.ServerApps {
+							if ref.App == body.App && ref.ServerID == bindServerID {
+								already = true
+								return nil
+							}
+						}
+						data.Groups[i].ServerApps = append(data.Groups[i].ServerApps, groupAppRef{ServerID: bindServerID, App: body.App})
+						return nil
+					}
 					for _, a := range g.Apps {
 						if a == body.App {
 							already = true
