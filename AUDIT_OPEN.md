@@ -1718,3 +1718,20 @@ admitted a second operation); supersede skipped → the same test fails
   on internal/source, internal/operation, internal/server ok; `make
   build` ok. Frontend untouched (no bundle change to node --check). No
   push performed.
+
+## X02 S7 acceptance sweep — 2026-09-23
+
+`scripts/x02-acceptance-sweep.sh` (this repo's executable harness, ADR §6
+S7). Legs and evidence (exit 0, all PASS, non-vacuous):
+
+| Leg | Package | Tests | Result |
+|---|---|---|---|
+| rename-operations | ./internal/operation | 4 (rename follows identity + retarget; same-name-different-id; vanished-id; retargetCommand guards) | PASS |
+| rename-groups | ./internal/server | 3 (swap survival; stable-id binding; legacy fallback binding) | PASS |
+| duplicate-names | ./internal/server | 11 (same-app-two-servers distinct; ambiguous removal refuses; fleet envelope set) | PASS |
+| repeated-request | ./internal/operation | 3 (replay/conflict; principal namespacing; restart survival) | PASS |
+| response-loss | ./internal/operation | 11 (restart reconciliation set; cancel-during-run; future-record read-only; version stamp) | PASS |
+| rollback | ./internal/operation | 1 (repointed-target refusal — the A14 gate rollback relies on) | PASS |
+
+Vacuous-match guard included. Re-run and paste fresh output here on any
+contract change.
