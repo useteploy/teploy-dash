@@ -242,9 +242,16 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
 - A32 (residual) - 0700/0600 permission tightening for store dirs/files:
   changing modes on existing installs needs a migration note and CLI
   coordination (the CLI reads some of these paths).
-- A35 - groups/projects concurrency + AppRef identity: groups.json is a
-  shared CLI contract; server-scoped app identity is a schema migration
-  requiring CLI coordination. Save-error surfacing landed.
+- A35 - groups/projects concurrency + AppRef identity: LANDED 2026-09-23
+  (X02 S4, `061c312`+`fbb0bb1`): servers.yml carries CLI-minted stable ids
+  (srv-<16hex>, preserved by rename/update, legacy entries id-less);
+  fleet/preflight envelope ids prefer the recorded id with the name-hash
+  fallback; AdmittedServer reconciles renames by id (verified rename
+  retargets the command, same-name-different-id and vanished-id refuse);
+  groups.json gained server-scoped app refs (`server_apps`, explicit
+  binding, ambiguous bare-name removal refuses 409 naming the servers;
+  legacy apps list preserved verbatim). Cross-process locking of
+  groups.json remains deferred (unchanged from the R11 note).
 - A37 - fleet observation envelope (stale/partial/errors): protocol + UI
   redesign; the fleet cache already preserves last-known state and logs
   per-server failures. FIRST SLICE LANDED 2026-09-21 (see the D01 section
