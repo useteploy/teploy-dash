@@ -32,3 +32,21 @@ func TestUserArgs_AppendSafe(t *testing.T) {
 		t.Errorf("b missing bob: %v", b)
 	}
 }
+
+// X02 S2: the central decode fails closed on envelopes from a newer machine
+// interface; MI <= max and pre-MI (field absent) envelopes pass.
+func TestParseJSONMachineInterfaceGate(t *testing.T) {
+	if _, err := ParseJSON(`{"machine_interface":2,"host":"h"}`); err == nil || !strings.Contains(err.Error(), "newer than this dash supports") {
+		t.Fatalf("MI 2 must refuse with the upgrade remedy, got %v", err)
+	}
+	if v, err := ParseJSON(`{"machine_interface":1,"host":"h"}`); err != nil || v == nil {
+		t.Fatalf("MI 1 must decode, got %v %v", v, err)
+	}
+	if v, err := ParseJSON(`{"host":"h"}`); err != nil || v == nil {
+		t.Fatalf("pre-MI envelope must decode (legacy path), got %v %v", v, err)
+	}
+	// server list's bare map and non-object payloads are not gated here.
+	if v, err := ParseJSON(`{"srv":{"host":"h"}}`); err != nil || v == nil {
+		t.Fatalf("bare map must decode, got %v %v", v, err)
+	}
+}

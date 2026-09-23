@@ -443,6 +443,9 @@ func decodeCLIJSON(raw string) (interface{}, error) {
 	if err := dec.Decode(&extra); err != io.EOF {
 		return nil, errors.New("teploy output must contain exactly one JSON value")
 	}
+	if err := assertMachineInterfaceSupported(data); err != nil {
+		return nil, err
+	}
 	return data, nil
 }
 
@@ -452,6 +455,42 @@ func decodeCLIJSON(raw string) (interface{}, error) {
 // rules: empty, non-JSON, or multi-value output is an error.
 func ParseJSON(raw string) (interface{}, error) {
 	return decodeCLIJSON(raw)
+}
+
+// MaxSupportedMachineInterface is the newest teploy machine interface this
+// build of dash understands (X02 D8/D16, contracts corpus rev 1). A decoded
+// envelope advertising a newer interface is REFUSED here — centrally, in the
+// decode both the direct and injected-runner paths share — because
+// interpreting unknown envelope semantics is how a skew becomes silent data
+// corruption. Envelopes with no machine_interface field are pre-MI legacy
+// producers, the documented legacy decode path.
+const MaxSupportedMachineInterface = 1
+
+// assertMachineInterfaceSupported fails closed on an envelope from a newer
+// machine interface. json.Number keeps the comparison exact.
+func assertMachineInterfaceSupported(data interface{}) error {
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	raw, ok := m["machine_interface"]
+	if !ok {
+		return nil // pre-MI legacy envelope
+	}
+	n, ok := raw.(json.Number)
+	if !ok {
+		return nil // wrong shape on an old field is not ours to police here
+	}
+	v, err := n.Int64()
+	if err != nil {
+		return nil
+	}
+	if v > MaxSupportedMachineInterface {
+		return fmt.Errorf(
+			"teploy CLI machine interface %d is newer than this dash supports (max %d) — upgrade teploy-dash before continuing; refusing to interpret the envelope",
+			v, MaxSupportedMachineInterface)
+	}
+	return nil
 }
 
 // userArgs returns ["--user", user] when user is non-empty, else nil. The CLI

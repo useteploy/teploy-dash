@@ -267,12 +267,8 @@ func TestCapabilitiesProbesAndCachesCLIContract(t *testing.T) {
 		calls[command]++
 		mu.Unlock()
 		switch command {
-		case "version":
-			return &cli.Result{Stdout: "teploy v0.2.0\n"}, nil
-		case "app list --help", "server status --help":
-			// F072: support is established by the --json FLAG being
-			// advertised, not by help merely exiting zero.
-			return &cli.Result{Stdout: "usage\n  --json   machine output"}, nil
+		case "version --json":
+			return &cli.Result{Stdout: `{"version":"teploy v0.2.0","machine_interface":1,"capabilities":["app-list-machine","server-status-machine"]}`}, nil
 		default:
 			return nil, errors.New("unexpected command: " + command)
 		}
@@ -299,9 +295,13 @@ func TestCapabilitiesProbesAndCachesCLIContract(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, command := range []string{"version", "app list --help", "server status --help"} {
-		if calls[command] != 1 {
-			t.Fatalf("%s called %d times, want cached single probe", command, calls[command])
+	if calls["version --json"] != 1 {
+		t.Fatalf("version --json called %d times, want cached single probe", calls["version --json"])
+	}
+	// The token set answered; the --help probes must not have run at all.
+	for _, command := range []string{"app list --help", "server status --help"} {
+		if calls[command] != 0 {
+			t.Fatalf("%s ran despite the capability tokens answering", command)
 		}
 	}
 }
@@ -315,6 +315,9 @@ func TestCapabilitiesProbeRequiresJSONFlag(t *testing.T) {
 		CLIRunner: func(_ context.Context, args ...string) (*cli.Result, error) {
 			command := strings.Join(args, " ")
 			switch command {
+			case "version --json":
+				// Pre-MI CLI: unknown flag.
+				return &cli.Result{ExitCode: 1, Stderr: "unknown flag: --json"}, nil
 			case "version":
 				return &cli.Result{Stdout: "teploy v0.1.0\n"}, nil
 			case "app list --help", "server status --help":
@@ -334,5 +337,39 @@ func TestCapabilitiesProbeRequiresJSONFlag(t *testing.T) {
 	}
 	if envelope.Data.Features.AppListJSON || envelope.Data.Features.ServerStatusJSON {
 		t.Fatalf("--json-less help advertised as machine-capable: %#v", envelope.Data.Features)
+	}
+}
+
+// X02 S2 done-check: an interface newer than the one dash decodes fails
+// CLOSED at the capability probe — machine features report unsupported and
+// the remedy is visible at /api/capabilities — before any envelope or
+// mutation rides the newer interface.
+func TestCapabilitiesFailsClosedOnNewerMachineInterface(t *testing.T) {
+	s := New(Config{
+		DataDir: t.TempDir(), NoAuth: true,
+		CLIInstalled: func() bool { return true },
+		CLIRunner: func(_ context.Context, args ...string) (*cli.Result, error) {
+			if strings.Join(args, " ") == "version --json" {
+				return &cli.Result{Stdout: `{"version":"teploy v0.3.0","machine_interface":2,"capabilities":["app-list-machine","server-status-machine"]}`}, nil
+			}
+			return nil, errors.New("unexpected command: " + strings.Join(args, " "))
+		},
+	})
+	response := httptest.NewRecorder()
+	s.handleCapabilities(response, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
+	var envelope struct {
+		Data capabilities `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.Features.AppListJSON || envelope.Data.Features.ServerStatusJSON {
+		t.Fatalf("features advertised against a newer machine interface: %#v", envelope.Data.Features)
+	}
+	if len(envelope.Data.Errors) == 0 || !strings.Contains(envelope.Data.Errors[0].Message, "upgrade teploy-dash") {
+		t.Fatalf("expected the upgrade remedy error, got %#v", envelope.Data.Errors)
+	}
+	if envelope.Data.CLI.MachineInterface != 2 {
+		t.Fatalf("machine_interface not surfaced: %#v", envelope.Data.CLI)
 	}
 }
