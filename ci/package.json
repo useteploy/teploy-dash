@@ -1,0 +1,10 @@
+{
+  "name": "teploy-dash-ci",
+  "private": true,
+  "description": "Pinned tooling for the X01 job-3 contracts corpus validation (see validate-contracts.mjs). Not part of the shipped binary.",
+  "type": "module",
+  "dependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1"
+  }
+}

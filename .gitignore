@@ -38,3 +38,6 @@ Thumbs.db
 # Private notes — local only, never committed
 /_internal/
 /INTERNAL.md
+
+# ci/ node tooling installs (ci/package-lock.json IS committed)
+/ci/node_modules/

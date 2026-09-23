@@ -182,11 +182,8 @@ func (s *Server) readMachineApps(ctx context.Context, srv remote.ServerConn) ([]
 	}
 
 	var list machineAppList
-	if err := json.Unmarshal([]byte(result.Stdout), &list); err != nil {
-		return nil, fmt.Errorf("decoding teploy app list for %s: %w", srv.Name, err)
-	}
-	if list.Host == "" || list.ObservedAt.IsZero() || list.Apps == nil || list.Errors == nil {
-		return nil, fmt.Errorf("decoding teploy app list for %s: incomplete machine response", srv.Name)
+	if err := decodeAppListEnvelope(result.Stdout, srv.Name, &list); err != nil {
+		return nil, err
 	}
 	for _, partialErr := range list.Errors {
 		logMachineError("fleet", srv.Name, partialErr)
@@ -194,12 +191,38 @@ func (s *Server) readMachineApps(ctx context.Context, srv remote.ServerConn) ([]
 
 	apps := make([]remote.AppState, 0, len(list.Apps))
 	for _, app := range list.Apps {
-		if app.App == "" || app.ObservedAt.IsZero() || app.CurrentRelease.Ports == nil || app.PreviousRelease.Ports == nil || app.Containers == nil || app.Processes == nil || app.Errors == nil {
-			return nil, fmt.Errorf("decoding teploy app list for %s: incomplete machine response for app %q", srv.Name, app.App)
+		if err := assertAppStatusComplete(app, srv.Name); err != nil {
+			return nil, err
 		}
 		apps = append(apps, mapMachineApp(srv.Name, list.ObservedAt, app))
 	}
 	return apps, nil
+}
+
+// decodeAppListEnvelope decodes one `teploy app list --json` payload with
+// the envelope-level completeness rules the fleet read relies on: a
+// truncated or shape-drifted envelope is refused as incomplete rather than
+// mapped to an empty fleet. Split out of readMachineApps (behavior
+// unchanged) so the contracts corpus tests drive real CLI payloads through
+// the same decode path (X01 5.2 job 3).
+func decodeAppListEnvelope(raw, server string, list *machineAppList) error {
+	if err := json.Unmarshal([]byte(raw), list); err != nil {
+		return fmt.Errorf("decoding teploy app list for %s: %w", server, err)
+	}
+	if list.Host == "" || list.ObservedAt.IsZero() || list.Apps == nil || list.Errors == nil {
+		return fmt.Errorf("decoding teploy app list for %s: incomplete machine response", server)
+	}
+	return nil
+}
+
+// assertAppStatusComplete enforces the per-app completeness rules: every
+// release, container, process and error collection must be present (the
+// encoder initializes them all; a nil means a truncated payload).
+func assertAppStatusComplete(app machineApp, server string) error {
+	if app.App == "" || app.ObservedAt.IsZero() || app.CurrentRelease.Ports == nil || app.PreviousRelease.Ports == nil || app.Containers == nil || app.Processes == nil || app.Errors == nil {
+		return fmt.Errorf("decoding teploy app list for %s: incomplete machine response for app %q", server, app.App)
+	}
+	return nil
 }
 
 func mapMachineApp(server string, listObservedAt time.Time, app machineApp) remote.AppState {
