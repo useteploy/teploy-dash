@@ -366,13 +366,20 @@ func (g *authGate) upsertOIDCPrincipal(subject, username, email, role string) (e
 		return existing.AuthEpoch, liveRole, nil
 	}
 	epoch = g.epochCounter + 1
+	// A principal minted NOW is a post-X03 identity: it starts on the
+	// role's PRESET, exactly like a locally created account. The legacy
+	// profile is reserved for rows that predate the capability matrix —
+	// minting new principals on it silently granted pre-matrix widths
+	// (a fresh viewer gained reveal.secrets) on every first SSO sign-in
+	// (D06). Existing rows above keep whatever profile they carry.
 	candidate[subject] = &dashPrincipal{
-		Subject:    subject,
-		Username:   username,
-		Email:      email,
-		Role:       liveRole,
-		AuthEpoch:  epoch,
-		LastSignIn: time.Now().UTC().Format(time.RFC3339),
+		Subject:           subject,
+		Username:          username,
+		Email:             email,
+		Role:              liveRole,
+		AuthEpoch:         epoch,
+		LastSignIn:        time.Now().UTC().Format(time.RFC3339),
+		CapabilityProfile: profilePreset,
 	}
 	if err := saveUsersFile(g.usersFile, g.users, candidate, epoch); err != nil {
 		return 0, "", err
