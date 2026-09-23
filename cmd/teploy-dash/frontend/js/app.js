@@ -113,6 +113,67 @@ function isOperation(result) {
   return !!(result && typeof result === 'object' && result.id && result.status && result.request);
 }
 
+// ── Deploy-form host readiness (D03 onboarding preflight) ──
+// Shared by the two deploy forms (projects page + project detail). Loads
+// /api/onboarding/preflight for the selected server and exposes the checks:
+// blocking failures gate the Deploy button (canDeploy), warnings render
+// non-blocking, and an unreadable preflight leaves readiness UNKNOWN and
+// gated — never a silent pass. Late responses are dropped when the server
+// selection changed mid-flight.
+function withDeployReadiness(component) {
+  component.preflight = null;
+  component.preflightLoading = false;
+  component.preflightError = null;
+  component.loadPreflight = async function () {
+    const server = this.deployForm && this.deployForm.server;
+    this.preflight = null;
+    this.preflightError = null;
+    if (!server) return;
+    this.preflightLoading = true;
+    try {
+      const env = await api.get('/api/onboarding/preflight?server=' + encodeURIComponent(server));
+      if (this.deployForm.server !== server) return;
+      this.preflight = env;
+    } catch (e) {
+      if (this.deployForm.server === server) this.preflightError = e.message;
+    } finally {
+      if (this.deployForm.server === server) this.preflightLoading = false;
+    }
+  };
+  component.resetPreflight = function () {
+    this.preflight = null;
+    this.preflightLoading = false;
+    this.preflightError = null;
+  };
+  Object.defineProperties(component, {
+    preflightChecks: {
+      get() { return (this.preflight && this.preflight.checks) || []; },
+      enumerable: true,
+    },
+    blockingChecks: {
+      get() { return this.preflightChecks.filter((c) => c.severity === 'blocking' && c.result !== 'pass'); },
+      enumerable: true,
+    },
+    warningChecks: {
+      get() { return this.preflightChecks.filter((c) => c.severity === 'warning' && c.result !== 'pass'); },
+      enumerable: true,
+    },
+    canDeploy: {
+      get() {
+        const f = this.deployForm;
+        if (!f || !f.app || !f.image || !f.domain || !f.server) return false;
+        if (this.preflightLoading || this.preflightError || !this.preflight) return false;
+        return this.preflight.ready !== false;
+      },
+      enumerable: true,
+    },
+  });
+  component.preflightCheckClass = function (c) {
+    return 'preflight-check check-' + c.result + ' sev-' + c.severity;
+  };
+  return component;
+}
+
 // ── Toast ──
 function showToast(message, type = 'info') {
   const container = document.getElementById('toast-container');
@@ -402,7 +463,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Projects Page ──
-  Alpine.data('projectsPage', () => ({
+  Alpine.data('projectsPage', () => withDeployReadiness({
     apps: [],
     groups: [],
     serverList: [],
@@ -441,6 +502,7 @@ document.addEventListener('alpine:init', () => {
     openDeployForm(groupName) {
       this.deployingToGroup = groupName;
       this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
+      this.resetPreflight();
     },
 
     async doDeploy(groupName) {
@@ -563,7 +625,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Project Detail Page ──
-  Alpine.data('projectDetailPage', () => ({
+  Alpine.data('projectDetailPage', () => withDeployReadiness({
     apps: [],
     groups: [],
     serverList: [],
@@ -647,6 +709,7 @@ document.addEventListener('alpine:init', () => {
     openDeployForm() {
       this.deployingToProject = true;
       this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
+      this.resetPreflight();
     },
 
     async doDeploy() {

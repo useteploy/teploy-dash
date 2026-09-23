@@ -1317,3 +1317,118 @@ slice (not fully closed — remainders below).
   internal/store, internal/monitor, internal/alert, internal/outbox, and
   internal/server ok; `make build` ok. Frontend untouched (no bundle change
   to node --check). No push performed.
+
+## 2026-09-22 D03 first slice — onboarding preflight foundation
+
+Bounded backend-first slice of programme workstream D03 ("provide distinct,
+understandable entry points... BEFORE asking for application details, show
+host connection/capability readiness"). This is the preflight foundation,
+not a closure of D03 — the four entry points' full journeys, plan preview,
+error-recovery flows past the first rung, and the template catalog remain
+(recorded below).
+
+**Recon (what existed):** servers are registered through the CLI's
+servers.yml (`teploy server list --json` via resolveServers; dash adds via
+/api/config/servers); the only connectivity check was the `online` flag
+from a 2s TCP dial to the SSH port on /api/servers (tcpReachable); the
+local CLI capability surface existed as /api/capabilities (version +
+machine-interface --help probes, cached); per-host specifics existed only
+as the Servers-detail `teploy server status <name> --json` read (docker
+installed/version, disks with available bytes, caddy routes, scoped
+errors). The deploy forms (projects page + project detail) collected
+app/image/domain/server/port and posted /api/deploy with NO host check
+before or during — app details were asked before any host readiness.
+
+**What landed — preflight endpoint (internal/server/onboarding.go):**
+
+- `GET/POST /api/onboarding/preflight?server=<name|candidate-host>` (POST
+  accepts `{"server": ...}`) returns one readiness envelope per probe in
+  the D01 style: stable ID, known/collected-at/error/source + a checks
+  array. Each check: `name` (teploy_cli, machine_interface, ssh,
+  host_read, docker, disk, caddy), `result` (pass|fail|unknown),
+  `severity` (blocking|warning), detail, and an actionable remediation
+  string on every non-pass (the recovery-from-failures first rung).
+- Sources: CLI capability cache (teploy_cli + machine_interface),
+  tcpReachable on the F012-normalized address (ssh), `teploy server status
+  --json` (host_read + docker/disk/caddy specifics; scoped machine errors
+  fail their check with the exact message — the reachable-degraded shape),
+  with the SSH-executor fallback (uptime/free/df/docker ps round trip)
+  when the CLI lacks the machine interface: disk parsed from the df
+  figures, docker/caddy honestly UNKNOWN at warning tier (the fallback
+  cannot verify daemon state).
+- D01 envelope conventions: unknown server name → 200 with `known:false`,
+  the error naming it, blocking checks unknown, plus a bare-reachability
+  probe when the ref parses as a candidate host; discovery failure → the
+  envelope carries "server discovery failed: ..." — never a dropped body.
+  Disk tiering: <1 GiB blocking, <5 GiB warning. Caddy failures are
+  warning-tier (deploys queue; domains would not answer). Whole probe
+  bounded by a 20s timeout; SSH dial 3s (vars, test-tightened).
+
+**What landed — flow gating (additive):**
+
+- `GET /api/onboarding/entry?server=<name>` → `{server, gated, reason,
+  preflight}`: gated with "no server selected" when the param is absent;
+  gated with the blocking checks named (or the envelope error) when
+  readiness fails; `ready` derives from no blocking failure plus the core
+  path (teploy_cli/ssh/host_read) having PASSed — an unknown core check
+  gates like a failure because nothing about the target was verified.
+- `/api/deploy` and every other direct creation path keep their exact
+  contract (recorded as a D03 follow-up to route them through preflight
+  deliberately). The UI gates: both deploy forms (projects page + project
+  detail) fetch preflight on server selection, render a readiness panel
+  (severity-classed checks, remediation hints, re-check button), and
+  disable Deploy while a blocking check fails, readiness is loading/
+  unknown, or the preflight itself errored — warnings render non-blocking.
+  Late preflight responses are dropped when the selection changed (A50).
+
+**TDD evidence:** internal/server/onboarding_test.go written red first
+(compile-red captured: endpoint and symbols absent) — healthy (all checks
+pass, ready, version + disk detail carried), reachable-degraded (docker
+daemon down via scoped machine error → blocking fail with exact message +
+remediation, envelope present), unreachable (ssh + host_read fail
+blocking, docker/disk/caddy unknown, envelope not dropped), unknown
+server name (visible error, known:false, not dropped), discovery failure
+(visible error, never empty success), POST body form, and the gating
+matrix (healthy → not gated; docker down → gated with docker named; no
+server → gated). Mutations verified then restored: preflightReady
+neutered (degraded reads ready) → TestOnboardingEntryGatingStates,
+TestOnboardingPreflightDockerDownIsBlocking, and
+TestOnboardingPreflightUnreachableServerNotDropped all fail. Frontend
+(cmd/teploy-dash/frontend-test/onboarding_preflight.test.mjs, node-test
+convention): blocking gates canDeploy with remediation surfaced, warnings
+non-blocking, healthy + complete form deployable, preflight-fetch failure
+gates as unknown, no-server gates, stale-response drop, plus index.html
+tripwires (both forms bind preflightChecks/preflightCheckClass/
+preflightError/canDeploy/check-remediation). Frontend mutations verified
+then restored: canDeploy ignoring preflight.ready → gating assertion
+fails; :disabled canDeploy bindings stripped → both tripwires fail.
+
+**Remaining D03 scope (next slices):**
+
+- The four entry points' full journeys: existing image, Git repository,
+  supported Compose stack, maintained template — today only the image path
+  exists (deploy form); Git/Compose entry points are not built.
+- Route the direct creation paths (/api/deploy, template install, MCP
+  deploy tool) through preflight deliberately — currently additive-only
+  (API consumers keep the direct contract by design this slice).
+- Error recovery flows past the first rung: preflight remediation strings
+  exist; wrong-DNS / registry-denial / missing-env / failed-readiness
+  recovery needs the deploy-failure surfaces (operation events + app
+  health) wired to the same remediation vocabulary, and a
+  "successful onboarding ends at a real responding application" end-state
+  (post-deploy readiness verification against the app health probe).
+- Plan preview (what will be created/changed before confirm).
+- Template catalog depth (the maintained-template entry point's list,
+  compatibility metadata).
+- Preflight result caching/backoff: each request probes live (bounded);
+  a poll-heavy UI could warrant a short TTL cache keyed like the fleet
+  probe timeout pattern.
+
+## Resolution log (D03 slice)
+
+- 2026-09-22: first bounded slice landed as described above (working
+  tree, uncommitted). Gates: `go vet ./...` clean; `gofmt -l` clean;
+  `go test ./... -count=1` all 12 packages ok; `go test -race -count=1
+  ./internal/server/` ok; `make build` ok; `node --check` on both
+  bundles; both node component tests (servers_page, onboarding_preflight)
+  pass. No push performed.

@@ -345,3 +345,32 @@ tbody tr:hover { background: var(--bg-card-hover); }
 }
 .product-switcher a.ps-item:hover { background: var(--bg-card-hover); }
 .product-switcher .ps-item.current { color: var(--text-muted); cursor: default; }
+
+/* ── D03 onboarding preflight panel (deploy-form host readiness) ── */
+.preflight-panel {
+  margin-top: 10px; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card);
+}
+.preflight-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.preflight-title { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+.preflight-error { color: var(--red); font-size: 12px; word-break: break-word; }
+.preflight-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.preflight-check {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  font-size: 12px; padding: 4px 6px; border-radius: 5px;
+  border-left: 2px solid var(--border);
+}
+.preflight-check .check-name { font-weight: 600; min-width: 110px; }
+.preflight-check .check-result { text-transform: uppercase; font-size: 10px; letter-spacing: .05em; }
+.preflight-check .check-detail { color: var(--text-muted); flex: 1 1 240px; word-break: break-word; }
+.preflight-check .check-remediation { flex-basis: 100%; color: var(--yellow); word-break: break-word; }
+.preflight-check.check-pass .check-result { color: var(--green); }
+.preflight-check.check-fail.sev-blocking { border-left-color: var(--red); }
+.preflight-check.check-fail.sev-blocking .check-result { color: var(--red); }
+.preflight-check.check-fail.sev-warning { border-left-color: var(--yellow); }
+.preflight-check.check-fail.sev-warning .check-result { color: var(--yellow); }
+.preflight-check.check-unknown { border-left-color: var(--yellow); }
+.preflight-check.check-unknown .check-result { color: var(--yellow); }

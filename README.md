@@ -332,6 +332,8 @@ so the direct role claim is available here and takes precedence over groups.
 | POST | `/api/templates/install` | Install a template app. |
 | GET / POST | `/api/groups` | List / create groups. |
 | Various | `/api/groups/{name}/...` | Assign apps and projects, rename, delete. |
+| GET / POST | `/api/onboarding/preflight` | Per-server onboarding readiness envelope (`?server=<name|candidate-host>`, POST body `{"server": ...}`): checks for teploy CLI presence + version + machine interface, SSH reachability, host read, Docker, disk headroom, and Caddy state — each with `result` (`pass`/`fail`/`unknown`), `severity` (`blocking`/`warning`), detail, and an actionable remediation hint. Unknown server names and failed discovery answer a visible error envelope, never a dropped body. |
+| GET | `/api/onboarding/entry` | Create-entry gate state (`?server=<name>`): `{gated, reason, preflight}` — `gated` when no server is selected or any blocking check fails. Additive: `/api/deploy` keeps its direct contract. |
 | GET / POST | `/api/monitors` | List with 24h stats / create. |
 | GET / DELETE | `/api/monitors/{id}` | Detail + history / delete. |
 | POST | `/api/monitors/{id}/test` | Run a check immediately. |

@@ -1477,6 +1477,10 @@ func (s *Server) routes() {
 	// D01: per-server observation envelopes (all servers, every response).
 	s.mux.HandleFunc("/api/fleet", s.handleFleet)
 	s.mux.HandleFunc("/api/deploy", s.handleDeploy)
+	// D03: onboarding preflight — host connection/capability readiness
+	// BEFORE app details; the create-entry surfaces the gate verdict.
+	s.mux.HandleFunc("/api/onboarding/preflight", s.handleOnboardingPreflight)
+	s.mux.HandleFunc("/api/onboarding/entry", s.handleOnboardingEntry)
 	s.mux.HandleFunc("/api/operations", s.handleOperations)
 	s.mux.HandleFunc("/api/operations/", s.handleOperation)
 	s.mux.HandleFunc("/api/manifests", s.handleManifests)

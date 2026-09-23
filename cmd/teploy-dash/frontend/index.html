@@ -247,7 +247,7 @@
                   <div class="form-row">
                     <div class="form-group">
                       <label class="form-label" :for="'grp-deploy-server-' + group.name">Server</label>
-                      <select class="form-input" :id="'grp-deploy-server-' + group.name" x-model="deployForm.server">
+                      <select class="form-input" :id="'grp-deploy-server-' + group.name" x-model="deployForm.server" @change="loadPreflight()">
                         <option value="">Select a server...</option>
                         <template x-for="s in serverList" :key="s">
                           <option :value="s" x-text="s"></option>
@@ -259,9 +259,28 @@
                       <input class="form-input" type="number" :id="'grp-deploy-port-' + group.name" placeholder="80" x-model.number="deployForm.port">
                     </div>
                     <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
-                      <button class="btn btn-primary" @click="doDeploy(group.name)" :disabled="deploying" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
+                      <button class="btn btn-primary" @click="doDeploy(group.name)" :disabled="deploying || !canDeploy" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
                       <button class="btn" @click="deployingToGroup = null">Cancel</button>
                     </div>
+                  </div>
+                  <!-- D03: host readiness shown BEFORE app details are usable;
+                       blocking checks gate Deploy, warnings render non-blocking. -->
+                  <div class="preflight-panel" x-show="deployForm.server">
+                    <div class="preflight-head">
+                      <span class="preflight-title">Host readiness</span>
+                      <button type="button" class="btn btn-sm" @click="loadPreflight()" :disabled="preflightLoading" x-text="preflightLoading ? 'Checking...' : 'Re-check'"></button>
+                    </div>
+                    <p class="preflight-error" x-show="preflightError" x-cloak x-text="'Readiness unknown: ' + preflightError"></p>
+                    <ul class="preflight-checks" x-show="preflight && !preflightLoading" x-cloak>
+                      <template x-for="c in preflightChecks" :key="c.name">
+                        <li :class="preflightCheckClass(c)">
+                          <span class="check-name" x-text="c.name"></span>
+                          <span class="check-result" x-text="c.result"></span>
+                          <span class="check-detail" x-text="c.detail"></span>
+                          <span class="check-remediation" x-show="c.result !== 'pass' && c.remediation" x-text="c.remediation"></span>
+                        </li>
+                      </template>
+                    </ul>
                   </div>
                 </div>
               </template>
@@ -352,27 +371,46 @@
                       <input class="form-input" id="proj-deploy-domain" placeholder="myapp.example.com" x-model="deployForm.domain">
                     </div>
                   </div>
-                  <div class="form-row">
-                    <div class="form-group">
-                      <label class="form-label" for="proj-deploy-server">Server</label>
-                      <select class="form-input" id="proj-deploy-server" x-model="deployForm.server">
-                        <option value="">Select a server...</option>
-                        <template x-for="s in serverList" :key="s">
-                          <option :value="s" x-text="s"></option>
-                        </template>
-                      </select>
-                    </div>
-                    <div class="form-group">
-                      <label class="form-label" for="proj-deploy-port">Container port</label>
-                      <input class="form-input" type="number" id="proj-deploy-port" placeholder="80" x-model.number="deployForm.port">
-                    </div>
-                <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
-                  <button class="btn btn-primary" @click="doDeploy()" :disabled="deploying" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
-                  <button class="btn" @click="deployingToProject = false">Cancel</button>
-                </div>
-              </div>
-            </div>
-          </template>
+                   <div class="form-row">
+                     <div class="form-group">
+                       <label class="form-label" for="proj-deploy-server">Server</label>
+                       <select class="form-input" id="proj-deploy-server" x-model="deployForm.server" @change="loadPreflight()">
+                         <option value="">Select a server...</option>
+                         <template x-for="s in serverList" :key="s">
+                           <option :value="s" x-text="s"></option>
+                         </template>
+                       </select>
+                     </div>
+                     <div class="form-group">
+                       <label class="form-label" for="proj-deploy-port">Container port</label>
+                       <input class="form-input" type="number" id="proj-deploy-port" placeholder="80" x-model.number="deployForm.port">
+                     </div>
+                 <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
+                   <button class="btn btn-primary" @click="doDeploy()" :disabled="deploying || !canDeploy" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
+                   <button class="btn" @click="deployingToProject = false">Cancel</button>
+                 </div>
+               </div>
+               <!-- D03: host readiness shown BEFORE app details are usable;
+                    blocking checks gate Deploy, warnings render non-blocking. -->
+               <div class="preflight-panel" x-show="deployForm.server">
+                 <div class="preflight-head">
+                   <span class="preflight-title">Host readiness</span>
+                   <button type="button" class="btn btn-sm" @click="loadPreflight()" :disabled="preflightLoading" x-text="preflightLoading ? 'Checking...' : 'Re-check'"></button>
+                 </div>
+                 <p class="preflight-error" x-show="preflightError" x-cloak x-text="'Readiness unknown: ' + preflightError"></p>
+                 <ul class="preflight-checks" x-show="preflight && !preflightLoading" x-cloak>
+                   <template x-for="c in preflightChecks" :key="c.name">
+                     <li :class="preflightCheckClass(c)">
+                       <span class="check-name" x-text="c.name"></span>
+                       <span class="check-result" x-text="c.result"></span>
+                       <span class="check-detail" x-text="c.detail"></span>
+                       <span class="check-remediation" x-show="c.result !== 'pass' && c.remediation" x-text="c.remediation"></span>
+                     </li>
+                   </template>
+                 </ul>
+               </div>
+             </div>
+           </template>
 
           <div class="card-grid">
             <template x-for="app in projectApps" :key="JSON.stringify([app.server, app.name])">
