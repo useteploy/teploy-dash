@@ -1866,3 +1866,117 @@ Deferred tails (CLI-side or later slices):
   full one-place resource page is the D05/D07 arc, not this slice.
 
 
+
+## D07 lane + D06/D08 tails — 2026-09-23
+
+Branch `d07-d06-d08-tails` (off 91d73a3). Four slices; the misleading-
+states audit result (before/after per view) is recorded below because it
+is the P0 acceptance evidence.
+
+**D06 tail closed — new OIDC principals minted on the legacy profile
+(real defect, fix + tests):** `upsertOIDCPrincipal` wrote principal rows
+with an empty `CapabilityProfile`, which resolves to the FROZEN pre-matrix
+set — so every FIRST SSO sign-in minted a principal wider than its role
+(a fresh viewer carried reveal.secrets + view.logs), the widening
+direction the migration promise forbids. New rows now record `preset`
+(mirroring `createUser`); existing rows keep their recorded profile.
+`internal/server/oidc_caps_test.go` closes the third leg of the D06
+matrix (local: caps_test.go; machine: internal/mcp/caps_test.go):
+preset minting; allow/deny through the real middleware chain for
+viewer/editor/admin SSO principals; legacy-principal persistence across
+restart; username-claim rename keeps profile + capabilities and the live
+session's matrix (rename neither widens nor narrows).
+
+**D08 tails closed:**
+
+- Runner half of the recreate race pinned
+  (`TestRunCheck_RecreateDuringCheck_NoPhantomRowOrStolenBaseline`):
+  delete + same-ID recreate while a check of the dead incarnation is in
+  flight — phantom row, stolen baseline, and spurious alert all refused;
+  ABA precondition (monotonic incarnation across recreate) re-asserted.
+  Store half and restart-preservation were already pinned; not
+  duplicated.
+- Notification delivery failure surfaced in the UI: the outbox's
+  per-monitor `delivery` object (status/attempts/exact last failure/
+  next retry) now renders — an "Alert delivery" section in monitor
+  detail and a list-level warning chip for failure-ish states only
+  (retrying-with-attempts, dead-lettered; plain delivered is history).
+  Backend was already exposing it; the UI was operationally silent.
+
+**D07 P0 closed — misleading states (audit result, per view):**
+
+| View | Before | After |
+|---|---|---|
+| Home (shortcuts) | failed load = "No shortcuts yet" + add button | error + Retry; refresh failure = stale banner (age + error) over kept data |
+| Projects list | already had loadError + retry (the pattern the rest adopted) | unchanged |
+| Project detail | per-fetch swallows → "No apps in this project yet" on dead API | partial failure named; full failure = error + Retry |
+| App detail | failed read = blank below back link + toast | error + Retry; refresh failure = stale banner over kept data |
+| Monitors | failed first load = "No monitors yet"; poll failures console.error only | error + Retry; poll failure = stale banner over kept list; generation guard on loads |
+| Restore tests | same as monitors ("No restore tests yet") | same fix |
+| Servers | dead /api/servers = "No servers configured" | error + Retry; fleet-unavailable stays additive (D01, no chrome) |
+| Server detail | blank + toast | error + Retry |
+| Templates | failed read = "No templates available" | error + Retry |
+| Operations | failed first load = "No operations yet"; poll failure toast only | error + Retry; poll failure = stale banner; empty only after success |
+| Operation detail | blank + toast | error + Retry |
+| App partial observation | AppState.errors dropped — partial read painted complete | labeled alert with observation time + failed scopes |
+
+Shared machinery: `withAsyncLoad` (four states: loading / error / empty /
+stale; empty renders only after success). Regression test:
+`frontend-test/async_states.test.mjs` drives the state machine per view
+plus a template tripwire.
+
+**D07 IA closed (incremental, no reskin):** nav grouped by task —
+resource work (Home, Projects [was Deployments], Fleet [was Servers],
+Activity [was Operations]) | service ops (Monitors, Restore Tests,
+Templates) | Settings — with two separator rules and task titles on the
+renamed links; page titles/back-links follow. Canonical URLs unchanged;
+task-named aliases (/projects, /fleet, /fleet/:name, /activity,
+/activity/:id) deep-link via ROUTES entries after the canonical ones, so
+navigate() keeps one address space. Tabbed surfaces (app + server pages)
+got tablist/tab/tabpanel + aria-selected + roving tabindex + arrow keys.
+Test: `frontend-test/ia_routes.test.mjs` (aliases resolve, navigate
+pushes canonical, popstate re-resolves, template tripwires).
+
+**D07 exemplar:** app resource page general tab now answers in one
+place — current + previous release, recent change (deployed_at, honest
+when unrecorded), observation age (freshness of the answer, not a health
+claim), partial-observation errors, deploy controls, recovery row
+(rollback + deploy history + live logs + restore tests + env/KV
+pointers). Existing panels unchanged; this is the pattern the other
+resources migrate to. Test: `frontend-test/resource_page.test.mjs`.
+
+**Gates:** `go build ./...`, `go vet ./...`, `go test ./... -count=1`
+(16/16 ok), `-race` on server/monitor/mcp/caps/outbox ok, `node
+--check` on both bundles, all 8 node component tests pass. NOTE
+(pre-existing, not this lane): `gofmt -l` flags
+`internal/server/observation_canonical.go` and
+`internal/operation/manager.go` at the merge base 91d73a3 — CI's gofmt
+step may fail on main independent of this branch; both files are X02-lane
+territory, left untouched deliberately.
+
+**Remaining D07 (later slices):** browser-harness tasks at real
+desktop/mobile widths (repo has no browser harness; node component tests
+are the ceiling today — real-browser receipts need a harness decision);
+inherited-vs-local settings and Git-managed-vs-Dash-managed authority
+indicators (needs the source/manifest authority model settled first);
+drafts preservation beyond URL context (query params survive reload;
+form drafts on navigation remain ephemeral); Settings tabs tablist
+semantics; the other resource pages migrating to the exemplar.
+
+**Remaining D06:** custom-capability editor UI (storage+API landed);
+per-principal queue budgets (D02 remainder); OIDC claim→capability
+mapping (design); operation records carrying the granted-at capability;
+mid-stream SSE reauthorization (R60, deferred).
+
+**Remaining D08 (unchanged from the D08 slice list):** restore-test
+alerts still bypass the outbox; per-channel delivery accounting + payload
+delivery ids; outbox journal onto the Store interface (Nucleus
+alignment); capacity guidance in README; durable next_due_at (pass-7
+A25 residual); A23/R35 single-transition redesign.
+
+## Resolution log (D07 lane)
+
+- 2026-09-23: branch d07-d06-d08-tails, commits d4cd4a4 (D06 fix+tests),
+  34097d7 (D08 recreate race test), fc7cc6c (misleading states), 1846575
+  (IA regroup), f83fab2 (exemplar + delivery UI). Gates as above. No
+  upstream defects found this lane; no cross-repo reports owed.
