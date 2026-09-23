@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/operation"
 )
@@ -65,20 +66,6 @@ const dummyBcryptHash = "$2a$10$N9qo8uLOickgx2ZMRZoMye1J7.6FkVqI3rR0pQ1bQ8XfQ9qK
 // tests can lower it — production always uses bcrypt.DefaultCost.
 var bcryptCost = bcrypt.DefaultCost
 
-// roleRank orders roles for "has at least this role" checks.
-func roleRank(role string) int {
-	switch role {
-	case RoleAdmin:
-		return 3
-	case RoleEditor:
-		return 2
-	case RoleViewer:
-		return 1
-	default:
-		return 0
-	}
-}
-
 // normalizeRole returns a known role, defaulting anything unrecognized to
 // viewer (fail-safe: an unknown role gets the least privilege, never more).
 func normalizeRole(r string) string {
@@ -88,44 +75,6 @@ func normalizeRole(r string) string {
 	default:
 		return RoleViewer
 	}
-}
-
-// roleAllows reports whether a user holding `have` may act where `need` is
-// required.
-func roleAllows(have, need string) bool {
-	return roleRank(have) >= roleRank(need)
-}
-
-// adminOnlyPrefixes are routes that manage accounts, credentials, or fleet
-// config — restricted to admins for both reads and writes because their
-// payloads carry secrets (registry passwords, SMTP/webhook targets, tokens).
-var adminOnlyPrefixes = []string{
-	"/api/users",
-	"/api/sso",
-	"/api/mcp-tokens",
-	"/api/config/servers",
-	"/api/registries",
-	"/api/notifications",
-}
-
-// requiredRole returns the minimum role for a route. Reads default to viewer,
-// mutations to editor, and the admin-only prefixes to admin. It fails closed:
-// any unclassified mutating route requires editor, never viewer, so a new
-// endpoint can't accidentally be viewer-writable.
-func requiredRole(method, path string) string {
-	for _, p := range adminOnlyPrefixes {
-		if path == p || strings.HasPrefix(path, p+"/") {
-			return RoleAdmin
-		}
-	}
-	// Changing your own password is self-service — any authenticated user.
-	if path == "/api/auth/password" {
-		return RoleViewer
-	}
-	if isMutating(method) {
-		return RoleEditor
-	}
-	return RoleViewer
 }
 
 // ── Request-scoped identity ──────────────────────────────────────────────
@@ -170,11 +119,21 @@ func actorFromRequest(r *http.Request) *operation.Actor {
 // change, or role change, and embedded in sessions at issuance. A session
 // whose epoch no longer matches the account was issued against revoked
 // state and fails validation on its next request (A03).
+//
+// X03 capability profile: CapabilityProfile selects how Capabilities is
+// interpreted — "preset" (post-X03 accounts; the role's preset applies,
+// read live), "custom" (the explicit Capabilities list, possibly empty),
+// or "" (a pre-X03 account: the LEGACY profile, today's effective
+// permissions for the role — never silently narrowed, never silently
+// widened). Capabilities are re-read from the row on every request, so a
+// profile change takes effect on live sessions immediately.
 type dashUser struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"password_hash"`
-	Role         string `json:"role"`
-	AuthEpoch    uint64 `json:"auth_epoch,omitempty"`
+	Username          string   `json:"username"`
+	PasswordHash      string   `json:"password_hash"`
+	Role              string   `json:"role"`
+	AuthEpoch         uint64   `json:"auth_epoch,omitempty"`
+	CapabilityProfile string   `json:"capability_profile,omitempty"`
+	Capabilities      []string `json:"capabilities,omitempty"`
 }
 
 // dashPrincipal is one external (SSO) identity, persisted in users.json
@@ -186,13 +145,16 @@ type dashUser struct {
 // issuance and every request revalidates it unconditionally, so a revoked or
 // deleted principal's sessions die on their next use. A missing row (e.g. a
 // session from an install upgraded from pre-principal dash) is equally dead.
+// The X03 capability profile fields mirror dashUser's.
 type dashPrincipal struct {
-	Subject    string `json:"subject"`
-	Username   string `json:"username"`
-	Email      string `json:"email,omitempty"`
-	Role       string `json:"role"`
-	AuthEpoch  uint64 `json:"auth_epoch"`
-	LastSignIn string `json:"last_sign_in,omitempty"`
+	Subject           string   `json:"subject"`
+	Username          string   `json:"username"`
+	Email             string   `json:"email,omitempty"`
+	Role              string   `json:"role"`
+	AuthEpoch         uint64   `json:"auth_epoch"`
+	LastSignIn        string   `json:"last_sign_in,omitempty"`
+	CapabilityProfile string   `json:"capability_profile,omitempty"`
+	Capabilities      []string `json:"capabilities,omitempty"`
 }
 
 // usersFileFormat is the on-disk shape of users.json. EpochCounter is the
@@ -245,6 +207,7 @@ func (g *authGate) loadUsers() error {
 				return fmt.Errorf("parsing %s: duplicate username %q", g.usersFile, u.Username)
 			}
 			u.Role = normalizeRole(u.Role)
+			u.Capabilities = caps.Normalize(u.Capabilities)
 			g.users[u.Username] = &u
 		}
 		g.oidcPrincipals = make(map[string]*dashPrincipal, len(f.OIDCPrincipals))
@@ -257,6 +220,7 @@ func (g *authGate) loadUsers() error {
 				return fmt.Errorf("parsing %s: duplicate oidc principal %q", g.usersFile, p.Subject)
 			}
 			p.Role = normalizeRole(p.Role)
+			p.Capabilities = caps.Normalize(p.Capabilities)
 			g.oidcPrincipals[p.Subject] = &p
 		}
 		g.epochCounter = f.EpochCounter
@@ -460,13 +424,28 @@ func (g *authGate) revokeSessions(username string) error {
 }
 
 // principalView is the API projection of an SSO identity — never a secret
-// (principals hold no credentials).
+// (principals hold no credentials). Carries the capability surface like
+// userView (X03).
 type principalView struct {
-	Subject    string `json:"subject"`
-	Username   string `json:"username"`
-	Email      string `json:"email,omitempty"`
-	Role       string `json:"role"`
-	LastSignIn string `json:"last_sign_in,omitempty"`
+	Subject           string   `json:"subject"`
+	Username          string   `json:"username"`
+	Email             string   `json:"email,omitempty"`
+	Role              string   `json:"role"`
+	LastSignIn        string   `json:"last_sign_in,omitempty"`
+	CapabilityProfile string   `json:"capability_profile"`
+	Capabilities      []string `json:"capabilities"`
+}
+
+func principalViewFor(p *dashPrincipal) principalView {
+	profile := p.CapabilityProfile
+	if profile == "" {
+		profile = profileLegacy
+	}
+	return principalView{
+		Subject: p.Subject, Username: p.Username, Email: p.Email, Role: p.Role,
+		LastSignIn: p.LastSignIn, CapabilityProfile: profile,
+		Capabilities: capabilitiesForProfile(p.CapabilityProfile, p.Capabilities, p.Role).Sorted(),
+	}
 }
 
 func (g *authGate) listSSOPrincipals() []principalView {
@@ -474,7 +453,7 @@ func (g *authGate) listSSOPrincipals() []principalView {
 	defer g.credMu.RUnlock()
 	out := make([]principalView, 0, len(g.oidcPrincipals))
 	for _, p := range g.oidcPrincipals {
-		out = append(out, principalView{Subject: p.Subject, Username: p.Username, Email: p.Email, Role: p.Role, LastSignIn: p.LastSignIn})
+		out = append(out, principalViewFor(p))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Subject < out[j].Subject })
 	return out
@@ -542,7 +521,9 @@ func (g *authGate) createUser(username, password, role string) error {
 	}
 	candidate := cloneUsersLocked(g.users)
 	epoch := g.epochCounter + 1
-	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: normalizeRole(role), AuthEpoch: epoch}
+	// X03: new accounts default to the role's PRESET capability profile.
+	// Only pre-existing accounts carry the legacy profile.
+	candidate[username] = &dashUser{Username: username, PasswordHash: string(hash), Role: normalizeRole(role), AuthEpoch: epoch, CapabilityProfile: profilePreset}
 	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, epoch); err != nil {
 		return err
 	}
@@ -653,7 +634,12 @@ func (g *authGate) setPasswordMigratingEnv(username, password string) error {
 }
 
 // setRole changes a user's role, refusing to demote the last remaining admin
-// (which would leave the dashboard unmanageable).
+// (which would leave the dashboard unmanageable). A preset account's
+// capabilities follow the new role; custom and legacy profiles keep their
+// recorded sets (legacy re-derives from the new role — the role change
+// itself is the explicit admin act, and legacy-for-editor/admin are
+// supersets of legacy-for-viewer, so this can only widen to what the role
+// always meant).
 func (g *authGate) setRole(username, role string) error {
 	role = normalizeRole(role)
 	g.credMu.Lock()
@@ -711,10 +697,75 @@ func (g *authGate) countAdminsLocked() int {
 	return n
 }
 
-// userView is the API projection of an account — never the hash.
+// narrowToPreset is the X03 settings click: move one account onto its role's
+// capability preset. The click IS the explicit act — before it, a pre-X03
+// account keeps the legacy profile (never silently narrowed); after it, the
+// preset applies. No epoch bump: capabilities are read from the principal
+// row on every request, so live sessions are narrowed on their next request
+// (consistent with how roles are already re-read live).
+func (g *authGate) narrowToPreset(username string) error {
+	g.credMu.Lock()
+	defer g.credMu.Unlock()
+	u := g.users[username]
+	if u == nil {
+		return fmt.Errorf("user not found")
+	}
+	candidate := cloneUsersLocked(g.users)
+	candidate[username].CapabilityProfile = profilePreset
+	candidate[username].Capabilities = nil
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, g.epochCounter); err != nil {
+		return err
+	}
+	g.users = candidate
+	return nil
+}
+
+// setCapabilities stores an explicit per-account capability set (custom
+// role storage, additive). An empty set is valid — a deliberately locked
+// account — because the "custom" profile marker persists and an empty set
+// can never round-trip back to the legacy default.
+func (g *authGate) setCapabilities(username string, list []string) error {
+	if err := caps.Validate(list); err != nil {
+		return err
+	}
+	g.credMu.Lock()
+	defer g.credMu.Unlock()
+	u := g.users[username]
+	if u == nil {
+		return fmt.Errorf("user not found")
+	}
+	candidate := cloneUsersLocked(g.users)
+	candidate[username].CapabilityProfile = profileCustom
+	candidate[username].Capabilities = caps.Normalize(list)
+	if err := saveUsersFile(g.usersFile, candidate, g.oidcPrincipals, g.epochCounter); err != nil {
+		return err
+	}
+	g.users = candidate
+	return nil
+}
+
+// userView is the API projection of an account — never the hash. The
+// capability surface (X03) is first-class: which profile the account is on
+// and the effective capability set that results, so the settings surface
+// can list accounts, flag legacy ones, and offer the narrowing click.
 type userView struct {
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	Username          string   `json:"username"`
+	Role              string   `json:"role"`
+	CapabilityProfile string   `json:"capability_profile"`
+	Capabilities      []string `json:"capabilities"`
+}
+
+func userViewFor(u *dashUser) userView {
+	profile := u.CapabilityProfile
+	if profile == "" {
+		profile = profileLegacy
+	}
+	return userView{
+		Username:          u.Username,
+		Role:              u.Role,
+		CapabilityProfile: profile,
+		Capabilities:      capabilitiesForProfile(u.CapabilityProfile, u.Capabilities, u.Role).Sorted(),
+	}
 }
 
 func (g *authGate) listUsers() []userView {
@@ -722,7 +773,7 @@ func (g *authGate) listUsers() []userView {
 	defer g.credMu.RUnlock()
 	out := make([]userView, 0, len(g.users))
 	for _, u := range g.users {
-		out = append(out, userView{Username: u.Username, Role: u.Role})
+		out = append(out, userViewFor(u))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
 	return out
@@ -741,7 +792,7 @@ func (g *authGate) listUsers() []userView {
 func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if s.gate == nil {
-		writeData(w, map[string]any{"mode": "disabled", "user": nil})
+		writeData(w, map[string]any{"mode": "disabled", "user": nil, "capabilities": caps.All()})
 		return
 	}
 	session, ok := currentUser(r)
@@ -755,7 +806,11 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	writeData(w, map[string]any{
 		"mode": mode,
-		"user": userView{Username: session.user, Role: session.role},
+		"user": userView{
+			Username: session.user, Role: session.role,
+			Capabilities: session.caps.Sorted(),
+		},
+		"capabilities": session.caps.Sorted(),
 	})
 }
 
@@ -813,10 +868,12 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 //
 //	DELETE /api/users/{username}              remove the account
 //	PUT    /api/users/{username}              change role  {"role": "editor"}
+//	PUT    /api/users/{username}              set custom capabilities {"capabilities": [...]}
 //	POST   /api/users/{username}/password     admin reset  {"password": "..."}
 //	POST   /api/users/{username}/revoke-sessions  retire all live sessions
+//	POST   /api/users/{username}/narrow-to-preset  X03 legacy-profile narrowing
 //
-// Admin-only (enforced by the gate).
+// Admin-only (enforced by the gate: administer.users).
 func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if s.gate == nil {
@@ -853,6 +910,9 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut && sub == "":
 		var body struct {
 			Role string `json:"role"`
+			// Capabilities is a pointer so an explicit empty array (a
+			// deliberately locked account) is distinguishable from absence.
+			Capabilities *[]string `json:"capabilities"`
 		}
 		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
@@ -864,6 +924,22 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "role must be admin, editor, or viewer")
 			return
 		}
+		if body.Role != "" && body.Capabilities != nil {
+			writeError(w, "role and capabilities are separate changes — send one per request")
+			return
+		}
+		if body.Capabilities != nil {
+			if err := s.gate.setCapabilities(username, *body.Capabilities); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					writeErrorStatus(w, err.Error(), http.StatusNotFound)
+				} else {
+					writeErrorStatus(w, err.Error(), http.StatusBadRequest)
+				}
+				return
+			}
+			writeData(w, map[string]bool{"ok": true})
+			return
+		}
 		if err := s.gate.setRole(username, body.Role); err != nil {
 			writeError(w, err.Error())
 			return
@@ -871,6 +947,21 @@ func (s *Server) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		// Force the user to re-authenticate so their new role takes effect in a
 		// fresh session rather than lingering at the old privilege.
 		s.gate.deleteUserSessions(username)
+		writeData(w, map[string]bool{"ok": true})
+
+	case r.Method == http.MethodPost && sub == "narrow-to-preset":
+		// X03: the explicit narrowing click. Takes effect on the account's
+		// live sessions immediately (capabilities are re-read per request);
+		// no session invalidation is needed or wanted — the operator can
+		// see the change land.
+		if err := s.gate.narrowToPreset(username); err != nil {
+			if strings.Contains(err.Error(), "user not found") {
+				writeErrorStatus(w, err.Error(), http.StatusNotFound)
+			} else {
+				writeError(w, err.Error())
+			}
+			return
+		}
 		writeData(w, map[string]bool{"ok": true})
 
 	case r.Method == http.MethodPost && sub == "password":

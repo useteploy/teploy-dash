@@ -264,6 +264,16 @@ function authRole(me) {
   return (me.user && me.user.role) || me.role || null;
 }
 
+// authCaps reads the effective capability set out of /api/auth/me (X03).
+// Null (network failure / unknown) means "don't guess" — the server is the
+// enforcement point; this only chooses which panel shape to request first.
+function authCaps(me) {
+  if (!me) return null;
+  if (me.mode === 'disabled') return ['*'];
+  const caps = me.capabilities || (me.user && me.user.capabilities) || [];
+  return Array.isArray(caps) ? caps : [];
+}
+
 // ── Alpine.js App ──
 document.addEventListener('alpine:init', () => {
   // ── Router Store ──
@@ -789,6 +799,15 @@ document.addEventListener('alpine:init', () => {
     // showing a viewer buttons that would 403.
     role: null,
     roleLoaded: false,
+    // caps carries the session's effective capabilities (X03). null until
+    // loaded or when they cannot be determined — the server enforces either
+    // way; this only picks the metadata-first panel shape.
+    caps: null,
+
+    canRevealSecrets() {
+      if (this.caps === null) return true; // unknown: let the server answer
+      return this.caps.includes('*') || this.caps.includes('reveal.secrets');
+    },
 
     async init() {
       this.activateResource(Alpine.store('router').params);
@@ -936,12 +955,25 @@ document.addEventListener('alpine:init', () => {
     // time and drops late responses — a delayed answer for app A used to
     // populate app B's panels after same-type navigation (only loadStatus
     // was guarded), and old rows fed wrong-resource action paths.
+    // X03: the env panel has two shapes. With reveal.secrets the full
+    // variable map loads and each value stays behind its click-to-show.
+    // Without it the panel loads the METADATA variant (names only) — the
+    // server would 403 the value read, and the table says so instead of
+    // pretending empty values.
     async loadEnv() {
       const target = this.resource;
+      if (!this.roleLoaded) await this.loadRole();
       try {
-        const value = await api.get(`${this.appPath()}/env`);
-        if (this.resource !== target) return;
-        this.envVars = value || [];
+        if (this.canRevealSecrets()) {
+          const value = await api.get(`${this.appPath()}/env`);
+          if (this.resource !== target) return;
+          this.envVars = value || [];
+        } else {
+          const res = await api.get(`${this.appPath()}/env/keys`);
+          if (this.resource !== target) return;
+          const keys = (res && res.keys) || [];
+          this.envVars = keys.map(key => ({ key, restricted: true }));
+        }
       } catch (e) {
         if (this.resource === target) showToast(e.message, 'error');
       }
@@ -980,7 +1012,9 @@ document.addEventListener('alpine:init', () => {
     async loadRole() {
       // The endpoint answers explicitly for disabled auth; null (network
       // failure) still means "don't hide anything" — the server enforces.
-      this.role = await api.get('/api/auth/me').then(authRole).catch(() => null);
+      const me = await api.get('/api/auth/me').catch(() => null);
+      this.role = authRole(me);
+      this.caps = me ? authCaps(me) : null;
       this.roleLoaded = true;
     },
 
@@ -1658,6 +1692,20 @@ document.addEventListener('alpine:init', () => {
       try {
         await api.post(`/api/users/${encodeURIComponent(username)}/revoke-sessions`);
         showToast(`Sessions for ${username} revoked`, 'success');
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    // X03: the explicit narrowing click — replaces a legacy account's
+    // pre-matrix permissions with its role's preset. The confirm is the
+    // explicit act; the server applies it to live sessions immediately.
+    async narrowToPreset(username) {
+      if (!confirm(`Narrow ${username} to its role's preset?\n\nPre-matrix permissions (including any env/KV value reads the old role allowed) are replaced by the preset for its current role. Active sessions pick up the change on their next request.`)) return;
+      try {
+        await api.post(`/api/users/${encodeURIComponent(username)}/narrow-to-preset`);
+        showToast(`${username} narrowed to preset`, 'success');
+        this.users = await api.get('/api/users').catch(() => this.users);
       } catch (e) {
         showToast(e.message, 'error');
       }

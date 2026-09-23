@@ -707,7 +707,7 @@
                         <tr>
                           <td style="font-family: var(--mono); font-size: 12px;" x-text="v.key"></td>
                           <td>
-                            <span x-data="{ show: false }" style="font-family: var(--mono); font-size: 12px; cursor: pointer;" @click="show = !show" x-text="show ? v.value : '--------'"></span>
+                            <span x-data="{ show: false }" style="font-family: var(--mono); font-size: 12px;" :style="v.restricted ? '' : 'cursor: pointer;'" @click="v.restricted || (show = !show)" x-text="v.restricted ? '(restricted)' : (show ? v.value : '--------')" title="v.restricted ? 'Values require the reveal.secrets capability' : ''"></span>
                           </td>
                           <td>
                             <button class="btn btn-sm btn-danger" @click="deleteEnvVar(v.key)">Remove</button>
@@ -857,7 +857,9 @@
                             </template>
                             <template x-if="!kvReadonly.has(k)">
                               <span>
-                                <button class="btn btn-sm" @click="revealKv(k)" x-text="hasKvValue(k) ? 'Refresh' : 'Reveal'"></button>
+                                <!-- X03: value reads need reveal.secrets; without it
+                                     the button would only ever answer 403. -->
+                                <button class="btn btn-sm" x-show="canRevealSecrets()" @click="revealKv(k)" x-text="hasKvValue(k) ? 'Refresh' : 'Reveal'"></button>
                                 <button class="btn btn-sm btn-danger" x-show="canEdit()" @click="delKv(k)">Remove</button>
                               </span>
                             </template>
@@ -1972,9 +1974,14 @@
           <div class="card" style="padding: 24px; margin-bottom: 16px;">
             <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Team access</h3>
             <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
-              Dashboard accounts and their roles. <strong>Admin</strong> manages users, servers, and settings;
-              <strong>Editor</strong> can deploy and run app actions; <strong>Viewer</strong> is read-only.
-              Access governs this dashboard only — anyone with SSH to a server can still act on it directly.
+              Dashboard accounts, their roles, and their capability profiles.
+              <strong>Admin</strong> manages users, servers, and settings; <strong>Editor</strong>
+              (operator preset) can deploy, mutate config, and read logs; <strong>Viewer</strong>
+              sees metadata only — env and KV <em>values</em> need the reveal.secrets capability,
+              which new accounts do not carry. Accounts that predate the capability matrix keep
+              their exact previous permissions under a <strong>legacy</strong> profile until you
+              narrow them — the button is the explicit act. Access governs this dashboard only —
+              anyone with SSH to a server can still act on it directly.
             </p>
             <div class="form-row" style="margin-bottom: 16px; align-items: flex-end;">
               <div class="form-group">
@@ -2000,7 +2007,7 @@
               <div class="table-wrap">
                 <table>
                   <thead>
-                    <tr><th>Username</th><th>Role</th><th style="width: 220px;"></th></tr>
+                    <tr><th>Username</th><th>Role</th><th>Capabilities</th><th style="width: 260px;"></th></tr>
                   </thead>
                   <tbody>
                     <template x-for="u in users" :key="u.username">
@@ -2015,7 +2022,23 @@
                             <option value="admin" :selected="u.role === 'admin'">Admin</option>
                           </select>
                         </td>
+                        <!-- X03: the capability profile is visible per account.
+                             legacy = the account still holds its pre-matrix
+                             permissions (flagged for the operator to narrow);
+                             preset = the role's current preset; custom = an
+                             explicit set. The capability list is the
+                             effective set, title shows it in full. -->
+                        <td>
+                          <span class="muted" style="font-size: 12px; margin-right: 6px;"
+                                x-text="u.capability_profile === 'legacy' ? 'legacy (pre-matrix permissions)' : u.capability_profile"></span>
+                          <span style="font-family: var(--mono); font-size: 11px; color: var(--text-muted);"
+                                x-text="(u.capabilities || []).length + ' caps'"
+                                :title="(u.capabilities || []).join(', ')"></span>
+                        </td>
                         <td style="display: flex; gap: 6px; justify-content: flex-end;">
+                          <button class="btn btn-sm" x-show="u.capability_profile === 'legacy'"
+                                  title="Replace this account's pre-matrix permissions with its role's preset. Takes effect immediately on live sessions."
+                                  @click="narrowToPreset(u.username)">Narrow to preset</button>
                           <button class="btn btn-sm" @click="resetUserPassword(u.username)">Reset password</button>
                           <button class="btn btn-sm" @click="revokeUserSessions(u.username)">Revoke sessions</button>
                           <button class="btn btn-sm btn-danger" @click="deleteUser(u.username)"

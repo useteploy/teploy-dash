@@ -205,10 +205,12 @@ type kvWriteResponse struct {
 // is not deploy state and never appears in the fleet view, so dropping the
 // cache would force a full multi-server SSH sweep after every kv write.
 //
-// RBAC falls out of requiredRole (internal/server/users.go:87): the GETs are
-// viewer, POST and DELETE are editor, with no per-route code needed. The rows
-// in TestRequiredRole pin that so a future adminOnlyPrefixes edit can't move
-// it silently.
+// X03 capability matrix (internal/server/caps.go): the key LIST is
+// view.metadata, the value READ (kv/value, in server.go's app-action
+// routing) is reveal.secrets, and the writes are execute.mutate — the
+// metadata/value split is the load-bearing separation. The rows in
+// TestRequiredCapabilitiesRouteMatrix pin that so a route-table edit can't
+// move it silently.
 
 // handleKVList lists keys matching a glob. GET, viewer.
 func (s *Server) handleKVList(w http.ResponseWriter, r *http.Request, serverName, appName string) {

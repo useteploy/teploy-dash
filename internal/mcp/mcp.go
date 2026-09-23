@@ -205,17 +205,23 @@ func (h *Handler) dispatch(r *http.Request, req rpcRequest, tok Token) rpcRespon
 			"serverInfo":      map[string]string{"name": "teploy-dash", "version": h.version},
 			"instructions": "Teploy deployment dashboard. Reads come from the server state files the " +
 				"teploy CLI writes; actions run through the same CLI the dashboard uses, so there is " +
-				"no second source of truth to drift. Destructive tools are marked; read-only tokens " +
-				"only see read tools.",
+				"no second source of truth to drift. Tokens carry an explicit capability set " +
+				"(default: the operator preset minus secrets — metadata reads, deploy and mutate " +
+				"actions, and logs; no secret values ever cross MCP); a tool is visible only when " +
+				"the token holds its capability. Destructive tools are marked.",
 		}
 
 	case "ping":
 		resp.Result = map[string]interface{}{}
 
 	case "tools/list":
+		// X03: a token sees the tools its capability set grants. Legacy
+		// tokens (no capabilities recorded) derive the set from read_only —
+		// the exact pre-X03 behavior.
+		tokenCaps := tok.CapabilitySet()
 		visible := make([]map[string]interface{}, 0, len(h.tools))
 		for _, t := range h.tools {
-			if tok.ReadOnly && !t.ReadOnly {
+			if !tokenCaps.Allow(t.RequiredCap) {
 				continue
 			}
 			visible = append(visible, map[string]interface{}{
@@ -269,10 +275,11 @@ func (h *Handler) callTool(r *http.Request, name string, args map[string]interfa
 		if t.Name != name {
 			continue
 		}
-		// Enforcement mirrors listing: a read-only token cannot call a
-		// mutating tool even if it guesses the name.
-		if tok.ReadOnly && !t.ReadOnly {
-			return toolError(fmt.Sprintf("token %q is read-only; %s is not permitted", tok.Name, name))
+		// Enforcement mirrors listing (X03): the token's capability set
+		// gates every tool, and the refusal names the missing capability
+		// so an operator knows exactly what to grant.
+		if !tok.CapabilitySet().Allow(t.RequiredCap) {
+			return toolError(fmt.Sprintf("token %q lacks the %s capability; %s is not permitted", tok.Name, t.RequiredCap, name))
 		}
 		log.Printf("[mcp] token=%q tool=%s", tok.Name, name)
 		out, err := t.Run(WithToken(r.Context(), tok), args)

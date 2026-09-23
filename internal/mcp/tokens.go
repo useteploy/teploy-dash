@@ -24,18 +24,39 @@ import (
 	"sync"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/durable"
 )
 
 // Token is one MCP access token. Only the SHA-256 of the secret is stored;
 // the plaintext is shown once at creation.
+//
+// X03: Capabilities is the token's explicit capability set. nil marks a
+// pre-X03 token, whose permissions derive from ReadOnly exactly as before
+// (a non-read-only token could use the whole MCP surface, a read-only token
+// only the read tools) — never silently narrowed, never silently widened.
+// Tokens minted after X03 always record their set.
 type Token struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Hash      string    `json:"hash"` // hex sha256 of the plaintext
-	ReadOnly  bool      `json:"read_only"`
-	CreatedAt time.Time `json:"created_at"`
-	LastUsed  time.Time `json:"last_used,omitempty"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Hash         string    `json:"hash"` // hex sha256 of the plaintext
+	ReadOnly     bool      `json:"read_only"`
+	Capabilities []string  `json:"capabilities,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastUsed     time.Time `json:"last_used,omitempty"`
+}
+
+// CapabilitySet resolves the token's effective capabilities. The legacy
+// (nil Capabilities) full surface equals the operator preset minus secrets —
+// which is exactly what the MCP tool surface ever offered.
+func (t Token) CapabilitySet() caps.Set {
+	if t.Capabilities == nil {
+		if t.ReadOnly {
+			return caps.ViewerDefault()
+		}
+		return caps.OperatorDefault()
+	}
+	return caps.NewSet(t.Capabilities...)
 }
 
 // TokenStore persists MCP tokens as a small JSON file in the dash data dir
@@ -67,10 +88,31 @@ func NewTokenStore(dataDir string) (*TokenStore, error) {
 
 const tokenPrefix = "tpd_"
 
-// Create mints a new token and returns its plaintext (shown once) and record.
+// Create mints a new token and returns its plaintext (shown once) and
+// record. X03 default capability sets are recorded explicitly at mint:
+// the operator preset minus secrets for full tokens (metadata reads, deploy
+// and mutate actions, logs — NO value revelation; no MCP tool returns
+// secret values), metadata-only for read-only tokens.
 func (s *TokenStore) Create(name string, readOnly bool) (string, Token, error) {
+	defaults := caps.OperatorDefault()
+	if readOnly {
+		defaults = caps.ViewerDefault()
+	}
+	return s.CreateWithCapabilities(name, defaults.Sorted())
+}
+
+// CreateWithCapabilities mints a token with an EXPLICIT capability set.
+// An empty set is rejected: it would round-trip through the omitted JSON
+// field back to the legacy full default — a silent widening.
+func (s *TokenStore) CreateWithCapabilities(name string, capabilities []string) (string, Token, error) {
 	if name == "" {
 		return "", Token{}, fmt.Errorf("token name is required")
+	}
+	if len(capabilities) == 0 {
+		return "", Token{}, fmt.Errorf("a token needs at least one capability")
+	}
+	if err := caps.Validate(capabilities); err != nil {
+		return "", Token{}, err
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -82,12 +124,14 @@ func (s *TokenStore) Create(name string, readOnly bool) (string, Token, error) {
 	if _, err := rand.Read(id); err != nil {
 		return "", Token{}, err
 	}
+	granted := caps.NewSet(capabilities...)
 	t := Token{
-		ID:        hex.EncodeToString(id),
-		Name:      name,
-		Hash:      hashToken(plaintext),
-		ReadOnly:  readOnly,
-		CreatedAt: time.Now().UTC(),
+		ID:           hex.EncodeToString(id),
+		Name:         name,
+		Hash:         hashToken(plaintext),
+		ReadOnly:     !granted.Allow(caps.ExecuteDeploy) && !granted.Allow(caps.ExecuteMutate),
+		Capabilities: caps.Normalize(capabilities),
+		CreatedAt:    time.Now().UTC(),
 	}
 
 	s.mu.Lock()

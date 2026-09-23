@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/useteploy/teploy-dash/internal/caps"
 )
 
 // Hash at the cheapest cost in tests: keeps the auth suite fast and avoids
@@ -35,35 +37,32 @@ func sessionReq(g *authGate, method, target, user, role string) *http.Request {
 	return req
 }
 
-func TestRequiredRole(t *testing.T) {
+// TestRequiredCapabilitiesFailClosed pins the X03 route-table defaults that
+// superseded the old role table: unclassified reads are metadata-visible,
+// unclassified mutations require execute.mutate, and the admin surfaces
+// require administer.*. The full matrix lives in caps_test.go.
+func TestRequiredCapabilitiesFailClosed(t *testing.T) {
 	cases := []struct {
-		method, path, want string
+		method, path string
+		want         []string
 	}{
-		{"GET", "/api/apps", RoleViewer},
-		{"GET", "/api/servers", RoleViewer},
-		{"POST", "/api/deploy", RoleEditor},
-		{"POST", "/api/apps/prod/web/rollback", RoleEditor},
-		{"DELETE", "/api/apps/prod/web/env/FOO", RoleEditor},
-		// kv: reads are viewer, writes are editor. No kv-specific code produces
-		// this — requiredRole already fails closed on any unclassified mutating
-		// route. These rows pin the contract so an adminOnlyPrefixes edit or a
-		// new special case can't move it silently.
-		{"GET", "/api/apps/prod/web/kv", RoleViewer},
-		{"GET", "/api/apps/prod/web/kv/value", RoleViewer},
-		{"POST", "/api/apps/prod/web/kv", RoleEditor},
-		{"DELETE", "/api/apps/prod/web/kv", RoleEditor},
-		{"GET", "/api/users", RoleAdmin},
-		{"POST", "/api/users", RoleAdmin},
-		{"DELETE", "/api/users/jane", RoleAdmin},
-		{"GET", "/api/mcp-tokens", RoleAdmin},
-		{"GET", "/api/config/servers", RoleAdmin},
-		{"POST", "/api/registries", RoleAdmin},
-		{"GET", "/api/notifications", RoleAdmin},
-		{"POST", "/api/auth/password", RoleViewer}, // self-service
+		{"GET", "/api/apps", []string{caps.ViewMetadata}},
+		{"POST", "/api/apps/prod/web/rollback", []string{caps.ExecuteDeploy}},
+		{"DELETE", "/api/apps/prod/web/env/FOO", []string{caps.ExecuteMutate}},
+		{"GET", "/api/apps/prod/web/kv", []string{caps.ViewMetadata}},
+		{"GET", "/api/apps/prod/web/kv/value", []string{caps.RevealSecrets}},
+		{"POST", "/api/apps/prod/web/kv", []string{caps.ExecuteMutate}},
+		{"DELETE", "/api/apps/prod/web/kv", []string{caps.ExecuteMutate}},
+		{"GET", "/api/users", []string{caps.AdministerUsers}},
+		{"GET", "/api/mcp-tokens", []string{caps.AdministerCredentials}},
+		{"GET", "/api/config/servers", []string{caps.AdministerCredentials}},
+		{"POST", "/api/registries", []string{caps.AdministerCredentials}},
+		{"GET", "/api/notifications", []string{caps.AdministerCredentials}},
+		{"POST", "/api/auth/password", nil}, // self-service
 	}
 	for _, c := range cases {
-		if got := requiredRole(c.method, c.path); got != c.want {
-			t.Errorf("requiredRole(%s %s) = %q, want %q", c.method, c.path, got, c.want)
+		if got := requiredCapabilities(c.method, c.path); fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("requiredCapabilities(%s %s) = %v, want %v", c.method, c.path, got, c.want)
 		}
 	}
 }

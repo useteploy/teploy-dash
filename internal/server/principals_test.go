@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/useteploy/teploy-dash/internal/caps"
 )
 
 // newSSOTestGate returns a gate with SSO configured: like Server.New, a
@@ -430,8 +432,8 @@ func TestRequiredRoleSSOAdminOnly(t *testing.T) {
 		{"GET", "/api/sso"},
 		{"POST", "/api/sso/revoke"},
 	} {
-		if got := requiredRole(row.method, row.path); got != RoleAdmin {
-			t.Errorf("requiredRole(%s %s) = %q, want admin", row.method, row.path, got)
+		if got := requiredCapabilities(row.method, row.path); len(got) != 1 || got[0] != caps.AdministerUsers {
+			t.Errorf("requiredCapabilities(%s %s) = %v, want [administer.users]", row.method, row.path, got)
 		}
 	}
 }

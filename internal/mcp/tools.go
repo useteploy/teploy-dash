@@ -4,16 +4,21 @@ import (
 	"context"
 	"fmt"
 	"math"
+
+	"github.com/useteploy/teploy-dash/internal/caps"
 )
 
-// Tool is one MCP tool. InputSchema is a JSON-Schema object; Run receives the
-// already-decoded arguments and returns human/agent-readable text.
+// Tool is one MCP tool. InputSchema is a JSON-Schema object; Run receives
+// the already-decoded arguments and returns human/agent-readable text.
+// RequiredCap (X03) is the capability a token must hold to see and call the
+// tool; the handler enforces it at listing and at call time.
 type Tool struct {
 	Name        string
 	Description string
 	InputSchema map[string]interface{}
 	ReadOnly    bool
 	Destructive bool
+	RequiredCap string
 	Run         func(ctx context.Context, args map[string]interface{}) (string, error)
 }
 
@@ -102,12 +107,13 @@ var serverAppSchema = schema([]string{"server", "app"}, map[string]interface{}{
 
 // simpleAction builds a mutating tool that delegates one app action verb to
 // the CLI (the same call the dashboard's button makes).
-func simpleAction(name, description, verb string, destructive bool, b Backend) Tool {
+func simpleAction(name, description, verb string, destructive bool, requiredCap string, b Backend) Tool {
 	return Tool{
 		Name:        name,
 		Description: description,
 		InputSchema: serverAppSchema,
 		Destructive: destructive,
+		RequiredCap: requiredCap,
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			server, app, err := serverApp(args)
 			if err != nil {
@@ -127,6 +133,7 @@ func Tools(b Backend) []Tool {
 			Description: "List every deployed app across all servers with status, version, and domain. This is read live from the state files the teploy CLI writes on each server — it cannot be stale relative to reality.",
 			InputSchema: schema(nil, nil),
 			ReadOnly:    true,
+			RequiredCap: caps.ViewMetadata,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				return b.ListApps(ctx)
 			},
@@ -136,6 +143,7 @@ func Tools(b Backend) []Tool {
 			Description: "Get the deployment state of one app on one server (status, current and previous version, domain).",
 			InputSchema: serverAppSchema,
 			ReadOnly:    true,
+			RequiredCap: caps.ViewMetadata,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				server, app, err := serverApp(args)
 				if err != nil {
@@ -152,7 +160,8 @@ func Tools(b Backend) []Tool {
 				"app":    strProp("App name"),
 				"lines":  intProp("Number of log lines (default 100, max 500)"),
 			}),
-			ReadOnly: true,
+			ReadOnly:    true,
+			RequiredCap: caps.ViewLogs,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				server, app, err := serverApp(args)
 				if err != nil {
@@ -170,6 +179,7 @@ func Tools(b Backend) []Tool {
 			Description: "List the servers teploy knows about (names and hosts).",
 			InputSchema: schema(nil, nil),
 			ReadOnly:    true,
+			RequiredCap: caps.ViewMetadata,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				return b.ListServers(ctx)
 			},
@@ -179,6 +189,7 @@ func Tools(b Backend) []Tool {
 			Description: "List uptime monitors with their current up/down state and 24h uptime.",
 			InputSchema: schema(nil, nil),
 			ReadOnly:    true,
+			RequiredCap: caps.ViewMetadata,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				return b.ListMonitors(ctx)
 			},
@@ -188,6 +199,7 @@ func Tools(b Backend) []Tool {
 			Description: "List the environment variable NAMES configured for an app. Values are never returned over MCP.",
 			InputSchema: serverAppSchema,
 			ReadOnly:    true,
+			RequiredCap: caps.ViewMetadata,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				server, app, err := serverApp(args)
 				if err != nil {
@@ -209,6 +221,7 @@ func Tools(b Backend) []Tool {
 				"port":   intProp("Container port (default 80)"),
 			}),
 			Destructive: true,
+			RequiredCap: caps.ExecuteDeploy,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				server, app, err := serverApp(args)
 				if err != nil {
@@ -231,6 +244,7 @@ func Tools(b Backend) []Tool {
 			Description: "Queue a rollback of an app to its previous version. Returns the queued operation record; the rollback runs through the same validated path as the dashboard.",
 			InputSchema: serverAppSchema,
 			Destructive: true,
+			RequiredCap: caps.ExecuteDeploy,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				server, app, err := serverApp(args)
 				if err != nil {
@@ -239,13 +253,13 @@ func Tools(b Backend) []Tool {
 				return b.Rollback(ctx, server, app)
 			},
 		},
-		simpleAction("teploy_restart", "Restart an app's containers.", "restart", true, b),
-		simpleAction("teploy_stop", "Stop an app's containers.", "stop", true, b),
-		simpleAction("teploy_start", "Start an app's stopped containers.", "start", false, b),
-		simpleAction("teploy_lock", "Acquire the deploy lock for an app (blocks other deploys).", "lock", false, b),
-		simpleAction("teploy_unlock", "Release an app's deploy lock.", "unlock", false, b),
-		simpleAction("teploy_maintenance_on", "Enable maintenance mode (serves a maintenance page).", "maintenance on", false, b),
-		simpleAction("teploy_maintenance_off", "Disable maintenance mode.", "maintenance off", false, b),
+		simpleAction("teploy_restart", "Restart an app's containers.", "restart", true, caps.ExecuteDeploy, b),
+		simpleAction("teploy_stop", "Stop an app's containers.", "stop", true, caps.ExecuteDeploy, b),
+		simpleAction("teploy_start", "Start an app's stopped containers.", "start", false, caps.ExecuteDeploy, b),
+		simpleAction("teploy_lock", "Acquire the deploy lock for an app (blocks other deploys).", "lock", false, caps.ExecuteDeploy, b),
+		simpleAction("teploy_unlock", "Release an app's deploy lock.", "unlock", false, caps.ExecuteDeploy, b),
+		simpleAction("teploy_maintenance_on", "Enable maintenance mode (serves a maintenance page).", "maintenance on", false, caps.ExecuteDeploy, b),
+		simpleAction("teploy_maintenance_off", "Disable maintenance mode.", "maintenance off", false, caps.ExecuteDeploy, b),
 		{
 			Name:        "teploy_set_env",
 			Description: "Set an environment variable for an app (applies on next deploy/restart).",
@@ -256,6 +270,7 @@ func Tools(b Backend) []Tool {
 				"value":  strProp("Variable value"),
 			}),
 			Destructive: true,
+			RequiredCap: caps.ExecuteMutate,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				server, app, err := serverApp(args)
 				if err != nil {
@@ -281,6 +296,7 @@ func Tools(b Backend) []Tool {
 				"key":    strProp("Variable name"),
 			}),
 			Destructive: true,
+			RequiredCap: caps.ExecuteMutate,
 			Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				server, app, err := serverApp(args)
 				if err != nil {

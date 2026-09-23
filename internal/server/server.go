@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/manifest"
@@ -645,6 +646,9 @@ const bootstrapTokenTTL = 30 * time.Minute
 // local account or OIDC identity alike — so a session issued against revoked
 // state stops working on its next use (A02/A03). For local sessions sub is
 // the username; for SSO sessions it is the issuer-namespaced principal id.
+// caps is the LIVE capability set, rebuilt from the principal row during
+// that same revalidation (X03): like the role, it is never trusted from
+// issuance time, so profile changes and narrowing take effect immediately.
 type sessionInfo struct {
 	sub   string
 	user  string
@@ -652,6 +656,7 @@ type sessionInfo struct {
 	exp   time.Time
 	epoch uint64
 	local bool
+	caps  caps.Set
 }
 
 type failInfo struct {
@@ -956,10 +961,12 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			var live *sessionInfo
 			if session.local {
 				if u := g.users[session.sub]; u != nil && u.AuthEpoch == session.epoch {
-					live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(u.Role), exp: session.exp, epoch: session.epoch, local: true}
+					live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(u.Role), exp: session.exp, epoch: session.epoch, local: true,
+						caps: capabilitiesForProfile(u.CapabilityProfile, u.Capabilities, u.Role)}
 				}
 			} else if p := g.oidcPrincipals[session.sub]; p != nil && p.AuthEpoch == session.epoch {
-				live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(p.Role), exp: session.exp, epoch: session.epoch, local: false}
+				live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(p.Role), exp: session.exp, epoch: session.epoch, local: false,
+					caps: capabilitiesForProfile(p.CapabilityProfile, p.Capabilities, p.Role)}
 			}
 			g.credMu.RUnlock()
 			if live == nil {
@@ -1002,12 +1009,17 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		// RBAC: enforce the minimum role for this route. Fail closed — a
-		// mutating route with no explicit classification requires editor, never
-		// viewer, so a new endpoint can't silently be viewer-writable.
-		if need := requiredRole(r.Method, r.URL.Path); !roleAllows(session.role, need) {
+		// X03 RBAC: enforce the capability(s) this route requires against
+		// the LIVE capability set (rebuilt above from the principal row,
+		// exactly like the role). Fail closed — a mutating route with no
+		// explicit classification requires execute.mutate, never a bare
+		// read, so a new endpoint can't silently be metadata-writable.
+		// Pre-X03 accounts carry the legacy profile, which reproduces the
+		// old role-rank behavior exactly, so this check REPLACED the role
+		// check without changing any existing install's permissions.
+		if missing := session.caps.Missing(requiredCapabilities(r.Method, r.URL.Path)); len(missing) > 0 {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
-				jsonError(w, "forbidden: this action requires the "+need+" role", http.StatusForbidden)
+				jsonError(w, "forbidden: this action requires the "+missing[0]+" capability", http.StatusForbidden)
 			} else {
 				http.Error(w, "forbidden", http.StatusForbidden)
 			}
@@ -1752,6 +1764,29 @@ func (s *Server) cliAppRun(ctx context.Context, serverName, appName string, part
 
 // ── App Actions ──────────────────────────────────────────────────────────
 
+// envList runs `teploy env list --reveal` for one app through the injected
+// CLI runner — the same argv cli.EnvList builds, routed like cliKVRun so the
+// env handlers (value read and the X03 env/keys metadata variant) stay
+// hermetically testable and share one seam.
+func (s *Server) envList(ctx context.Context, serverName, appName string) (interface{}, error) {
+	if !s.cliInstalled() {
+		return nil, errors.New("teploy CLI not installed")
+	}
+	args := []string{"env", "list", "--host", s.serverHost(serverName), "--app", appName, "--reveal"}
+	if u := s.serverUser(serverName); u != "" {
+		args = append(args, "--user", u)
+	}
+	args = append(args, "--json")
+	result, err := s.runCLI(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	if result.ExitCode != 0 {
+		return nil, fmt.Errorf("command failed: %s", result.Stderr)
+	}
+	return cli.ParseJSON(result.Stdout)
+}
+
 // handleAppAction handles /api/apps/{server}/{app}/{action}. Mutations are
 // delegated to the CLI, with long-running actions tracked as operations.
 func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
@@ -1774,9 +1809,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	if action == "env" || strings.HasPrefix(action, "env/") ||
 		action == "kv" || strings.HasPrefix(action, "kv/") {
 		noStore(w)
-	}
-
-	// Reject anything that isn't a plain identifier BEFORE it reaches an SSH
+	} // Reject anything that isn't a plain identifier BEFORE it reaches an SSH
 	// shell command or a CLI delegate. server/app names are interpolated into
 	// remote `docker` invocations; without this a name like `x'; rm -rf / #`
 	// would be remote code execution as the SSH user (root) on the fleet.
@@ -1822,16 +1855,25 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "app not found")
 
 	case action == "env" && r.Method == "GET":
-		if !cli.IsInstalled() {
-			writeError(w, "teploy CLI not installed")
-			return
-		}
-		result, err := cli.EnvList(s.serverHost(serverName), s.serverUser(serverName), appName)
+		// X03: this endpoint returns VALUES — the route table gates it on
+		// reveal.secrets. The viewer-visible metadata variant is env/keys.
+		raw, err := s.envList(r.Context(), serverName, appName)
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
-		writeData(w, result)
+		writeData(w, raw)
+
+	case action == "env/keys" && r.Method == "GET":
+		// X03 metadata variant: variable NAMES only, viewer-visible. Same
+		// CLI read as the value path; the reduction to keys is what makes
+		// it metadata (mirrors the MCP list_env_keys contract).
+		raw, err := s.envList(r.Context(), serverName, appName)
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+		writeData(w, map[string][]string{"keys": envKeysOnly(raw)})
 
 	case action == "env" && r.Method == "POST":
 		if !cli.IsInstalled() {

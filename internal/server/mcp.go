@@ -325,15 +325,18 @@ func (s *Server) handleMCPTokens(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		type tokenView struct {
-			ID       string    `json:"id"`
-			Name     string    `json:"name"`
-			ReadOnly bool      `json:"read_only"`
-			Created  time.Time `json:"created_at"`
-			LastUsed time.Time `json:"last_used,omitempty"`
+			ID           string    `json:"id"`
+			Name         string    `json:"name"`
+			ReadOnly     bool      `json:"read_only"`
+			Capabilities []string  `json:"capabilities"`
+			Created      time.Time `json:"created_at"`
+			LastUsed     time.Time `json:"last_used,omitempty"`
 		}
 		var out []tokenView
 		for _, t := range s.mcpTokens.List() {
-			out = append(out, tokenView{ID: t.ID, Name: t.Name, ReadOnly: t.ReadOnly, Created: t.CreatedAt, LastUsed: t.LastUsed})
+			// The EFFECTIVE set: legacy tokens (nil capabilities) show the
+			// read_only-derived set they actually enforce.
+			out = append(out, tokenView{ID: t.ID, Name: t.Name, ReadOnly: t.ReadOnly, Capabilities: t.CapabilitySet().Sorted(), Created: t.CreatedAt, LastUsed: t.LastUsed})
 		}
 		if out == nil {
 			out = []tokenView{}
@@ -341,21 +344,32 @@ func (s *Server) handleMCPTokens(w http.ResponseWriter, r *http.Request) {
 		writeData(w, out)
 	case "POST":
 		var body struct {
-			Name     string `json:"name"`
-			ReadOnly bool   `json:"read_only"`
+			Name string `json:"name"`
+			// ReadOnly mints the metadata-only default; ignored when
+			// Capabilities is present.
+			ReadOnly     bool     `json:"read_only"`
+			Capabilities []string `json:"capabilities"`
 		}
 		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}
-		plaintext, t, err := s.mcpTokens.Create(strings.TrimSpace(body.Name), body.ReadOnly)
+		var plaintext string
+		var t mcp.Token
+		var err error
+		if len(body.Capabilities) > 0 {
+			plaintext, t, err = s.mcpTokens.CreateWithCapabilities(strings.TrimSpace(body.Name), body.Capabilities)
+		} else {
+			plaintext, t, err = s.mcpTokens.Create(strings.TrimSpace(body.Name), body.ReadOnly)
+		}
 		if err != nil {
 			writeError(w, err.Error())
 			return
 		}
 		// The plaintext appears exactly once, in this response.
 		writeData(w, map[string]interface{}{
-			"id": t.ID, "name": t.Name, "read_only": t.ReadOnly, "token": plaintext,
+			"id": t.ID, "name": t.Name, "read_only": t.ReadOnly,
+			"capabilities": t.CapabilitySet().Sorted(), "token": plaintext,
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

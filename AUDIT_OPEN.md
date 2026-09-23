@@ -193,10 +193,12 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
 - A09 (residual) - canonical callback origin: a configured redirect URL is
   supported (TEPLOY_DASH_OIDC_REDIRECT_URL); deriving from the Host header
   remains the default. Bounded discovery landed.
-- A10 (residual) - secrets role policy + shortcut URL/color validation:
-  restricting env/KV/log reads to editors intentionally changes the
-  documented viewer contract and needs an approved role matrix + migration.
-  Baseline security headers landed.
+- A10 (residual) - FIXED 2026-09-23 (X03 first slice, see the X03 section
+  below): the approved role matrix + migration landed — capability tokens
+  with presets, viewer value reads removed for NEW accounts, and the
+  legacy profile preserving existing accounts until the explicit
+  narrowing click. Shortcut URL/color validation remains open (minor).
+  Baseline security headers landed earlier.
 - A12 - CORE LANDED 2026-09-18 (commit bb519ce); REMAINDER LANDED in the
   residual cluster session: admission budgets bound non-terminal operations
   per target (server+app — the FIFO-runner granularity;
@@ -491,9 +493,10 @@ dash side was ours to do.
   (same as pass-6 A35).
 - A39 - store file/dir permission migration (0700/0600): needs a migration
   note and CLI coordination (same as pass-6 A32 residual).
-- A43 (Advisory) - explicit secret/scope/lifetime role matrix and token
-  expiry/scopes: policy decision; viewer value access remains documented
-  and tested behavior.
+- A43 (Advisory) - FIXED 2026-09-23 (X03 first slice, see below): the
+  explicit secret/scope/lifetime role matrix landed (capability tokens,
+  presets, legacy migration, MCP token capability sets). Token
+  expiry/lifetimes remain open (machine-credential policy, D06-adjacent).
 - A44 - durable bounded alert outbox with retries: reliability subsystem
   (same as pass-6 A40).
 - A47 (residual) - FIXED in the residual cluster session (2026-09-18):
@@ -878,8 +881,10 @@ were found (no new upstream records needed).
 
 ### Deferred (with rationale; mapped to the standing list)
 
-- R02 (viewer secret reads), R31 (heuristic scanning limits) - A10/A43
-  policy decision: the role matrix change needs an approved migration.
+- R02 - FIXED 2026-09-23 (X03 first slice, see below): viewer secret reads
+  are gone for new accounts (reveal.secrets capability; legacy accounts
+  keep them until the explicit narrowing). R31 (heuristic scanning
+  limits) remains deferred (scanning hardening, unrelated to the matrix).
 - R04 (configured public-origin allowlist), R06 (login admission
   budgeting) - A06 residual origin-config work.
 - R07 (SSO session TTL vs IdP token expiry) - policy decision: capping to
@@ -1432,3 +1437,131 @@ fails; :disabled canDeploy bindings stripped → both tripwires fail.
   ./internal/server/` ok; `make build` ok; `node --check` on both
   bundles; both node component tests (servers_page, onboarding_preflight)
   pass. No push performed.
+
+## 2026-09-23 X03 first slice — capability matrix, backend-first (A10/R02/A43)
+
+Bounded backend-first slice of programme workstream X03 ("roles backed by
+resource-scoped capabilities... Default viewers do not receive env/KV
+secret contents... a visible migration and explicit legacy profile rather
+than silently changing every account"). Closes the standing policy
+deferral A10/R02 (pass-6 A10 residual, pass-7 A43, round-4 R02 — "needs
+an approved role matrix + migration": the matrix and the migration landed
+here) and unblocks the D02 remainder's per-PRINCIPAL budget carving.
+
+**What landed — capability registry (internal/caps, new package):**
+
+- 8 stable tokens: view.metadata, reveal.secrets, execute.deploy,
+  execute.mutate, restore.data, administer.credentials, administer.users,
+  view.logs. Shared by the session gate and the MCP surface so both
+  principal kinds speak one vocabulary. Validate/Normalize fail closed at
+  write boundaries; loading drops unknown tokens (forward-compat) instead
+  of bricking the store.
+- Presets: viewer = view.metadata; editor/operator = viewer +
+  execute.deploy + execute.mutate + view.logs; admin = all. Legacy sets
+  (FROZEN, per role): viewer/editor keep reveal.secrets + view.logs
+  (today's documented viewer value access), editor/admin add restore.data
+  (editors could run restore verifications), admin = all.
+
+**What landed — enforcement (internal/server/caps.go + gate seam):**
+
+- The route table `requiredCapabilities(method, path)` annotates every
+  route class; the check REPLACED the old role-rank check inside
+  authGate.wrap, enforced against the LIVE capability set rebuilt from the
+  principal row on every request (same seam and freshness discipline as
+  the live role read). 403s name the missing capability. Fail-closed
+  defaults preserved: unclassified mutation = execute.mutate, read =
+  view.metadata.
+- Load-bearing separations: GET env (values) and GET kv/value require
+  reveal.secrets; NEW `GET /api/apps/{s}/{a}/env/keys` is the
+  viewer-visible metadata variant (names only, same reduction as the MCP
+  list_env_keys contract; env reads moved onto the injected CLI runner
+  like kv, making the split hermetically testable); deploy-class POSTs =
+  execute.deploy; env/kv writes + monitor/group/homepage/manifest
+  mutations = execute.mutate; the whole restore-tests mutation surface =
+  restore.data; users/SSO = administer.users; mcp-tokens/config-servers/
+  registries/notifications = administer.credentials; /api/logs + app log
+  + accessory logs = view.logs; /api/auth/me + /api/auth/password are
+  capability-free (self-service identity).
+
+**What landed — the honest migration:**
+
+- dashUser/dashPrincipal gained `capability_profile` + `capabilities`
+  (additive JSON; absent profile = legacy). Existing installs' accounts
+  map to the legacy profile with today's effective permissions — never
+  silently narrowed, never silently widened, preserved across restarts
+  (pinned by tests). New accounts are created on presets.
+- Settings surface: GET /api/users lists profile + effective capabilities
+  per account; `POST /api/users/{u}/narrow-to-preset` is the explicit
+  narrowing click — no epoch bump needed: capabilities are re-read live,
+  so the SAME session is narrowed on its next request (tested).
+  `PUT /api/users/{u}` with `{"capabilities":[...]}` stores a custom set
+  (empty = deliberately locked; the "custom" profile marker prevents an
+  empty set round-tripping back to the legacy default). Role and
+  capabilities changes are one-per-request. UI: Settings → Users shows
+  the profile (legacy flagged) + Narrow to preset button.
+- /api/auth/me answers `capabilities` in every mode (disabled mode =
+  full set), so the frontend can pick panel shapes: the env panel loads
+  env/keys for metadata-only sessions (values render "(restricted)", no
+  toggle), the KV Reveal button hides without reveal.secrets.
+
+**What landed — MCP machine principals:**
+
+- mcp.Token gained an explicit capability set recorded at mint: default =
+  operator-minus-secrets (view.metadata, execute.deploy, execute.mutate,
+  view.logs — documented in README; no MCP tool reveals secret values
+  anyway), read_only mints = view.metadata, `CreateWithCapabilities`
+  validates and rejects empty sets (round-trip widening guard). Every
+  tool declares RequiredCap; tools/list hides unauthorized tools and
+  tools/call refuses with the capability named. Legacy tokens (nil
+  capabilities, pre-X03 files) derive their set from read_only exactly as
+  before — pinned by test. POST /api/mcp-tokens accepts a capabilities
+  array; GET lists the effective set.
+
+**TDD evidence:** red-first — internal/caps/caps_test.go,
+internal/server/caps_test.go, internal/mcp/caps_test.go written against
+the not-yet-existing API (compile red captured: registry/presets/
+requiredCapabilities/CreateWithCapabilities undefined). Post-implementation
+mutations verified then restored: gate check neutered (never denies) →
+TestViewerCannotRevealSecretValues + TestNarrowToPresetTakesEffectImmediately
+fail; MCP tool check neutered → TestToolEnforcementNamesMissingCapability
+fails; frontend loadEnv ignoring canRevealSecrets → env_caps component test
+fails (2 assertions). Matrix per route class: viewer lists apps/kv keys but
+env GET and kv/value 403 naming reveal.secrets and env/keys returns
+names-only; operator deploys (202 via /api/operations) but cannot reveal
+unless granted (custom grant → 200 with values) and cannot administer; admin
+all; legacy viewer/editor/admin keep exact prior behavior incl. restart;
+narrowing click effective on the same live session; MCP default/read-only/
+custom/legacy scoping; whoami exposes capabilities.
+
+**Audit items closed by this slice:** pass-6 A10 residual + pass-7 A43 +
+round-4 R02 (the approved role matrix + migration the deferral waited
+for); the A42-residual capability-view is subsumed by whoami capabilities.
+
+**Remaining X03 scope (next slices):**
+
+- Custom-role UI (the storage + API + validation landed; Settings only
+  offers narrowing — a capability editor for custom sets is frontend
+  work). D06-adjacent.
+- Per-PRINCIPAL queue budgets (D02 remainder; prerequisite now cleared).
+- OIDC mapping: principals carry the profile fields, but no IdP
+  claim → capability mapping exists yet (roles stay IdP-authoritative;
+  a capabilities claim + auto-narrowing policy is design work).
+- Audit-log actor fields: operations carry Actor (A27) but not the
+  capability set that authorized them; recording the granted-at
+  capability per admission is additive schema work.
+- Stream/export revocation within policy: SSE streams (logs, operation
+  events) authorize at connect; continuous mid-stream reauthorization
+  remains deferred (R60) — a capability revoked mid-stream takes effect
+  on the next connect.
+- Secret-bearing config reads (notifications/registries list payloads)
+  are administer.credentials like before; splitting their secret_set
+  metadata from values would follow the env/keys pattern if ever needed.
+
+## Resolution log (X03 slice)
+
+- 2026-09-23: first bounded slice landed as described above (working
+  tree, uncommitted). Gates: `go vet ./...` clean; `gofmt -l` clean;
+  `go test ./... -count=1` all 13 packages ok; `go test -race -count=1`
+  on internal/caps, internal/mcp, internal/server ok; `make build` ok;
+  `node --check` on both bundles; all three node component tests
+  (servers_page, onboarding_preflight, env_caps) pass. No push performed.

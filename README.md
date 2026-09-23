@@ -315,14 +315,15 @@ so the direct role claim is available here and takes precedence over groups.
 | GET | `/api/fleet` | Per-server observation envelopes: every configured server on every response, each with a stable ID, freshness (`fresh`/`stale`/`unknown`, threshold 2m), collection + last-success timestamps, partial error, and last-known apps. Unreachable servers stay visible. |
 | GET | `/api/apps/{server}/{app}/status` | Single app status. |
 | POST | `/api/apps/{server}/{app}/{action}` | `stop`, `start`, `restart`, `rollback`, `lock`, `unlock`, `maintenance/on`, `maintenance/off`. |
-| GET / POST | `/api/apps/{server}/{app}/env` | List / set env vars. |
+| GET / POST | `/api/apps/{server}/{app}/env` | List (with values — requires the `reveal.secrets` capability) / set env vars. |
+| GET | `/api/apps/{server}/{app}/env/keys` | Env var NAMES only (metadata; viewer-visible). |
 | DELETE | `/api/apps/{server}/{app}/env/{key}` | Unset env var. |
 | GET | `/api/apps/{server}/{app}/log` | Recent CLI deploy log. |
 | GET | `/api/apps/{server}/{app}/drift` | Live containers vs the deployed version. |
 | GET | `/api/apps/{server}/{app}/stats` | Per-container CPU / memory / IO. |
 | GET | `/api/apps/{server}/{app}/health` | On-demand health probe against the running app. |
 | GET / POST / DELETE | `/api/apps/{server}/{app}/kv` | List keys (`?pattern=`) / set (`{key,value,ttl}`) / delete (`?key=`) in the shared Nucleus KV store. `?accessory=` defaults to `nucleus`. |
-| GET | `/api/apps/{server}/{app}/kv/value` | Read one value (`?key=`). Returns `exists:false` for an unset key. |
+| GET | `/api/apps/{server}/{app}/kv/value` | Read one value (`?key=`; requires `reveal.secrets`). Returns `exists:false` for an unset key. |
 | GET | `/api/apps/{server}/{app}/accessories` | List accessories (DBs, queues, etc). |
 | GET | `/api/logs/{server}/{app}` | Live log stream (SSE; `?process=`, `?lines=`). Same-origin only. |
 | GET / POST / DELETE | `/api/config/servers` `/api/config/servers/{name}` | Manage servers via CLI. |
@@ -344,11 +345,53 @@ so the direct role claim is available here and takes precedence over groups.
 | GET | `/api/sso` | List SSO principals (admin). |
 | POST | `/api/sso/revoke` | Revoke all sessions of one SSO principal `{subject}` (admin). |
 | POST | `/api/users/{username}/revoke-sessions` | Revoke all sessions of one local account (admin). |
+| POST | `/api/users/{username}/narrow-to-preset` | Replace a legacy-profile account's pre-matrix permissions with its role's preset (admin). Takes effect on live sessions immediately. |
+| PUT | `/api/users/{username}` | Change role `{"role"}` or set an explicit capability list `{"capabilities": [...]}` (admin; one per request). |
 | GET / PUT | `/api/homepage` | Service links (Home grid + pinned header icons). PUT requires an `If-Match` header carrying the `ETag` the GET returned; a stale token answers 412 and a missing one 428. |
 
 All non-health routes require a valid session cookie. Sessions are issued by
 `POST /api/login` (24-hour TTL). Failed login attempts are rate-limited
 per source IP.
+
+### Access control: roles and capabilities
+
+Authorization is a capability matrix. Routes require capabilities; roles are
+presets over them. A request missing its capability gets `403` with the
+capability named (`{"error":"forbidden: this action requires the
+reveal.secrets capability"}`).
+
+| Capability | Grants |
+|------------|--------|
+| `view.metadata` | Non-secret reads: fleet/status/drift/stats/health, env and KV key listings, operations, monitors. |
+| `reveal.secrets` | Reading env and KV **values**. The one deliberately-not-viewer read. |
+| `execute.deploy` | Deploy, rollback, container lifecycle, maintenance, remove, lock/unlock, template install, operation cancel/retry. |
+| `execute.mutate` | env/KV writes and dashboard config mutations (monitors, groups, homepage, manifests). |
+| `restore.data` | Restore-test create/edit/delete/run (destructive against backup data). |
+| `administer.credentials` | MCP tokens, server config, image registries, notification channels. |
+| `administer.users` | Accounts and SSO principals. |
+| `view.logs` | Container/service logs and replay (deliberate access per the audit trail policy). |
+
+Role presets: **viewer** = `view.metadata`; **editor** (operator) = viewer +
+`execute.deploy` + `execute.mutate` + `view.logs`; **admin** = everything.
+Note new viewers do NOT receive env/KV secret contents — the UI shows names
+only; values need `reveal.secrets`.
+
+**Legacy accounts.** Accounts created before the capability matrix keep their
+exact previous permissions under a `legacy` profile (viewers keep value
+reads, editors keep restore runs) — never silently narrowed, never silently
+widened. Settings → Users lists every account with its profile and effective
+capabilities; **Narrow to preset** is the explicit act that moves an account
+onto its role's preset (effective on live sessions immediately). New accounts
+start on presets. `PUT /api/users/{u}` with an explicit `capabilities` list
+stores a custom set (empty = locked account).
+
+**MCP tokens.** Tokens minted after the matrix carry an explicit capability
+set: the default is the operator preset minus secrets (`view.metadata`,
+`execute.deploy`, `execute.mutate`, `view.logs` — no MCP tool returns secret
+values); read-only tokens get `view.metadata`. `POST /api/mcp-tokens`
+accepts an explicit `capabilities` array. A tool is listed and callable only
+when the token holds its capability; refusals name it. Tokens minted before
+the matrix keep their read-only-derived behavior exactly.
 
 ## Architecture
 

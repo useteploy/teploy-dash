@@ -446,6 +446,14 @@ func decodeCLIJSON(raw string) (interface{}, error) {
 	return data, nil
 }
 
+// ParseJSON decodes exactly one JSON value from a CLI stdout payload with
+// number fidelity. Exported for callers that run the CLI through an injected
+// runner (Config.CLIRunner) and need RunJSON's decode semantics — same
+// rules: empty, non-JSON, or multi-value output is an error.
+func ParseJSON(raw string) (interface{}, error) {
+	return decodeCLIJSON(raw)
+}
+
 // userArgs returns ["--user", user] when user is non-empty, else nil. The CLI
 // defaults to root when --user is absent, so this lets delegate calls target
 // non-root fleets while staying a no-op for root servers.
