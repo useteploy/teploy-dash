@@ -194,6 +194,10 @@ func writeOperationError(w http.ResponseWriter, err error) {
 		writeErrorStatus(w, err.Error(), http.StatusServiceUnavailable)
 	case errors.Is(err, operation.ErrIdempotencyConflict), errors.Is(err, operation.ErrNotCancelable), errors.Is(err, operation.ErrNotRetryable):
 		writeErrorStatus(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, operation.ErrReconciliationPending):
+		// D02: retry is refused until the interrupted operation's outcome is
+		// reconciled against the target's receipts.
+		writeErrorStatus(w, err.Error(), http.StatusConflict)
 	default:
 		writeError(w, err.Error())
 	}
@@ -201,8 +205,9 @@ func writeOperationError(w http.ResponseWriter, err error) {
 
 func validOperationStatus(status operation.Status) bool {
 	switch status {
-	case operation.StatusQueued, operation.StatusRunning, operation.StatusCancelRequested,
-		operation.StatusSucceeded, operation.StatusFailed, operation.StatusCanceled, operation.StatusInterrupted:
+	case operation.StatusQueued, operation.StatusRunning, operation.StatusCancelRequested, operation.StatusStopping,
+		operation.StatusSucceeded, operation.StatusFailed, operation.StatusCanceled, operation.StatusAlreadyCommitted,
+		operation.StatusInterrupted:
 		return true
 	default:
 		return false

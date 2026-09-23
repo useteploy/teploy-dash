@@ -567,6 +567,11 @@ func TestCancelPersistsIntent(t *testing.T) {
 		t.Fatalf("persisted status = %q, want cancel_requested", got)
 	}
 	close(release)
+	// D02: the worker now resolves the cancellation through the stopping
+	// transition before its terminal record exists — wait for it, because a
+	// restart that sees a persisted stopping record recovers it as
+	// interrupted (outcome unknown) instead of canceled.
+	waitForStatus(t, manager, op.ID, StatusCanceled)
 
 	// Restart: recovery resolves the intent as canceled.
 	restarted := newTestManager(t, dir, 100, func(context.Context, Command, func(Stream, string)) (int, error) { return 0, nil })

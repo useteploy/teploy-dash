@@ -41,6 +41,12 @@ const (
 // even fully escaped.
 const maxEventDataBytes = 16 << 10
 
+// receiptReadTimeout bounds one receipt read (D02): the same class of machine
+// read the fleet uses (`teploy app list`), given headroom over the fleet's
+// 10s per-server probe. Reconciliation must never hang a cancel resolution
+// or the startup reconcile loop.
+const receiptReadTimeout = 15 * time.Second
+
 // boundedEventData sanitizes and truncates event data at ingestion.
 func boundedEventData(data string) string {
 	data = strings.ToValidUTF8(data, "\uFFFD")
@@ -79,6 +85,12 @@ type Options struct {
 	Resolver                Resolver
 	ProjectResolver         ProjectResolver
 	Executor                Executor
+	// ReceiptReader answers whether an admitted operation's effect reached
+	// its target (D02). Reconciliation after a restart, and the honest
+	// resolution of a mid-flight cancellation, both consult it. Nil means
+	// this deployment cannot reconcile: interrupted outcomes are labeled
+	// needs-manual-check with that exact reason instead of guessing.
+	ReceiptReader ReceiptReader
 }
 
 // job is one admitted operation waiting for or receiving execution on its
@@ -157,6 +169,14 @@ type Manager struct {
 	maintenanceCtx    context.Context
 	maintenanceCancel context.CancelFunc
 	maintenanceWG     sync.WaitGroup
+	// reconcileCtx/reconcileWG own the startup reconciliation loop (D02):
+	// interrupted operations whose receipts still need reading. Joined at
+	// the START of Shutdown, bounded per read by receiptReadTimeout.
+	reconcileCtx    context.Context
+	reconcileCancel context.CancelFunc
+	reconcileWG     sync.WaitGroup
+	// receiptReader is Options.ReceiptReader (nil = cannot reconcile).
+	receiptReader ReceiptReader
 }
 
 // noteRecordErrLocked records an operation-record persistence failure for
@@ -246,6 +266,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 		resolver:           options.Resolver,
 		projectResolver:    options.ProjectResolver,
 		executor:           options.Executor,
+		receiptReader:      options.ReceiptReader,
 		maxEvents:          options.MaxEvents,
 		maxHistoryAge:      options.MaxHistoryAge,
 		maxOperations:      options.MaxOperations,
@@ -284,7 +305,8 @@ func New(dataDir string, options Options) (*Manager, error) {
 			m.idempotency[op.IdempotencyKey] = id
 		}
 	}
-	if err := m.recover(); err != nil {
+	pending, err := m.recover()
+	if err != nil {
 		return nil, err
 	}
 	m.lastSweep = time.Now()
@@ -295,6 +317,15 @@ func New(dataDir string, options Options) (*Manager, error) {
 	m.maintenanceCtx, m.maintenanceCancel = context.WithCancel(context.Background())
 	m.maintenanceWG.Add(1)
 	go m.retentionLoop(m.maintenanceCtx)
+	// D02: reconcile interrupted outcomes against the target's receipts in
+	// the background — New must not block on CLI reads, and nothing is
+	// retryable until each answer lands.
+	if len(pending) > 0 {
+		log.Printf("[operation] reconciling %d interrupted operation(s) against target receipts", len(pending))
+		m.reconcileCtx, m.reconcileCancel = context.WithCancel(context.Background())
+		m.reconcileWG.Add(1)
+		go m.reconcileLoop(pending)
+	}
 	return m, nil
 }
 
@@ -579,7 +610,11 @@ func (m *Manager) execute(j job) {
 		m.emit(j.id, eventType, Redact(data, j.command.Secrets))
 	})
 	if j.ctx.Err() != nil {
-		m.finish(j.id, StatusCanceled, exitCode, m.cancelReason())
+		// D02: the command was canceled mid-flight — whether its effect
+		// landed is a question, not an assumption. Persist the stopping
+		// transition, read the receipt, and record the honest terminal
+		// outcome (canceled | already_committed | canceled-unverified).
+		m.resolveCancellation(j.id, exitCode)
 		return
 	}
 	if err != nil || exitCode != 0 {
@@ -629,6 +664,87 @@ func (m *Manager) cancelReason() string {
 	return "operation canceled"
 }
 
+// beginStopping persists the stopping transition (D02: requested ->
+// stopping/reconciling -> canceled | already_committed) and appends its
+// event. Reports false when the operation is already terminal or already
+// stopping (resolution owns it from here).
+func (m *Manager) beginStopping(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op := m.operations[id]
+	if op == nil || op.Status.Terminal() || op.Status == StatusStopping {
+		return false
+	}
+	next := cloneOperation(op)
+	next.Status = StatusStopping
+	if err := m.store.saveOperation(next); err != nil {
+		m.noteRecordErrLocked(err)
+		// The command's outcome is already decided; the persist failure is
+		// surfaced (Health/log) but must not stop the resolution — the same
+		// rule finish() applies to terminal writes.
+		log.Printf("[operation] stopping state persist failed for %s: %v", id, err)
+	} else {
+		m.clearRecordErrLocked()
+	}
+	m.operations[id] = next
+	if err := m.appendEventLocked(id, EventStatus, string(StatusStopping)); err != nil {
+		log.Printf("[operation] stopping event persist failed for %s: %v", id, err)
+	}
+	return true
+}
+
+// resolveCancellation determines the honest outcome of a canceled mid-flight
+// command (D02). "Interrupted" describes the coordinator, never the target:
+// the receipt decides between canceled (effect did not land),
+// already_committed (effect landed — reported as standing, never as rolled
+// back), and canceled-with-unverified-outcome when no receipt can answer.
+// During bounded shutdown the receipt read is skipped (shutdown must stay
+// fast); the record then says the outcome is unknown so an operator checks.
+func (m *Manager) resolveCancellation(id string, exitCode int) {
+	if !m.beginStopping(id) {
+		return
+	}
+	reason := m.cancelReason()
+	m.mu.Lock()
+	shutdown := m.shuttingDown
+	reader := m.receiptReader
+	op := cloneOperation(m.operations[id])
+	m.mu.Unlock()
+
+	var (
+		receipt Receipt
+		rerr    error
+	)
+	switch {
+	case shutdown:
+		rerr = errors.New("receipt check skipped: dashboard shutting down")
+	default:
+		receipt, rerr = m.readReceipt(nil, reader, op)
+	}
+
+	rec := &Reconciliation{CheckedAt: time.Now().UTC()}
+	status := StatusCanceled
+	message := reason
+	switch {
+	case rerr != nil:
+		// No answer: the cancellation is real (dash stopped waiting), but
+		// the effect's fate is unknown — say exactly that.
+		rec.State = ReconcileStateManual
+		rec.Reason = rerr.Error()
+		message = reason + "; outcome could not be verified: " + rerr.Error()
+	case receipt.Applied:
+		status = StatusAlreadyCommitted
+		rec.State = ReconcileStateApplied
+		rec.Evidence = receipt.Evidence
+		message = reason + " after the effect committed — the effect stood; no rollback was performed"
+	default:
+		rec.State = ReconcileStateNotApplied
+		rec.Evidence = receipt.Evidence
+		message = reason + "; receipt confirmed the effect did not land"
+	}
+	m.finishReconciled(id, status, exitCode, message, rec)
+}
+
 // errCancelRequested reports setRunning refusing to start an operation whose
 // cancellation was durably requested while it waited for its target turn.
 var errCancelRequested = errors.New("operation cancel requested")
@@ -659,6 +775,14 @@ func (m *Manager) setRunning(id string) error {
 }
 
 func (m *Manager) finish(id string, status Status, exitCode int, message string) {
+	m.finishReconciled(id, status, exitCode, message, nil)
+}
+
+// finishReconciled is finish with an optional receipt record (D02): the
+// reconciliation is persisted ON the terminal record (evidence and reason
+// ride the commit that decides the outcome), so the API serves one honest
+// answer, not a status plus a separate guess.
+func (m *Manager) finishReconciled(id string, status Status, exitCode int, message string, rec *Reconciliation) {
 	m.mu.Lock()
 	op := m.operations[id]
 	if op == nil || op.Status.Terminal() {
@@ -669,6 +793,9 @@ func (m *Manager) finish(id string, status Status, exitCode int, message string)
 	op.Status = status
 	op.FinishedAt = &now
 	op.Error = message
+	if rec != nil {
+		op.Reconciliation = rec
+	}
 	if exitCode >= 0 {
 		op.ExitCode = &exitCode
 	}
@@ -929,10 +1056,17 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	// R25: join the retention loop FIRST — an in-flight sweep must finish
 	// (or never start) before anything below closes storage out from under
 	// it. Cancel + Wait covers both: the loop exits on ctx.Done, and Wait
-	// blocks until any in-flight retire() returns.
+	// blocks until any in-flight retire() returns. The D02 reconcile loop
+	// joins the same way: its in-flight receipt read is bounded by
+	// receiptReadTimeout, and unreconciled records stay reconciling on disk
+	// for the next boot to pick back up.
 	if m.maintenanceCancel != nil {
 		m.maintenanceCancel()
 		m.maintenanceWG.Wait()
+	}
+	if m.reconcileCancel != nil {
+		m.reconcileCancel()
+		m.reconcileWG.Wait()
 	}
 
 	drained := make(chan struct{})
@@ -990,6 +1124,12 @@ func (m *Manager) Cancel(id string) (*Operation, error) {
 		m.mu.Unlock()
 		return nil, ErrNotCancelable
 	}
+	if op.Status == StatusStopping {
+		// D02: the cancel intent is already recorded and the outcome is
+		// being resolved — there is nothing left to request.
+		m.mu.Unlock()
+		return nil, ErrNotCancelable
+	}
 	next := cloneOperation(op)
 	next.Status = StatusCancelRequested
 	if err := m.store.saveOperation(next); err != nil {
@@ -1021,9 +1161,17 @@ func (m *Manager) Retry(id string, actor *Actor) (*Operation, error) {
 		m.mu.Unlock()
 		return nil, ErrNotFound
 	}
-	if !op.Status.Terminal() || op.Status == StatusSucceeded || op.HasSecrets {
+	if !op.Status.Terminal() || op.Status == StatusSucceeded || op.Status == StatusAlreadyCommitted || op.HasSecrets {
 		m.mu.Unlock()
 		return nil, ErrNotRetryable
+	}
+	// D02: an interrupted outcome stays un-offered until its receipt is
+	// reconciled — retrying work whose effect may already stand is the
+	// blind re-run this gate exists to prevent. Records from before D02
+	// (nil Reconciliation) keep the old explicit-retry contract.
+	if op.Status == StatusInterrupted && op.Reconciliation != nil && op.Reconciliation.State == ReconcileStateReconciling {
+		m.mu.Unlock()
+		return nil, ErrReconciliationPending
 	}
 	req := cloneRequest(op.Request)
 	attempt := op.Attempt + 1
@@ -1037,21 +1185,39 @@ func (m *Manager) Retry(id string, actor *Actor) (*Operation, error) {
 // a directory sync after the rename, so an enqueue can FAIL after the queued
 // record is already visible (dir-open/sync error). The caller was told the
 // work was not queued; executing it after a restart would deploy something
-// nobody believes was admitted. Queued and running records therefore surface
-// as interrupted for an explicit, re-authorized retry; cancel_requested
-// records resolve as canceled (A09).
-func (m *Manager) recover() error {
+// nobody believes was admitted. Queued, running, and stopping records
+// therefore surface as interrupted — outcome UNKNOWN (D02): "interrupted"
+// describes the coordinator, not the target, so the record carries a
+// Reconciliation the startup loop resolves from receipts before retry is
+// offered again. cancel_requested records resolve as canceled (A09).
+//
+// The returned ids are the operations whose receipts still need reading this
+// boot (D02): freshly interrupted ones plus leftovers from a previous boot
+// that died mid-reconciliation.
+func (m *Manager) recover() ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var pending []string
 	for id, op := range m.operations {
 		switch op.Status {
-		case StatusQueued, StatusRunning:
+		case StatusQueued, StatusRunning, StatusStopping:
 			now := time.Now().UTC()
 			op.Status = StatusInterrupted
-			op.Error = "dashboard restarted before operation completed; verify remote state and retry"
+			op.Error = "interrupted — outcome unknown: dashboard restarted before the operation completed"
 			op.FinishedAt = &now
+			if m.receiptReader == nil {
+				// No reader means no honest answer is possible; say so
+				// instead of leaving an eternal "reconciling" lie.
+				op.Reconciliation = &Reconciliation{
+					State:  ReconcileStateManual,
+					Reason: "no receipt reader configured; verify the server state manually",
+				}
+			} else {
+				op.Reconciliation = &Reconciliation{State: ReconcileStateReconciling}
+				pending = append(pending, id)
+			}
 			if err := m.store.saveOperation(op); err != nil {
-				return err
+				return nil, err
 			}
 			// R24: the event journal is ADVISORY. A failure to append the
 			// interrupted marker must not disable the entire operation
@@ -1069,16 +1235,117 @@ func (m *Manager) recover() error {
 			op.Error = "canceled before the dashboard restarted"
 			op.FinishedAt = &now
 			if err := m.store.saveOperation(op); err != nil {
-				return err
+				return nil, err
 			}
 			if err := m.appendEventLocked(id, EventStatus, string(StatusCanceled)); err != nil {
 				m.noteEventErrLocked(err)
 				log.Printf("[operation] recovery journal unavailable for %s: %v", id, err)
 			}
 			m.store.CloseJournal(id)
+		case StatusInterrupted:
+			// A previous boot marked this interrupted and died before its
+			// receipt landed — pick the reconciliation back up.
+			if m.receiptReader != nil && op.Reconciliation != nil && op.Reconciliation.State == ReconcileStateReconciling {
+				pending = append(pending, id)
+			}
 		}
 	}
-	return nil
+	return pending, nil
+}
+
+// reconcileLoop resolves each pending interrupted operation against its
+// target's receipts, sequentially and bounded (D02). It never enqueues
+// anything: reconciliation answers a question, it does not re-run work —
+// retry stays an explicit re-authorization.
+func (m *Manager) reconcileLoop(ids []string) {
+	defer m.reconcileWG.Done()
+	for _, id := range ids {
+		select {
+		case <-m.reconcileCtx.Done():
+			return
+		default:
+		}
+		m.reconcileOne(id)
+	}
+}
+
+// reconcileOne reads one operation's receipt and records the honest answer.
+// The reader runs WITHOUT the manager mutex (it shells out); the answer is
+// applied only if the operation is still interrupted-and-reconciling when it
+// lands.
+func (m *Manager) reconcileOne(id string) {
+	m.mu.Lock()
+	op := m.operations[id]
+	if op == nil || op.Status != StatusInterrupted || op.Reconciliation == nil || op.Reconciliation.State != ReconcileStateReconciling {
+		m.mu.Unlock()
+		return
+	}
+	reader := m.receiptReader
+	snapshot := cloneOperation(op)
+	m.mu.Unlock()
+
+	receipt, rerr := m.readReceipt(m.reconcileCtx, reader, snapshot)
+
+	// A shutdown-canceled read is NOT an answer — leave the record
+	// reconciling on disk so the next boot picks the question back up,
+	// instead of recording "context canceled" as a manual-check reason.
+	if m.reconcileCtx.Err() != nil {
+		return
+	}
+
+	rec := &Reconciliation{CheckedAt: time.Now().UTC()}
+	switch {
+	case rerr != nil:
+		rec.State = ReconcileStateManual
+		rec.Reason = rerr.Error()
+	case receipt.Applied:
+		rec.State = ReconcileStateApplied
+		rec.Evidence = receipt.Evidence
+	default:
+		rec.State = ReconcileStateNotApplied
+		rec.Evidence = receipt.Evidence
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.operations[id]
+	if current == nil || current.Status != StatusInterrupted || current.Reconciliation == nil || current.Reconciliation.State != ReconcileStateReconciling {
+		return
+	}
+	next := cloneOperation(current)
+	next.Reconciliation = rec
+	// Fail-closed on the record save (R24's rule): if it cannot persist,
+	// the record stays reconciling on disk and in memory — Retry keeps
+	// refusing, the degradation shows in Health(), and a later boot retries
+	// the read. Never silently downgrade to a guess.
+	if err := m.store.saveOperation(next); err != nil {
+		m.noteRecordErrLocked(err)
+		log.Printf("[operation] reconciliation persist failed for %s: %v", id, err)
+		return
+	}
+	m.clearRecordErrLocked()
+	m.operations[id] = next
+	if err := m.appendEventLocked(id, EventStatus, string(rec.State)); err != nil {
+		log.Printf("[operation] reconciliation event persist failed for %s: %v", id, err)
+	}
+	m.store.CloseJournal(id)
+}
+
+// readReceipt runs one bounded receipt read. A nil reader is an explicit "no
+// answer available", surfaced as an error so callers map it to
+// needs-manual-check with the exact reason. The read is bounded by both the
+// caller's parent context (shutdown, reconcile loop) and
+// receiptReadTimeout.
+func (m *Manager) readReceipt(parent context.Context, reader ReceiptReader, op *Operation) (Receipt, error) {
+	if reader == nil {
+		return Receipt{}, errors.New("no receipt reader configured")
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, receiptReadTimeout)
+	defer cancel()
+	return reader(ctx, cloneOperation(op))
 }
 
 // retire applies retention caps (age + count) to in-memory and on-disk state.
@@ -1176,6 +1443,10 @@ func cloneOperation(op *Operation) *Operation {
 	// mutating a Get/List/Enqueue result (or the Actor pointer it passed to
 	// Enqueue) can no longer reach the live operation.
 	copy.Actor = cloneActor(op.Actor)
+	if op.Reconciliation != nil {
+		rec := *op.Reconciliation
+		copy.Reconciliation = &rec
+	}
 	if op.AdmittedServer != nil {
 		snapshot := *op.AdmittedServer
 		copy.AdmittedServer = &snapshot

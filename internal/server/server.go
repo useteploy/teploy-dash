@@ -356,6 +356,10 @@ func New(config Config) *Server {
 			return s.manifests.ProjectDir(server, app, revision)
 		},
 		Executor: executor,
+		// D02: reconciliation and honest cancellation outcomes read the
+		// target's receipts through the same machine interface the fleet
+		// uses. The method value resolves s.runCLI at call time.
+		ReceiptReader: s.operationReceipt,
 	})
 	if s.operationInitErr != nil {
 		log.Printf("operations: disabled: %v", s.operationInitErr)

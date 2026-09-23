@@ -993,3 +993,109 @@ the remaining list reads.
   `go test ./... -count=1` all packages ok; `go test -race -count=1
   ./internal/server/` ok; `make build` ok. Frontend untouched (no bundle
   change to node --check). No push performed.
+
+## 2026-09-22 D02 first slice — durable operations with honest uncertain outcomes
+
+Bounded slice of programme workstream D02. It completes the contract AROUND
+the existing manager/FIFO/journal/cancellation features (all preserved);
+it does not close the deferred D02-adjacent items listed below.
+
+**What landed — restart reconciliation (piece a):**
+
+- On recovery, mid-flight records (queued/running/stopping) are marked
+  `interrupted — outcome unknown` and carry a durable `Reconciliation`
+  object. "Interrupted" describes the coordinator, never the target: no
+  retry is offered until a receipt answers (previously the record said
+  "verify remote state and retry" and `Retry` accepted immediately — the
+  blind re-offer this slice removes).
+- `Retry` refuses with a typed `ErrReconciliationPending` (API 409) while
+  the state is `reconciling`; after `reconciled-applied` /
+  `reconciled-not-applied` / `needs-manual-check` lands, retry is an
+  explicit re-authorization again (lineage preserved). Pre-D02 interrupted
+  records (nil Reconciliation) keep the old explicit-retry contract.
+- A background reconcile loop (joined at Shutdown, per-read bounded by
+  `receiptReadTimeout` = 15s, shutdown-canceled reads left reconciling for
+  the next boot — "context canceled" is not an answer) runs the CLI's
+  read-side receipts via an injected `ReceiptReader`. The production reader
+  (internal/server/receipts.go) answers from `teploy app list --host
+  <admitted-host> --json` — the same machine read the fleet uses — against
+  the operation's ADMITTED target snapshot (A14): deploy = app present AND
+  a container running exactly the requested image (presence without the
+  image pin, or an unpinned image, is needs-manual-check with the exact
+  reason — never a guess); remove = app absent; every other kind answers
+  `no receipt reader for kind %q`. Read failures are needs-manual-check
+  with the exact error, never a silent "failed". No receipt reader
+  configured = every interrupted record labeled needs-manual-check with
+  that reason at recovery time.
+- The reconcile loop only READS: nothing is ever auto-retried by the
+  restart path (A08 preserved and re-asserted in the new tests).
+
+**What landed — cancellation states (piece b):**
+
+- requested -> stopping/reconciling -> canceled | already_committed, every
+  transition persisted and visible in the operation stream. New statuses:
+  `stopping` (non-terminal; holds the runner slot while the outcome is
+  determined) and `already_committed` (terminal; not retryable — the work
+  is done).
+- A cancel observed mid-flight no longer records plain "canceled": the
+  receipt decides. Applied -> `already_committed`, message says the effect
+  stood and NO rollback was performed, evidence on the record
+  (`Reconciliation{state: reconciled-applied, evidence}`). Not applied ->
+  `canceled` with the evidence. No answer (reader unavailable/unsupported
+  kind/read failure) -> `canceled` with "outcome could not be verified:
+  <exact reason>" and `needs-manual-check` on the record — cancellation is
+  real (dash stopped waiting) but the effect's fate is labeled unknown.
+- Cancel before start never consults a receipt (effect provably never
+  began). A second Cancel while stopping is refused (`ErrNotCancelable`).
+  During bounded shutdown the receipt read is skipped (shutdown stays
+  fast); the record says the outcome is unknown. A `stopping` record left
+  by a dying process recovers as interrupted and reconciles like any other.
+
+**API surface (additive):** `Operation.reconciliation`
+  `{state: reconciling|reconciled-applied|reconciled-not-applied|
+  needs-manual-check, reason, evidence, checked_at}`; new statuses in the
+  list filter; retry-pending maps to 409.
+
+**TDD evidence (internal/operation/reconcile_test.go,
+internal/server/receipts_test.go):** both mutations were written red
+against pre-D02 behavior and verified red before implementation
+(blind-retry: `TestRestartDoesNotReofferRetryBeforeReconciliation`;
+silent-loss: `TestCancelDuringRunDoesNotRecordCertaintyItDoesNotHave`).
+Post-implementation mutation checks (gate neutered; receipt branch
+neutered) each fail their test; restored, all pass.
+
+**Remaining D02 scope (next slices):**
+
+- Idempotency namespacing by principal/resource (A12/A13/R20 — client
+  coordination; keys are still a single global namespace).
+- Queue bounds by PRINCIPAL (per-target and global budgets exist; the
+  role/policy matrix prerequisite stands).
+- Pin target identity + manifest revision at admission is partially there
+  (AdmittedServer, A14) — manifest revision leases vs queued operations
+  remain A28/R32 design work; R19 alias-fingerprint admission checks
+  remain deferred.
+- Receipt coverage: rollback / template_install / manifest_apply /
+  app_lifecycle / maintenance have no decidable receipt yet (all answer
+  needs-manual-check with the exact reason); deploy-without-image-pin and
+  presence-without-image-match deliberately stay manual.
+- Startup reconciliation is sequential (bounded, but N interrupted ops =
+  N serial reads); no retry/backoff loop for needs-manual-check records.
+- Reconciling canceled/already-committed TERMINAL records after the fact
+  (e.g. an unverified cancel later becomes answerable) — needs a
+  re-reconcile surface; also the cancel_requested recovery path (A09)
+  still resolves as canceled without a receipt check.
+- Stream resume-by-sequence exists; operation-stream UI depth (rendering
+  reconciliation states, hiding Retry while reconciling — the button
+  currently surfaces the 409 message) is frontend work, same posture as
+  the D01 slice (API is the contract).
+- Terminal-outcome repair debt (R22/F021 family): failed terminal-record
+  persists during cancel resolution surface via Health degradation but
+  have no repair queue.
+
+## Resolution log (D02 slice)
+
+- 2026-09-22: first bounded slice landed as described above. Gates at the
+  working tree (uncommitted): `go vet ./...` clean; `gofmt -l` clean;
+  `go test ./... -count=1` all packages ok; `go test -race -count=1
+  ./internal/operation/ ./internal/server/` ok; `make build` ok. Frontend
+  untouched (no bundle change to node --check). No push performed.

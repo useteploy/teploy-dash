@@ -29,15 +29,26 @@ const (
 	StatusQueued          Status = "queued"
 	StatusRunning         Status = "running"
 	StatusCancelRequested Status = "cancel_requested"
-	StatusSucceeded       Status = "succeeded"
-	StatusFailed          Status = "failed"
-	StatusCanceled        Status = "canceled"
-	StatusInterrupted     Status = "interrupted"
+	// StatusStopping is the persisted transition after a cancellation was
+	// observed by the worker and the outcome of the already-running command
+	// is being determined (D02): requested -> stopping -> canceled |
+	// already_committed. Non-terminal — the operation still holds its
+	// runner slot while the receipt is checked.
+	StatusStopping  Status = "stopping"
+	StatusSucceeded Status = "succeeded"
+	StatusFailed    Status = "failed"
+	StatusCanceled  Status = "canceled"
+	// StatusAlreadyCommitted is the honest terminal outcome of a
+	// cancellation whose receipt shows the effect landed anyway (D02): the
+	// cancellation arrived too late, the effect stood, and NO rollback was
+	// performed. Not retryable — the work is done.
+	StatusAlreadyCommitted Status = "already_committed"
+	StatusInterrupted      Status = "interrupted"
 )
 
 func (s Status) Terminal() bool {
 	switch s {
-	case StatusSucceeded, StatusFailed, StatusCanceled, StatusInterrupted:
+	case StatusSucceeded, StatusFailed, StatusCanceled, StatusAlreadyCommitted, StatusInterrupted:
 		return true
 	default:
 		return false
@@ -114,13 +125,61 @@ type Operation struct {
 	// Actor records which principal admitted the operation (A27 remainder).
 	// Nil on records written before the field existed and on internal callers
 	// with no principal to attribute.
-	Actor       *Actor `json:"actor,omitempty"`
-	requestHash string
+	Actor *Actor `json:"actor,omitempty"`
+	// Reconciliation records the receipt check for an outcome dash could not
+	// observe itself (D02): interrupted by a restart, or canceled while the
+	// command was mid-flight. Its state is the honest answer to "did the
+	// effect land?" — reconciling until answered, then reconciled-applied /
+	// reconciled-not-applied, or needs-manual-check with the exact reason
+	// when no receipt can answer. Nil on records that never needed one
+	// (including interrupted records from before D02, which stay retryable
+	// exactly as before).
+	Reconciliation *Reconciliation `json:"reconciliation,omitempty"`
+	requestHash    string
 }
 
 type Metadata struct {
 	Mode string `json:"mode"`
 }
+
+// ReconcileState is the lifecycle of a receipt check (D02).
+type ReconcileState string
+
+const (
+	// ReconcileStateReconciling: the outcome is unknown and a receipt read
+	// is (or will be) in flight. Retry is refused while this is the state.
+	ReconcileStateReconciling ReconcileState = "reconciling"
+	// ReconcileStateApplied: the receipt shows the effect landed.
+	ReconcileStateApplied ReconcileState = "reconciled-applied"
+	// ReconcileStateNotApplied: the receipt shows the effect did not land.
+	ReconcileStateNotApplied ReconcileState = "reconciled-not-applied"
+	// ReconcileStateManual: no receipt could answer (reader unavailable,
+	// read failed, or the operation kind has no receipt semantics). Reason
+	// carries the exact cause — the label is never a silent "failed".
+	ReconcileStateManual ReconcileState = "needs-manual-check"
+)
+
+// Reconciliation is the durable record of one receipt check.
+type Reconciliation struct {
+	State     ReconcileState `json:"state"`
+	Reason    string         `json:"reason,omitempty"`
+	Evidence  string         `json:"evidence,omitempty"`
+	CheckedAt time.Time      `json:"checked_at,omitempty"`
+}
+
+// Receipt is a read-side answer about one operation's effect: whether the
+// target received it, plus the evidence the answer rests on. Produced by the
+// injected ReceiptReader from the CLI's machine reads — never guessed.
+type Receipt struct {
+	Applied  bool
+	Evidence string
+}
+
+// ReceiptReader answers whether an operation's effect reached its target.
+// A non-nil error means the question could NOT be answered (transport
+// failure, unsupported kind) — that maps to needs-manual-check, never to
+// not-applied.
+type ReceiptReader func(ctx context.Context, op *Operation) (Receipt, error)
 
 type Stream string
 
@@ -157,6 +216,11 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key was already used for a different request")
 	ErrNotCancelable       = errors.New("operation is not cancelable")
 	ErrNotRetryable        = errors.New("operation is not retryable")
+	// ErrReconciliationPending reports that an interrupted operation's
+	// outcome is still being reconciled against the target's receipts (D02):
+	// retry is refused until the answer lands so nobody re-runs work whose
+	// effect may already stand.
+	ErrReconciliationPending = errors.New("operation outcome is being reconciled against the server; retry after reconciliation completes")
 	// ErrAdmissionBudget reports that the target's admission budget is
 	// exhausted: too many non-terminal operations are already queued for it
 	// (A12/A27 remainder). Bounded queues keep a runaway client (or a stuck
