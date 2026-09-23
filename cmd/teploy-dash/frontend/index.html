@@ -1459,6 +1459,21 @@
         <div class="table-wrap" style="padding: 20px; margin-bottom: 16px;">
           <h2 class="section-title" x-text="'Install ' + selected.name"></h2>
           <p class="subtitle" x-text="selected.description"></p>
+          <!-- D05: the version pin is truthful — it states what dash can
+               actually guarantee. A versioned catalog pins the SELECTED
+               version (re-checked at submit; a moved catalog refuses with
+               the upgrade notes). An unversioned catalog says so instead
+               of pretending a reviewed package exists. -->
+          <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 12px;" x-text="selected.version_state === 'versioned'
+            ? 'Version pin: v' + selected.version + ' (verified against the catalog when you submit)'
+            : 'This template is unversioned — the install uses the catalog\'s current revision.'"></p>
+          <template x-if="selected.upgrade">
+            <div class="table-wrap" style="padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--warning, #d08770);">
+              <p style="margin: 0; font-size: 13px;"><strong x-text="'Upgrade available: v' + selected.upgrade.from + ' -> v' + selected.upgrade.to"></strong></p>
+              <p style="margin: 4px 0 0; font-size: 13px; color: var(--text-muted);" x-text="selected.upgrade.notes || 'See the template\'s upgrade notes.'"></p>
+              <p x-show="selected.upgrade.backup_scope" style="margin: 4px 0 0; font-size: 13px; color: var(--text-muted);" x-text="'Backup before upgrading: ' + (selected.upgrade.backup_scope || '')"></p>
+            </div>
+          </template>
 
           <div class="form-row">
             <div class="form-group">
@@ -1494,8 +1509,16 @@
         <div class="card-grid">
           <template x-for="t in templates" :key="t.name">
             <div class="card" @click="selectTemplate(t)">
-              <div class="card-title" x-text="t.name"></div>
+              <div class="card-title">
+                <span x-text="t.name"></span>
+                <!-- D05: version state is rendered, never guessed — an
+                     unversioned catalog says "unversioned". -->
+                <span style="margin-left: 8px; font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--bg-inset, #eee); color: var(--text-muted);"
+                  x-text="t.version_state === 'versioned' ? 'v' + t.version : 'unversioned'"></span>
+                <span x-show="t.upgrade" style="margin-left: 4px; font-size: 11px; color: var(--warning, #d08770);" x-text="t.upgrade ? 'upgrade to v' + t.upgrade.to : ''"></span>
+              </div>
               <div class="card-meta" x-text="t.description"></div>
+              <div class="card-meta" x-show="t.installed" style="font-size: 12px;" x-text="t.installed ? ('installed on ' + t.installed.server + (t.installed.version ? ' (v' + t.installed.version + ')' : '')) : ''"></div>
             </div>
           </template>
         </div>

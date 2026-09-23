@@ -2003,6 +2003,11 @@ document.addEventListener('alpine:init', () => {
           domain: this.installForm.domain,
           server: this.installForm.server,
           vars: this.installForm.vars,
+          // D05 version pin: empty (omitted server-side) on the current
+          // unversioned catalog; the selected version otherwise. The
+          // server re-verifies it against the catalog at submit — a moved
+          // catalog answers 409 with the upgrade pointer, shown below.
+          template_version: this.selected.version_state === 'versioned' ? this.selected.version : '',
         });
         if (!isOperation(op)) throw new Error('Expected an operation response');
         // A queued operation is not a completed installation — drop the
