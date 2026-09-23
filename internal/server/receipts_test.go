@@ -108,11 +108,21 @@ func TestRestartReconciliationThroughMachineReceipts(t *testing.T) {
 	waitForOperationStatus(t, first, admitted.Data.ID, operation.StatusRunning)
 
 	// "Crash": a second instance over the same data dir, whose CLI reports
-	// the app running the requested image.
+	// the app running the requested image. The first receipt read BLOCKS
+	// until the test releases it, so the mid-reconcile 409 assertion below
+	// has a deterministic window instead of racing the (instant) mock
+	// reconciliation to completion.
+	release := make(chan struct{})
 	second := New(Config{
 		DataDir: dir, NoAuth: true,
-		CLIInstalled:      func() bool { return true },
-		CLIRunner:         receiptRunner("prod.example", appListResult("prod.example", "web", "example/web:1")),
+		CLIInstalled: func() bool { return true },
+		CLIRunner: func(ctx context.Context, args ...string) (*cli.Result, error) {
+			if len(args) >= 4 && args[0] == "app" && args[1] == "list" && args[2] == "--host" && args[3] == "prod.example" {
+				<-release
+				return appListResult("prod.example", "web", "example/web:1"), nil
+			}
+			return nil, fmt.Errorf("unexpected CLI call: %v", args)
+		},
 		OperationResolver: receiptTestResolver,
 		OperationExecutor: func(context.Context, operation.Command, func(operation.Stream, string)) (int, error) { return 0, nil },
 	})
@@ -150,6 +160,8 @@ func TestRestartReconciliationThroughMachineReceipts(t *testing.T) {
 			if retry.Code != http.StatusConflict || !strings.Contains(retry.Body.String(), "reconcil") {
 				t.Fatalf("retry while reconciling status=%d body=%s, want 409 reconciliation pending", retry.Code, retry.Body.String())
 			}
+			// Assertion made; let the (blocked) receipt read complete.
+			close(release)
 		}
 		if served.Reconciliation.State == operation.ReconcileStateApplied {
 			break
