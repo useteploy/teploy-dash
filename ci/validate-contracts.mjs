@@ -47,6 +47,12 @@ const artifacts = {
   "release-record": { schema: "release-record.schema.json", classes: { valid: "validate" } },
   "attempt-name": { schema: "attempt-name.schema.json", mode: "each", classes: { valid: "validate", invalid: "refuse" } },
   "preview-state": { schema: "preview-state.schema.json", classes: { valid: "validate", legacy: "validate", ambiguous: "adoption-refusal" } },
+  // plan-record arrived with corpus rev 3 (C05's plan/apply binding). The
+  // invalid class is tampered-id: schema-VALID but semantically wrong (the
+  // recorded config digest no longer reproduces the plan id) - that refusal
+  // is semantic, pinned by teploy-cli's apply self-consistency tests, so the
+  // schema leg decodes it rather than pretending a schema can catch it.
+  "plan-record": { schema: "plan-record.schema.json", classes: { valid: "validate", invalid: "decode-only" } },
   "observation-envelope": { schema: "observation-envelope.schema.json", classes: { valid: "validate" } },
   "operation-record": { schema: "operation-record.schema.json", classes: {} },
 };
