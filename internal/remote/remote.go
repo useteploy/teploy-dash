@@ -80,7 +80,10 @@ func (a AppState) MarshalJSON() ([]byte, error) {
 
 // ServerConn holds connection details for a server.
 type ServerConn struct {
-	Name    string
+	Name string
+	// ID is the CLI-recorded stable identity (X02 §1.3), empty on legacy
+	// servers.yml entries written before the field existed.
+	ID      string
 	Host    string
 	User    string
 	KeyPath string

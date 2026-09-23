@@ -83,9 +83,10 @@ type Config struct {
 	Backend string
 	// Operation hooks are primarily for tests and alternate CLI packaging. The
 	// production defaults resolve servers.yml and execute the bundled CLI.
-	OperationResolver  operation.Resolver
-	OperationExecutor  operation.Executor
-	OperationMaxEvents int
+	OperationResolver     operation.Resolver
+	OperationResolverByID operation.ResolverByID
+	OperationExecutor     operation.Executor
+	OperationMaxEvents    int
 	// Operation retention knobs (useteploy__teploy-dash-04). Zero values take
 	// the operation package defaults; negative values disable a bound.
 	OperationMaxJournalBytes int64
@@ -350,6 +351,10 @@ func New(config Config) *Server {
 	if resolver == nil {
 		resolver = s.resolveOperationServer
 	}
+	resolverByID := config.OperationResolverByID
+	if resolverByID == nil {
+		resolverByID = s.resolveOperationServerByID
+	}
 	executor := config.OperationExecutor
 	if executor == nil {
 		executor = func(ctx context.Context, command operation.Command, emit func(operation.Stream, string)) (int, error) {
@@ -376,6 +381,7 @@ func New(config Config) *Server {
 		MaxConcurrentExecutions: config.OperationMaxConcurrent,
 		IdempotencyWindow:       config.OperationIdempotencyWindow,
 		Resolver:                resolver,
+		ResolverByID:            resolverByID,
 		ProjectResolver: func(server, app, revision string) (string, error) {
 			if s.manifests == nil {
 				return "", fmt.Errorf("manifest service unavailable")
@@ -1671,6 +1677,7 @@ func (s *Server) resolveServers(ctx context.Context) ([]remote.ServerConn, error
 	}
 
 	var raw map[string]struct {
+		ID   string `json:"id"`
 		Host string `json:"host"`
 		User string `json:"user"`
 	}
@@ -1686,6 +1693,7 @@ func (s *Server) resolveServers(ctx context.Context) ([]remote.ServerConn, error
 		}
 		servers = append(servers, remote.ServerConn{
 			Name: name,
+			ID:   s.ID,
 			Host: s.Host,
 			User: user,
 		})

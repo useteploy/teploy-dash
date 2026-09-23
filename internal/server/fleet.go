@@ -54,16 +54,26 @@ type ServerObservation struct {
 	Apps          []remote.AppState `json:"apps"`
 }
 
-// serverStableID derives the envelope's internal opaque ID. Server NAMES are
-// the only identity the CLI's server list exposes today, so the ID is a
-// deterministic hash of the name: same name -> same ID across restarts and
-// responses. Renaming a server changes its ID; a truly stable cross-rename
-// identity needs the server-scoped AppRef schema migration in the CLI
-// contract (audit A35) and is out of scope for this slice. The domain prefix
-// keeps these IDs out of any other ID space.
+// serverStableID derives the LEGACY name-hash identity: the fallback for
+// servers.yml entries written before the CLI's stable `id` field existed
+// (X02 §1.3). Same name -> same ID across restarts and responses; renaming
+// changes it, which is why new entries carry a CLI-minted id and
+// serverEnvelopeID below prefers it. The domain prefix keeps these IDs out
+// of any other ID space.
 func serverStableID(name string) string {
 	sum := sha256.Sum256([]byte("teploy-dash/server/v1:" + name))
 	return "srv-" + hex.EncodeToString(sum[:8])
+}
+
+// serverEnvelopeID resolves a server envelope's ID: the CLI-recorded stable
+// id when present (rename-stable, X02 §1.3), else the legacy name-hash
+// fallback for id-less entries. Id-less legacy servers keep their existing
+// identity; no re-keying happens implicitly.
+func serverEnvelopeID(srv remote.ServerConn) string {
+	if srv.ID != "" {
+		return srv.ID
+	}
+	return serverStableID(srv.Name)
 }
 
 // freshnessAt classifies a last-success timestamp against fleetFreshAfter.
@@ -167,7 +177,7 @@ func (s *Server) collectFleetObservations(ctx context.Context, prev []ServerObse
 // failure keeps the last-known payload and surfaces the error.
 func buildServerObservation(prevByID map[string]ServerObservation, srv remote.ServerConn, apps []remote.AppState, err error, collectedAt time.Time) ServerObservation {
 	env := ServerObservation{
-		ID:          serverStableID(srv.Name),
+		ID:          serverEnvelopeID(srv),
 		Server:      srv.Name,
 		Host:        srv.Host,
 		CollectedAt: collectedAt,

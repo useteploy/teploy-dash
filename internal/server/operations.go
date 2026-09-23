@@ -40,7 +40,22 @@ func (s *Server) resolveOperationServer(name string) (operation.Server, error) {
 	if !ok {
 		return operation.Server{}, fmt.Errorf("server not found: %s", name)
 	}
-	return operation.Server{Name: srv.Name, Host: srv.Host, User: srv.User}, nil
+	return operation.Server{Name: srv.Name, ID: srv.ID, Host: srv.Host, User: srv.User}, nil
+}
+
+// resolveOperationServerByID resolves a server by its stable CLI-recorded
+// id (X02 §1.3) for the operation manager's rename reconciliation. Presence
+// — not error — is the answer shape: a vanished id is an expected finding.
+func (s *Server) resolveOperationServerByID(id string) (operation.Server, bool) {
+	if id == "" {
+		return operation.Server{}, false
+	}
+	for _, srv := range s.serversBestEffort() {
+		if srv.ID == id {
+			return operation.Server{Name: srv.Name, ID: srv.ID, Host: srv.Host, User: srv.User}, true
+		}
+	}
+	return operation.Server{}, false
 }
 
 func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {

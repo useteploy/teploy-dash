@@ -90,6 +90,9 @@ func (s *Server) buildPreflight(ctx context.Context, serverRef string) Preflight
 	defer cancel()
 
 	env := PreflightEnvelope{
+		// Legacy name-hash until discovery says otherwise; replaced by the
+		// CLI-recorded stable id below when the ref resolves to a
+		// registered server (X02 §1.3).
 		ID:          serverStableID(serverRef),
 		Server:      serverRef,
 		CollectedAt: time.Now().UTC(),
@@ -115,6 +118,9 @@ func (s *Server) buildPreflight(ctx context.Context, serverRef string) Preflight
 			target = &servers[i]
 			break
 		}
+	}
+	if target != nil {
+		env.ID = serverEnvelopeID(*target)
 	}
 	if target == nil {
 		// Candidate host: not registered, so the CLI cannot manage it yet.

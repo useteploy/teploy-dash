@@ -217,11 +217,22 @@ type Command struct {
 
 type Server struct {
 	Name string
+	// ID is the server's stable CLI-recorded identity (X02 §1.3): minted
+	// once by `teploy server add`, preserved across renames. Empty on
+	// legacy servers.yml entries written before the field existed — the
+	// name/host checks below remain the contract for those, and dash's
+	// envelope IDs fall back to the name-hash.
+	ID   string
 	Host string
 	User string
 }
 
 type Resolver func(name string) (Server, error)
+
+// ResolverByID resolves a server by its stable CLI-recorded id. The second
+// return is presence, not success: "no server with that id" is an expected
+// answer in the rename-reconciliation path (X02 §1.3), not an error.
+type ResolverByID func(id string) (Server, bool)
 
 // ProjectResolver returns the immutable project directory registered for a
 // manifest revision. Project paths are intentionally absent from Request.

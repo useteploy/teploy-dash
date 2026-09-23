@@ -107,6 +107,10 @@ type Options struct {
 	// skips keys whose operations are older than the window.
 	IdempotencyWindow time.Duration
 	Resolver          Resolver
+	// ResolverByID resolves a server by stable id for the rename
+	// reconciliation in checkTarget (X02 §1.3). Nil disables that path:
+	// a vanished name stays a hard refusal, exactly as before.
+	ResolverByID      ResolverByID
 	ProjectResolver   ProjectResolver
 	Executor          Executor
 	// ReceiptReader answers whether an admitted operation's effect reached
@@ -144,6 +148,7 @@ type Manager struct {
 	targets         map[string]*targetRunner
 	subscribers     map[string]map[chan struct{}]struct{}
 	resolver        Resolver
+	resolverByID    ResolverByID
 	projectResolver ProjectResolver
 	executor        Executor
 	maxEvents       int
@@ -294,6 +299,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 		subscribers:        make(map[string]map[chan struct{}]struct{}),
 		droppedEvents:      make(map[string]int),
 		resolver:           options.Resolver,
+		resolverByID:       options.ResolverByID,
 		projectResolver:    options.ProjectResolver,
 		executor:           options.Executor,
 		receiptReader:      options.ReceiptReader,
@@ -646,12 +652,13 @@ func (m *Manager) execute(j job) {
 	if op == nil {
 		return
 	}
-	// Target identity check (A14): the server alias must still resolve to
-	// the host/user admitted with the operation. Repointing an alias between
-	// admission and execution must fail the operation for re-authorization,
-	// not redirect queued work at whatever the name points to now. Records
-	// from before the field existed (or with no resolver) skip the check.
-	if mismatch := m.checkTarget(op); mismatch != "" {
+	// Target identity check (A14, extended by X02 §1.3 stable ids): the
+	// server must still be the one admitted with the operation. A repointed
+	// alias, a same-name different server, or a vanished stable id fails the
+	// operation for re-authorization; a VERIFIED rename follows the server's
+	// identity and retargets the command to its current name. Records from
+	// before AdmittedServer existed (or with no resolver) skip the check.
+	if mismatch := m.checkTarget(op, &j); mismatch != "" {
 		m.finish(j.id, StatusFailed, -1, mismatch)
 		return
 	}
@@ -691,19 +698,77 @@ func (m *Manager) execute(j job) {
 
 // checkTarget compares the operation's admitted server snapshot with the
 // current resolution of its server name. Empty message means the target is
-// unchanged (or the check does not apply).
-func (m *Manager) checkTarget(op *Operation) string {
+// verified (or the check does not apply); on a verified rename the job's
+// command is retargeted to the server's current name in place. Every other
+// mismatch returns the refusal the operation fails with.
+func (m *Manager) checkTarget(op *Operation, j *job) string {
 	if op.AdmittedServer == nil || m.resolver == nil {
 		return ""
 	}
+	admitted := *op.AdmittedServer
 	current, err := m.resolver(op.Request.Server)
 	if err != nil {
+		// The admitted name no longer resolves. With a recorded stable id a
+		// rename is safe and expected (X02 §1.3): when the id still names a
+		// server with the admitted host/user, queued work follows the
+		// identity and executes against the server's CURRENT name. No id
+		// (legacy record) or no resolverByID: the name is all dash has, so
+		// the historical refusal stands.
+		if admitted.ID != "" && m.resolverByID != nil {
+			renamed, ok := m.resolverByID(admitted.ID)
+			if ok {
+				if renamed.Host != admitted.Host || userOf(renamed) != userOf(admitted) {
+					return fmt.Sprintf("server %q was renamed and repointed since admission (admitted %s, now %s); explicit re-authorization required — retry the operation", op.Request.Server, admitted.Host, renamed.Host)
+				}
+				j.command = retargetCommand(j.command, op.Request.Server, renamed.Name)
+				return ""
+			}
+			return fmt.Sprintf("server %q could not be resolved since admission (%v) and its admitted id %s matches no configured server; verify the server configuration and retry", op.Request.Server, err, admitted.ID)
+		}
 		return fmt.Sprintf("server %q could not be resolved since admission (%v); verify the server configuration and retry", op.Request.Server, err)
 	}
-	if current.Host != op.AdmittedServer.Host || userOf(current) != userOf(*op.AdmittedServer) {
-		return fmt.Sprintf("server %q was repointed since admission (admitted %s, now %s); explicit re-authorization required — retry the operation", op.Request.Server, op.AdmittedServer.Host, current.Host)
+	if admitted.ID != "" {
+		switch {
+		case current.ID == "":
+			// The downgrade hazard (X02 §5): an older CLI rewrote
+			// servers.yml without ids. Ambiguous — never a new server.
+			return fmt.Sprintf("server %q no longer carries its admitted stable id %s (an older teploy CLI may have rewritten servers.yml); binding is ambiguous — restore the id or re-try against an explicit server", op.Request.Server, admitted.ID)
+		case current.ID != admitted.ID:
+			// The same name now names a different server: the retarget
+			// hazard A14 exists to prevent.
+			return fmt.Sprintf("server %q now resolves to a different server (admitted id %s, now %s); explicit re-authorization required — retry the operation", op.Request.Server, admitted.ID, current.ID)
+		}
+	}
+	if current.Host != admitted.Host || userOf(current) != userOf(admitted) {
+		return fmt.Sprintf("server %q was repointed since admission (admitted %s, now %s); explicit re-authorization required — retry the operation", op.Request.Server, admitted.Host, current.Host)
 	}
 	return ""
+}
+
+// retargetCommand rewrites the admitted server NAME in a built command to
+// the server's current name after a verified rename. Only the two
+// name-addressed command shapes carry the name — deploy's positional
+// server argument and the template --server flag; every other shape
+// addresses the host, which a rename does not change. The structural
+// guards (deploy at argv[0], --server immediately before) keep an app or
+// template name that happens to equal the server name from being touched,
+// and secret values never appear in Args (A11).
+func retargetCommand(cmd Command, from, to string) Command {
+	if from == "" || from == to {
+		return cmd
+	}
+	replaced := append([]string(nil), cmd.Args...)
+	for i, arg := range replaced {
+		if arg != from {
+			continue
+		}
+		if (i == 1 && len(replaced) > 0 && replaced[0] == "deploy") ||
+			(i > 0 && replaced[i-1] == "--server") {
+			replaced[i] = to
+		}
+	}
+	cmd.Args = replaced
+	return cmd
 }
 
 func userOf(srv Server) string {

@@ -637,6 +637,209 @@ func TestExecuteRefusesRepointedTarget(t *testing.T) {
 	waitForStatus(t, manager, first.ID, StatusSucceeded)
 }
 
+// ── X02 §1.3 stable server ids ─────────────────────────────────────────────
+
+// x02State is a mutable fleet behind the test resolvers: name→server and
+// id→server, so tests can rename/swap/strip ids mid-queue like a live
+// servers.yml rewrite would.
+type x02State struct {
+	mu     sync.Mutex
+	byName map[string]Server
+}
+
+func (s *x02State) resolve(name string) (Server, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	srv, ok := s.byName[name]
+	if !ok {
+		return Server{}, fmt.Errorf("server not found: %s", name)
+	}
+	return srv, nil
+}
+
+func (s *x02State) resolveByID(id string) (Server, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, srv := range s.byName {
+		if srv.ID == id {
+			return srv, true
+		}
+	}
+	return Server{}, false
+}
+
+// X02 §1.3 rule 5: an operation admitted against a server that was renamed
+// before execution follows the server's stable identity — the command is
+// retargeted to the current name and executes, never fails on the vanished
+// label and never lands on a different server.
+func TestExecuteFollowsRenamedServer(t *testing.T) {
+	dir := t.TempDir()
+	state := &x02State{byName: map[string]Server{
+		"prod": {Name: "prod", ID: "srv-aaaaaaaaaaaaaaaa", Host: "10.0.0.1", User: "root"},
+	}}
+	block := make(chan struct{})
+	commands := make(chan Command, 2)
+	manager, err := New(dir, Options{
+		MaxEvents:    100,
+		Resolver:     state.resolve,
+		ResolverByID: state.resolveByID,
+		Executor: func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
+			commands <- command
+			<-block
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-commands
+	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rename while the second operation sits queued: the admitted name
+	// vanishes, the stable id survives under the new name.
+	state.mu.Lock()
+	delete(state.byName, "prod")
+	state.byName["production"] = Server{Name: "production", ID: "srv-aaaaaaaaaaaaaaaa", Host: "10.0.0.1", User: "root"}
+	state.mu.Unlock()
+	close(block)
+
+	executed := <-commands
+	if got := executed.Args[1]; got != "production" {
+		t.Fatalf("retargeted server arg = %q, want production (args: %v)", got, executed.Args)
+	}
+	waitForStatus(t, manager, second.ID, StatusSucceeded)
+	waitForStatus(t, manager, first.ID, StatusSucceeded)
+}
+
+// X02 §1.3 rule 5: two servers that swap names never retarget queued work —
+// the admitted id resolving under the same name to a DIFFERENT id is the
+// refusal case, no matter that the host may coincide.
+func TestExecuteRefusesSameNameDifferentServer(t *testing.T) {
+	dir := t.TempDir()
+	state := &x02State{byName: map[string]Server{
+		"prod": {Name: "prod", ID: "srv-aaaaaaaaaaaaaaaa", Host: "10.0.0.1", User: "root"},
+	}}
+	block := make(chan struct{})
+	commands := make(chan Command, 1)
+	manager, err := New(dir, Options{
+		MaxEvents:    100,
+		Resolver:     state.resolve,
+		ResolverByID: state.resolveByID,
+		Executor: func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
+			commands <- command
+			<-block
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-commands
+	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The name now belongs to a different server (a name swap, or the old
+	// entry removed and a new one added under the same label).
+	state.mu.Lock()
+	state.byName["prod"] = Server{Name: "prod", ID: "srv-bbbbbbbbbbbbbbbb", Host: "10.0.0.9", User: "root"}
+	state.mu.Unlock()
+	close(block)
+	finished := waitForStatus(t, manager, second.ID, StatusFailed)
+	if !strings.Contains(finished.Error, "different server") {
+		t.Fatalf("same-name-different-server error = %q", finished.Error)
+	}
+	waitForStatus(t, manager, first.ID, StatusSucceeded)
+}
+
+// X02 §1.3 rule 5 / §5 row 7 downgrade hazard: an older CLI rewriting
+// servers.yml without ids strips the admitted identity — that is ambiguous,
+// never a new server, and the operation refuses with remediation.
+func TestExecuteRefusesVanishedID(t *testing.T) {
+	dir := t.TempDir()
+	state := &x02State{byName: map[string]Server{
+		"prod": {Name: "prod", ID: "srv-aaaaaaaaaaaaaaaa", Host: "10.0.0.1", User: "root"},
+	}}
+	block := make(chan struct{})
+	commands := make(chan Command, 1)
+	manager, err := New(dir, Options{
+		MaxEvents:    100,
+		Resolver:     state.resolve,
+		ResolverByID: state.resolveByID,
+		Executor: func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
+			commands <- command
+			<-block
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := manager.Enqueue(deployRequest("web", "example/web:1"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-commands
+	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same server, same host — but the id is gone (older CLI rewrite).
+	state.mu.Lock()
+	state.byName["prod"] = Server{Name: "prod", Host: "10.0.0.1", User: "root"}
+	state.mu.Unlock()
+	close(block)
+	finished := waitForStatus(t, manager, second.ID, StatusFailed)
+	if !strings.Contains(finished.Error, "no longer carries its admitted stable id") {
+		t.Fatalf("vanished-id error = %q", finished.Error)
+	}
+	waitForStatus(t, manager, first.ID, StatusSucceeded)
+}
+
+func TestRetargetCommand(t *testing.T) {
+	deploy := Command{Args: []string{"deploy", "prod", "--app", "web", "--image", "example/web:1"}}
+	got := retargetCommand(deploy, "prod", "production")
+	if got.Args[1] != "production" || got.Args[3] != "web" {
+		t.Fatalf("deploy retarget = %v", got.Args)
+	}
+	// The template --server shape retargets too.
+	tmpl := Command{Args: []string{"template", "install", "postgres", "--domain", "db.example.com", "--server", "prod"}}
+	got = retargetCommand(tmpl, "prod", "production")
+	if got.Args[6] != "production" {
+		t.Fatalf("template retarget = %v", got.Args)
+	}
+	// Host-addressed shapes carry no server name — unchanged.
+	hostCmd := Command{Args: []string{"rollback", "--host", "prod", "--app", "web"}}
+	if diff := retargetCommand(hostCmd, "prod", "production"); fmt.Sprint(diff.Args) != fmt.Sprint(hostCmd.Args) {
+		t.Fatalf("host-addressed command was rewritten: %v", diff.Args)
+	}
+	// An app named like the server is never touched: only deploy's argv[1]
+	// and the token after --server are the server name.
+	collide := Command{Args: []string{"deploy", "other", "--app", "prod"}}
+	if diff := retargetCommand(collide, "prod", "production"); fmt.Sprint(diff.Args) != fmt.Sprint(collide.Args) {
+		t.Fatalf("app-name collision was rewritten: %v", diff.Args)
+	}
+	// No-op when names match.
+	same := Command{Args: []string{"deploy", "prod", "--app", "web"}}
+	if diff := retargetCommand(same, "prod", "prod"); fmt.Sprint(diff.Args) != fmt.Sprint(same.Args) {
+		t.Fatalf("same-name retarget rewrote: %v", diff.Args)
+	}
+	// The source command is never mutated in place.
+	if deploy.Args[1] != "prod" {
+		t.Fatalf("source command mutated: %v", deploy.Args)
+	}
+}
+
 // ── Admission budget (A12/A27 remainder) ──────────────────────────────────
 
 // The per-target budget rejects (never silently drops) enqueues once the
