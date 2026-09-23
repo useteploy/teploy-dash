@@ -41,6 +41,7 @@ import (
 	sshclient "github.com/useteploy/teploy-dash/internal/ssh"
 	"github.com/useteploy/teploy-dash/internal/state"
 	"github.com/useteploy/teploy-dash/internal/store"
+	"github.com/useteploy/teploy-dash/internal/templates"
 )
 
 var appNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -2057,6 +2058,12 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeRawJSON(w, result.Stdout)
 
+	// D05: the database-action inventory (restart / version upgrade /
+	// credential rotation / data restore / destructive removal) with
+	// support status, blast radius and remedies — read-only metadata.
+	case action == "db-actions" && r.Method == "GET":
+		s.handleDatabaseActions(w, r)
+
 	case r.Method == "POST":
 		s.handleAppPost(w, r, serverName, appName, action)
 
@@ -2329,6 +2336,24 @@ func (s *sseLogStream) Write(p []byte) (int, error) {
 
 // ── Templates ────────────────────────────────────────────────────────────
 
+// fetchTemplateCatalog runs `teploy template list --json` and validates the
+// payload through the D05 manifest shape (internal/templates). A CLI
+// failure is a dependency failure, not an empty catalog (A30); a payload
+// that fails validation is the same class of failure — dash does not
+// render a catalog it could not validate. Routed through the injected
+// runner (Config.CLIRunner) so the catalog surface is hermetically
+// testable like every other CLI-read endpoint.
+func (s *Server) fetchTemplateCatalog(ctx context.Context) ([]templates.Rendered, error) {
+	result, err := s.runCLI(ctx, "template", "list", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("template list failed: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return nil, fmt.Errorf("template list failed: %s", strings.TrimSpace(result.Stderr))
+	}
+	return templates.DecodeCatalog(result.Stdout)
+}
+
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "method not allowed", 405)
@@ -2338,17 +2363,50 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 		writeData(w, []interface{}{})
 		return
 	}
-	result, err := cli.Run("template", "list", "--json")
+	entries, err := s.fetchTemplateCatalog(r.Context())
 	if err != nil {
-		// A CLI failure is a dependency failure, not an empty catalog (A30).
-		writeErrorStatus(w, "template list failed: "+err.Error(), http.StatusBadGateway)
+		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if result.ExitCode != 0 {
-		writeErrorStatus(w, "template list failed: "+strings.TrimSpace(result.Stderr), http.StatusBadGateway)
-		return
+	// D05 upgrade surfacing: correlate the catalog with the newest
+	// succeeded template_install dash recorded per template, and mark an
+	// upgrade when the catalog version moved past the installed one. One
+	// in-memory pass over the operation list (bounded by the operation
+	// store's retention); installs recorded before versions existed keep
+	// an empty Installed.Version and render honestly as unversioned-era.
+	installed := make(map[string]*operation.Operation)
+	if s.operations != nil {
+		for _, op := range s.operations.List("", "", 0) {
+			if op.Request.Kind != operation.KindTemplateInstall || op.Status != operation.StatusSucceeded {
+				continue
+			}
+			cur, ok := installed[op.Request.Template]
+			if !ok || op.CreatedAt.After(cur.CreatedAt) {
+				installed[op.Request.Template] = op
+			}
+		}
 	}
-	writeRawJSON(w, result.Stdout)
+	for i := range entries {
+		op, ok := installed[entries[i].Name]
+		if !ok {
+			continue
+		}
+		entries[i].Installed = &templates.Installed{
+			Server:      op.Request.Server,
+			Version:     op.Request.TemplateVersion,
+			OperationID: op.ID,
+		}
+		if op.Request.TemplateVersion != "" && entries[i].Version != "" &&
+			templates.CompareVersions(entries[i].Version, op.Request.TemplateVersion) > 0 {
+			entries[i].Upgrade = &templates.Upgrade{
+				From:        op.Request.TemplateVersion,
+				To:          entries[i].Version,
+				Notes:       entries[i].UpgradeNotes,
+				BackupScope: entries[i].BackupScope,
+			}
+		}
+	}
+	writeData(w, entries)
 }
 
 func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
@@ -2366,6 +2424,10 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		Domain   string            `json:"domain"`
 		Server   string            `json:"server"`
 		Vars     map[string]string `json:"vars"`
+		// TemplateVersion pins the install to the catalog version the
+		// operator selected (D05). Optional: absent/empty on the current
+		// version-less catalog.
+		TemplateVersion string `json:"template_version"`
 	}
 	if err := strictDecode(r, &body); err != nil {
 		writeError(w, "invalid request body")
@@ -2376,9 +2438,38 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Version pinning (D05): a pinned install must match the catalog RIGHT
+	// NOW. The CLI fetches the catalog's current head at execute time (it
+	// has no --version flag), so the pin dash can honestly enforce is
+	// admission-time equality: a catalog that moved since selection is
+	// refused until the operator re-selects against the new version's
+	// upgrade notes. Fail closed when the check itself cannot run.
+	pinnedVersion := body.TemplateVersion
+	if pinnedVersion != "" {
+		entries, err := s.fetchTemplateCatalog(r.Context())
+		if err != nil {
+			writeErrorStatus(w, "cannot verify template version pin: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		entry := templates.Find(entries, body.Template)
+		if entry == nil {
+			writeErrorStatus(w, "template "+body.Template+" is not in the current catalog", http.StatusConflict)
+			return
+		}
+		if entry.VersionState == templates.VersionStateUnversioned {
+			writeErrorStatus(w, "template "+body.Template+" is unversioned in the current catalog; remove the version pin and install the catalog's current revision", http.StatusConflict)
+			return
+		}
+		if entry.Version != pinnedVersion {
+			writeErrorStatus(w, fmt.Sprintf("template %s moved from v%s (selected) to v%s (current); review the upgrade notes and re-select before installing", body.Template, pinnedVersion, entry.Version), http.StatusConflict)
+			return
+		}
+	}
+
 	s.enqueueOperation(w, r, operation.Request{
 		Kind: operation.KindTemplateInstall, Server: body.Server,
-		Template: body.Template, Domain: body.Domain, Vars: body.Vars,
+		Template: body.Template, TemplateVersion: pinnedVersion,
+		Domain: body.Domain, Vars: body.Vars,
 	})
 }
 

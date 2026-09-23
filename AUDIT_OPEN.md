@@ -1735,3 +1735,134 @@ S7). Legs and evidence (exit 0, all PASS, non-vacuous):
 
 Vacuous-match guard included. Re-run and paste fresh output here on any
 contract change.
+
+## X01 job-3 tail — dash CI decodes the pinned contracts corpus — 2026-09-23
+
+New `contracts` job in `.github/workflows/ci.yml` (runs on push/PR and via
+the release `validate` reuse, so a tag cannot ship without it):
+
+- Pin: `ci/contracts.pin` records `cli_rev=c413685` / `corpus_rev=2`
+  (MANIFEST revision table is the authority; rev 2 = c413685's contracts/).
+  The job parses the pin, checks teploy-cli out at that SHA
+  (sparse: contracts), and cross-checks the pinned corpus rev against the
+  MANIFEST's table before anything else runs.
+- Node leg: `ci/validate-contracts.mjs` (ajv 8.17.1 + ajv-formats 3.0.1,
+  pinned in `ci/package.json` + lockfile): compiles EVERY schema (a schema
+  that cannot compile fails the job even with no fixtures yet), validates
+  every valid/ fixture, asserts every invalid/ fixture FAILS validation,
+  and refuses any fixture file its expectation table does not classify
+  (corpus growth must be a conscious pin+table update, never a silent
+  pass). Never skips as success.
+- Go leg: `TEPLOY_CONTRACTS_DIR` (set by the job) makes
+  `internal/server/contracts_corpus_test.go` fail-closed on a missing
+  corpus and drives the fixtures through dash's REAL decode paths:
+  version-handshake + app-list via `cli.ParseJSON` (the MI gate:
+  missing `machine_interface` = pre-MI legacy, never MI 0), app-list via
+  `decodeAppListEnvelope`/`assertAppStatusComplete` (extracted from
+  `readMachineApps`, behavior unchanged), the preview-state ambiguous
+  fixture through the adoption-refusal contract (era stays legacy, id
+  must NOT satisfy the canonical grammar, both candidate branches
+  present). The existing `TestContractsObservationEnvelopeGolden` also
+  un-skips under the env var, so the dash-produced goldens are diffed
+  against the pinned corpus in the same job.
+
+### Found by the job on first run (upstream: teploy-cli corpus, NOT fixed here)
+
+The pinned corpus (rev 2) does not fully decode — three defects, all
+teploy-cli-side (layer rule: dash must not patch around a corpus that
+misrepresents the producer):
+
+1. `contracts/schema/server-status-envelope.schema.json` does not compile:
+   it `$ref`s `#/$defs/release`/`container`/`machineError` but defines no
+   `$defs` at all (the defs live in the app-list schema). The schema was
+   never compiled by anything before this job.
+2. `fixtures/app-list-envelope/valid/mi1.json` fails its own schema and
+   dash's decode: `previous_release.ports`, `processes`, `errors` (app and
+   root) are `null`; the real encoder initializes every one of those to an
+   empty slice (`teploy-cli/internal/cli/machine.go` collectAppList /
+   collectAppStatus, unchanged since the pre-MI era) — the golden test
+   constructed the DTO with zero values instead.
+3. `fixtures/app-list-envelope/legacy/pre-mi.json`: same zero-value class
+   (`errors: null`); real pre-MI encoders emitted `errors: []`.
+
+Remedy (teploy-cli): initialize the collections in
+`internal/cli/contracts_golden_test.go`'s fixture literals, fix the
+server-status schema's defs, regenerate, bump the MANIFEST revision table,
+and then bump `ci/contracts.pin` here in the same coordinated change. The
+dash job stays strict in the meantime — that red is the job working.
+
+Deferred with this slice: dash has no preview-state importer (previews are
+CLI-side state; dash reads apps via envelopes), so the ambiguous fixture's
+refusal is asserted at the decode/grammar seam above; when a preview
+surfacing slice lands, its importer must route era=legacy+candidates
+through explicit-binding refusal and extend
+`contracts_corpus_test.go`.
+
+## D05 bounded slice — templates as reviewed versioned packages + database-action distinction — 2026-09-23
+
+Two commits (see log): the dash side of D05's template packaging, and the
+database-action inventory. What landed, what is honestly NOT landed:
+
+### Templates (dash side of the layer rule)
+
+- `internal/templates`: the D05 manifest shape validated on dash's side —
+  semver versions, required-secrets-must-be-declared-variables, duplicate
+  names rejected, unknown additive fields tolerated (forward compat). An
+  invalid entry fails the WHOLE catalog render (502): a catalog dash
+  cannot validate is a dependency failure, not a shorter list.
+- `/api/templates` renders version_state ("unversioned" for today's
+  catalog — never an invented version), installed state (from dash's own
+  succeeded template_install records) and upgrade info (from/to/notes/
+  backup_scope from the package's own fields) when the catalog advanced.
+- Version pinning on instantiate: optional `template_version` on
+  `/api/templates/install`, enforced as admission-time equality with the
+  catalog (409 + upgrade pointer on drift; 409 pinning an unversioned
+  catalog; 502 fail-closed when unverifiable), recorded on the operation
+  request (participates in the idempotency hash).
+
+Deferred tails (dash cannot close them alone):
+
+- **CLI-side pin enforcement (TOCTOU):** between dash's admission check
+  and `teploy template install`'s registry fetch the catalog can still
+  move — dash's pin is selection-truth, not fetch-truth. The real fix is
+  a `template install --version`/digest flag in teploy-cli; until then
+  the UI states exactly what the pin guarantees.
+- **Catalog versioning itself:** the community catalog (useteploy/
+  templates index.json) carries no version/architecture/upgrade-notes
+  fields and no producer emits them; dash renders "unversioned" until the
+  CLI-first catalog bump lands (templates repo AUDIT: useteploy__templates
+  -01/-02 deferred items). Dash must not be the first mover on shape.
+- **CompareVersions prerelease ordering** is lexical, not semver
+  numeric-identifier order; documented in code, no versioned catalog
+  exists to exercise it.
+
+### Database actions (distinct operations, no pretending)
+
+- `internal/server/dbactions.go` + GET `/api/apps/{server}/{app}/db-actions`:
+  the five D05 classes (restart, version upgrade, credential rotation,
+  data restore, destructive removal) each with support status grounded in
+  the ACTUAL teploy-cli accessory surface (stop/start/logs/exec/
+  verify-backup accept --app server-state mode; upgrade/backup/restore
+  are cwd/teploy.yml-bound; no accessory restart, no credential rotation,
+  removal is app-scope only). Unsupported classes render the exact
+  remedy; none is wired to a closest-match command. Tests pin the
+  no-pretend invariants (supported ⇒ command+dash action; unsupported ⇒
+  remedy, no dash action, no confirmation) and pin the CURRENT surface
+  (all five unsupported from dash today) so a flip is deliberate.
+- Accessory stop/start in the UI got DISTINCT confirmations with their
+  own blast-radius text (stop: data connection lost; start: cold start,
+  no data change) — previously both ran with NO confirmation at all.
+
+Deferred tails (CLI-side or later slices):
+
+- The five classes' execution from dash awaits teploy-cli server-state
+  modes (accessory upgrade/backup/restore with --app, an accessory
+  restart, a rotation story, per-accessory removal). Data restore's
+  non-destructive cousin is already wired via Restore Tests
+  (`accessory verify-backup` scratch-container verification).
+- D05 remainder beyond this lane: stacks service-dependency and
+  persistent-volume consequences (D06-adjacent), worker/replica/scaling
+  and maintenance-mode surfacing, storage/networking/history tabs — the
+  full one-place resource page is the D05/D07 arc, not this slice.
+
+

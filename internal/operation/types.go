@@ -80,19 +80,28 @@ type Event struct {
 // Request is deliberately an allowlist. It cannot represent an arbitrary
 // executable or arguments.
 type Request struct {
-	Kind             Kind              `json:"kind"`
-	Server           string            `json:"server"`
-	App              string            `json:"app,omitempty"`
-	Mode             string            `json:"mode,omitempty"`
-	ManifestRevision string            `json:"manifest_revision,omitempty"`
-	Image            string            `json:"image,omitempty"`
-	Domain           string            `json:"domain,omitempty"`
-	Port             int               `json:"port,omitempty"`
-	Template         string            `json:"template,omitempty"`
-	Vars             map[string]string `json:"vars,omitempty"`
-	Action           string            `json:"action,omitempty"`
-	Purge            bool              `json:"purge,omitempty"`
-	Redirect         string            `json:"redirect,omitempty"`
+	Kind             Kind   `json:"kind"`
+	Server           string `json:"server"`
+	App              string `json:"app,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	ManifestRevision string `json:"manifest_revision,omitempty"`
+	Image            string `json:"image,omitempty"`
+	Domain           string `json:"domain,omitempty"`
+	Port             int    `json:"port,omitempty"`
+	Template         string `json:"template,omitempty"`
+	// TemplateVersion pins a template install to the catalog version the
+	// operator saw and approved (D05 reviewed versioned packages). It is
+	// dash-side admission state, NOT a CLI flag: `teploy template install`
+	// fetches the catalog's current head, so dash enforces the pin by
+	// re-checking the catalog at submit time (a catalog that moved since
+	// selection is refused until the operator re-confirms against the new
+	// version's upgrade notes). Empty on the current version-less catalog
+	// and on all pre-D05 records. Participates in the request hash.
+	TemplateVersion string            `json:"template_version,omitempty"`
+	Vars            map[string]string `json:"vars,omitempty"`
+	Action          string            `json:"action,omitempty"`
+	Purge           bool              `json:"purge,omitempty"`
+	Redirect        string            `json:"redirect,omitempty"`
 	// SourceID/SourceCommit pin a source-triggered operation to the forge
 	// delivery that admitted it (D04): SourceID names the registered
 	// source, SourceCommit is the AUTHENTICATED payload commit (the

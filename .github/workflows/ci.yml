@@ -35,3 +35,45 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+
+  # X01 5.2 job 3 (X02 ADR 4): dash CI decodes the PINNED contracts corpus.
+  # One job proves the shipped pair, not just the pin: the pinned teploy-cli
+  # revision's corpus is schema-validated (ajv, pinned in ci/package.json)
+  # and driven through dash's real decode paths (TEPLOY_CONTRACTS_DIR makes
+  # the corpus tests fail-closed rather than skip). A corpus this dash
+  # cannot decode fails the job -- never skip-as-success. The pin lives in
+  # ci/contracts.pin; the MANIFEST's revision table is the authority.
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read corpus pin
+        id: pin
+        run: |
+          cli_rev="$(awk -F= '/^cli_rev=/{print $2}' ci/contracts.pin)"
+          corpus_rev="$(awk -F= '/^corpus_rev=/{print $2}' ci/contracts.pin)"
+          [ -n "$cli_rev" ] && [ -n "$corpus_rev" ] || { echo "ci/contracts.pin is incomplete"; exit 1; }
+          echo "cli_rev=$cli_rev" >> "$GITHUB_OUTPUT"
+          echo "corpus_rev=$corpus_rev" >> "$GITHUB_OUTPUT"
+      - name: Checkout pinned teploy-cli contracts corpus
+        uses: actions/checkout@v4
+        with:
+          repository: useteploy/teploy-cli
+          ref: ${{ steps.pin.outputs.cli_rev }}
+          path: teploy-cli
+          sparse-checkout: contracts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Schema-validate the pinned corpus
+        run: |
+          cd ci
+          npm ci
+          node validate-contracts.mjs "../teploy-cli/contracts" "${{ steps.pin.outputs.corpus_rev }}"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+      - name: Decode the pinned corpus through dash's importers
+        run: go test ./internal/... -run 'TestContracts' -count=1
+        env:
+          TEPLOY_CONTRACTS_DIR: ${{ github.workspace }}/teploy-cli/contracts

@@ -325,12 +325,13 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / POST / DELETE | `/api/apps/{server}/{app}/kv` | List keys (`?pattern=`) / set (`{key,value,ttl}`) / delete (`?key=`) in the shared Nucleus KV store. `?accessory=` defaults to `nucleus`. |
 | GET | `/api/apps/{server}/{app}/kv/value` | Read one value (`?key=`; requires `reveal.secrets`). Returns `exists:false` for an unset key. |
 | GET | `/api/apps/{server}/{app}/accessories` | List accessories (DBs, queues, etc). |
+| GET | `/api/apps/{server}/{app}/db-actions` | D05 database-action inventory: restart / version-upgrade / credential-rotation / data-restore / destructive-removal, each with `supported` (from dash's server-state mode), blast radius, and — for the unsupported classes — the exact remedy. The dashboard does not wire unsupported actions to closest-match commands. |
 | GET | `/api/logs/{server}/{app}` | Live log stream (SSE; `?process=`, `?lines=`). Same-origin only. |
 | GET / POST / DELETE | `/api/config/servers` `/api/config/servers/{name}` | Manage servers via CLI. |
 | GET / POST | `/api/registries` | List / login to image registries. |
 | DELETE | `/api/registries/{server}` | Logout. |
-| GET | `/api/templates` | App catalog. |
-| POST | `/api/templates/install` | Install a template app. |
+| GET | `/api/templates` | App catalog, validated and enriched per the D05 reviewed-package shape: entries carry `version_state` (`versioned`/`unversioned` — today's catalog is unversioned and says so), and when dash has recorded an install, `installed` (`server`, `version`, `operation_id`) plus `upgrade` (`from`, `to`, `notes`, `backup_scope`) when the catalog version advanced past it. A catalog that fails validation is a 502, not a shorter list. |
+| POST | `/api/templates/install` | Install a template app. Optional `template_version` pins the install to the selected catalog version; dash re-verifies the pin against the catalog at submit and answers 409 (with the current version and upgrade pointer) if it moved. |
 | GET / POST | `/api/groups` | List / create groups. |
 | Various | `/api/groups/{name}/...` | Assign apps and projects, rename, delete. |
 | GET / POST | `/api/onboarding/preflight` | Per-server onboarding readiness envelope (`?server=<name|candidate-host>`, POST body `{"server": ...}`): checks for teploy CLI presence + version + machine interface, SSH reachability, host read, Docker, disk headroom, and Caddy state — each with `result` (`pass`/`fail`/`unknown`), `severity` (`blocking`/`warning`), detail, and an actionable remediation hint. Unknown server names and failed discovery answer a visible error envelope, never a dropped body. |

@@ -666,14 +666,50 @@
                               <span x-text="a.state"></span>
                             </td>
                             <td>
-                              <button class="btn btn-sm" @click="doAction('accessories/' + accessoryName(a.name) + '/start')">Start</button>
-                              <button class="btn btn-sm" @click="doAction('accessories/' + accessoryName(a.name) + '/stop')">Stop</button>
+                              <!-- D05: database actions are distinct operations with
+                                   distinct confirmations — stop and start each state
+                                   their own blast radius; the deeper classes (restart,
+                                   version upgrade, credential rotation, data restore,
+                                   destructive removal) render from the server's
+                                   inventory with support status + remedy, never wired
+                                   to a closest-match command. -->
+                              <button class="btn btn-sm" @click="accessoryAction(a, 'start')">Start</button>
+                              <button class="btn btn-sm" @click="accessoryAction(a, 'stop')">Stop</button>
+                              <button class="btn btn-sm" @click="toggleDbActions(a)">Db actions</button>
                             </td>
                           </tr>
                         </template>
                       </tbody>
                     </table>
                   </div>
+
+                  <!-- Database action inventory for the selected accessory -->
+                  <template x-if="dbActionsFor">
+                    <div class="table-wrap" style="padding: 16px; margin-top: 12px;">
+                      <h4 style="margin: 0 0 4px; font-size: 14px;" x-text="'Database actions - ' + accessoryName(dbActionsFor.name)"></h4>
+                      <p style="color: var(--text-muted); font-size: 13px; margin: 0 0 12px;">
+                        Each class is its own operation with its own guarantee. Unsupported means the teploy CLI cannot run it from the dashboard's server-state mode — the remedy says exactly what to run and where.
+                      </p>
+                      <div style="display: grid; gap: 10px;">
+                        <template x-for="act in dbActions" :key="act.id">
+                          <div style="border: 1px solid var(--border, #ddd); border-radius: 4px; padding: 10px 12px;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                              <strong x-text="act.label"></strong>
+                              <span style="font-size: 11px; padding: 1px 6px; border-radius: 3px;"
+                                :style="act.supported ? 'background: var(--success-bg, #d8f0d8); color: var(--success, #2a7a2a);' : 'background: var(--bg-inset, #eee); color: var(--text-muted);'"
+                                x-text="act.supported ? 'supported' : 'not available from dash'"></span>
+                            </div>
+                            <p style="margin: 6px 0 0; font-size: 13px;" x-text="act.blast_radius"></p>
+                            <p x-show="!act.supported" style="margin: 6px 0 0; font-size: 13px; color: var(--text-muted);" x-text="act.remedy"></p>
+                            <p x-show="act.supported && act.command" style="margin: 6px 0 0; font-size: 12px; font-family: var(--mono);" x-text="act.command"></p>
+                          </div>
+                        </template>
+                      </div>
+                      <div style="margin-top: 8px;">
+                        <button class="btn btn-sm" @click="dbActionsFor = null">Close</button>
+                      </div>
+                    </div>
+                  </template>
                 </div>
               </template>
             </div>
@@ -1459,6 +1495,21 @@
         <div class="table-wrap" style="padding: 20px; margin-bottom: 16px;">
           <h2 class="section-title" x-text="'Install ' + selected.name"></h2>
           <p class="subtitle" x-text="selected.description"></p>
+          <!-- D05: the version pin is truthful — it states what dash can
+               actually guarantee. A versioned catalog pins the SELECTED
+               version (re-checked at submit; a moved catalog refuses with
+               the upgrade notes). An unversioned catalog says so instead
+               of pretending a reviewed package exists. -->
+          <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 12px;" x-text="selected.version_state === 'versioned'
+            ? 'Version pin: v' + selected.version + ' (verified against the catalog when you submit)'
+            : 'This template is unversioned — the install uses the catalog\'s current revision.'"></p>
+          <template x-if="selected.upgrade">
+            <div class="table-wrap" style="padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--warning, #d08770);">
+              <p style="margin: 0; font-size: 13px;"><strong x-text="'Upgrade available: v' + selected.upgrade.from + ' -> v' + selected.upgrade.to"></strong></p>
+              <p style="margin: 4px 0 0; font-size: 13px; color: var(--text-muted);" x-text="selected.upgrade.notes || 'See the template\'s upgrade notes.'"></p>
+              <p x-show="selected.upgrade.backup_scope" style="margin: 4px 0 0; font-size: 13px; color: var(--text-muted);" x-text="'Backup before upgrading: ' + (selected.upgrade.backup_scope || '')"></p>
+            </div>
+          </template>
 
           <div class="form-row">
             <div class="form-group">
@@ -1494,8 +1545,16 @@
         <div class="card-grid">
           <template x-for="t in templates" :key="t.name">
             <div class="card" @click="selectTemplate(t)">
-              <div class="card-title" x-text="t.name"></div>
+              <div class="card-title">
+                <span x-text="t.name"></span>
+                <!-- D05: version state is rendered, never guessed — an
+                     unversioned catalog says "unversioned". -->
+                <span style="margin-left: 8px; font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--bg-inset, #eee); color: var(--text-muted);"
+                  x-text="t.version_state === 'versioned' ? 'v' + t.version : 'unversioned'"></span>
+                <span x-show="t.upgrade" style="margin-left: 4px; font-size: 11px; color: var(--warning, #d08770);" x-text="t.upgrade ? 'upgrade to v' + t.upgrade.to : ''"></span>
+              </div>
               <div class="card-meta" x-text="t.description"></div>
+              <div class="card-meta" x-show="t.installed" style="font-size: 12px;" x-text="t.installed ? ('installed on ' + t.installed.server + (t.installed.version ? ' (v' + t.installed.version + ')' : '')) : ''"></div>
             </div>
           </template>
         </div>
