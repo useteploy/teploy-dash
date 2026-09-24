@@ -20,7 +20,7 @@ function opWhen(iso) {
 
 document.addEventListener('alpine:init', () => {
   // ── Operations list ──
-  Alpine.data('operationsPage', () => ({
+  Alpine.data('operationsPage', () => withAsyncLoad({
     ops: [],
     loading: true,
     statusFilter: '',
@@ -62,8 +62,15 @@ document.addEventListener('alpine:init', () => {
         const ops = (await api.get(`/api/operations${q}`)) || [];
         if (!this._alive || generation !== this._loadGeneration || filter !== this.statusFilter) return;
         this.ops = ops;
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        if (this._alive && generation === this._loadGeneration) showToast(e.message, 'error');
+        // D07: the 3s poller keeps the last list on a failed refresh and
+        // reports it as stale; a failed first load is an error state, never
+        // the "No operations yet" empty state.
+        if (this._alive && generation === this._loadGeneration && filter === this.statusFilter) {
+          this.loadError = `Could not load operations: ${e.message}`;
+        }
       } finally {
         if (generation === this._loadGeneration) {
           this._loadingRequest = false;
@@ -81,7 +88,7 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Operation detail (live) ──
-  Alpine.data('operationDetailPage', () => ({
+  Alpine.data('operationDetailPage', () => withAsyncLoad({
     op: null,
     lines: [],
     loading: true,
@@ -92,12 +99,17 @@ document.addEventListener('alpine:init', () => {
     async init() {
       this._alive = true;
       const id = Alpine.store('router').params.id;
+      this.loading = true;
+      this.loadError = null;
       try {
         const op = await api.get(`/api/operations/${id}`);
         if (!this._alive) return; // destroyed while loading (A50)
         this.op = op;
+        this.loadedAt = new Date().toISOString();
       } catch (e) {
-        if (this._alive) showToast(e.message, 'error');
+        // D07: an unreadable operation renders an error state with a retry —
+        // the old path left the page blank below the back link (toast only).
+        if (this._alive) this.loadError = `Could not load operation ${id}: ${e.message}`;
         this.loading = false;
         return;
       }

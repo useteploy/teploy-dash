@@ -279,3 +279,92 @@ func TestRunCheck_StoreDroppedCheck_DoesNotTouchBaseline(t *testing.T) {
 		t.Fatalf("dropped check must not alert, got %d events", len(evs))
 	}
 }
+
+// D08 race (recreate): a check is in flight when its monitor is deleted and
+// RECREATED under the same ID. The store's monotonic incarnation clock means
+// the recreated monitor never reuses the deleted incarnation's number, so the
+// in-flight save cannot CAS-match it: the stale row drops, no transition
+// fires off the dead incarnation, and the recreated incarnation owns the
+// schedule and the baseline from its own first check onward.
+func TestRunCheck_RecreateDuringCheck_NoPhantomRowOrStolenBaseline(t *testing.T) {
+	ms := newCasMockStore()
+	al := &recordingAlerter{}
+	r := New(ms)
+	r.SetAlerter(al)
+
+	old := store.Monitor{ID: "m1", Name: "t", Type: "http", Target: "http://127.0.0.1:1", Interval: time.Minute, Timeout: time.Second, AllowInternal: true}
+	if err := ms.SaveMonitor(&old); err != nil {
+		t.Fatalf("save monitor: %v", err)
+	}
+	oldIncarnation := old.Incarnation
+
+	// Seed a baseline so a misbehaving stale check would fire a transition.
+	r.mu.Lock()
+	r.generations["m1"] = 1
+	r.lastStat["m1"] = "up"
+	r.mu.Unlock()
+
+	ms.blockSave = true
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.runCheck(old, 1) // scheduler of the DELETED incarnation
+	}()
+	<-ms.saveEntered
+
+	// Delete + recreate under the same ID lands mid-save. The mock's store
+	// clock mirrors the real one: the recreated incarnation is strictly
+	// greater than the deleted one's.
+	if err := ms.DeleteMonitor("m1"); err != nil {
+		t.Fatalf("delete monitor: %v", err)
+	}
+	recreated := old
+	recreated.Target = "http://127.0.0.3:1"
+	if err := ms.SaveMonitor(&recreated); err != nil {
+		t.Fatalf("recreate monitor: %v", err)
+	}
+	if recreated.Incarnation <= oldIncarnation {
+		t.Fatalf("recreated incarnation %d must exceed the deleted incarnation %d (ABA guard)", recreated.Incarnation, oldIncarnation)
+	}
+	// The runner tears the old scheduler down and starts the new one, as
+	// the delete/create API path does (Remove + startMonitor).
+	r.Remove("m1")
+	r.mu.Lock()
+	r.generations["m1"] = 2
+	r.mu.Unlock()
+
+	ms.blockSave = false
+	close(ms.saveRelease)
+	<-done
+
+	// The dead incarnation's in-flight result must not persist and must not
+	// fire a transition alert.
+	if got := ms.saved(); len(got) != 0 {
+		t.Fatalf("deleted incarnation's check must not persist, got %d rows", len(got))
+	}
+	if evs := al.sent(); len(evs) != 0 {
+		t.Fatalf("deleted incarnation's check must not alert, got %d events", len(evs))
+	}
+
+	// The recreated incarnation owns the schedule from here: its checks
+	// persist under ITS incarnation, and the baseline it writes is its own
+	// verdict — not inherited from the dead one (Remove cleared the old
+	// baseline; the mock store holds no history to re-seed from).
+	r.runCheck(recreated, 2)
+	saved := ms.saved()
+	if len(saved) != 1 {
+		t.Fatalf("recreated incarnation's check must persist, got %d rows", len(saved))
+	}
+	if saved[0].Incarnation != recreated.Incarnation {
+		t.Fatalf("persisted check carries incarnation %d, want the recreated %d", saved[0].Incarnation, recreated.Incarnation)
+	}
+	r.mu.Lock()
+	base := r.lastStat["m1"]
+	r.mu.Unlock()
+	if base != "down" {
+		t.Fatalf("baseline after recreated check = %q, want down (its own verdict)", base)
+	}
+	if evs := al.sent(); len(evs) != 0 {
+		t.Fatalf("first check of a fresh incarnation must not alert without a prior baseline, got %d events", len(evs))
+	}
+}

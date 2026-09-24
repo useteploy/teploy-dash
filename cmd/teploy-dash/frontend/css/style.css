@@ -93,6 +93,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .navbar-nav a { display: block; padding: 5px 11px; border-radius: 6px; color: var(--text-muted); font-size: 13px; text-decoration: none; white-space: nowrap; }
 .navbar-nav a:hover { background: var(--bg-card); color: var(--text); }
 .navbar-nav a.active { background: var(--bg-card); color: var(--text); }
+/* D07 IA regroup: quiet separators between destination groups — resource
+   work (Projects/Fleet/Activity), service operations, Settings. Structure,
+   not styling: same type, same colors, one rule. */
+.navbar-nav .nav-sep { align-self: center; width: 1px; height: 15px; background: var(--border); }
 .navbar-spacer { flex: 1; }
 /* Pinned service links (top-right). Icon-only: the header is chrome, so these
    read as quiet affordances, not as navigation competing with the nav items. */
@@ -257,6 +261,16 @@ tbody tr:hover { background: var(--bg-card-hover); }
 .empty-state h3 { margin-bottom: 5px; color: var(--text); font-size: 14px; font-weight: 600; }
 .empty-state p { max-width: 580px; margin: 6px auto 0; font-size: 12px; }
 .empty-state .btn { margin-top: 16px; }
+
+/* D07 misleading-states: a failed refresh keeps the earlier data on screen
+   under this banner — the data's age and the exact failure are named, so
+   last-known state never paints as fresh and never silently vanishes. */
+.stale-banner {
+  margin-bottom: 16px; padding: 8px 14px;
+  border: 1px solid var(--yellow); border-left-width: 3px; border-radius: var(--radius);
+  background: var(--bg-card); color: var(--yellow);
+  font-size: 12px; word-break: break-word;
+}
 .empty-icon { margin-bottom: 12px; opacity: .4; }
 .loading, .spinner { display: none; }
 .back-link { display: inline-flex; margin-bottom: 14px; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; text-decoration: none; }

@@ -38,14 +38,21 @@
     </div>
   </div>
   </div>
+  <!-- Primary nav (D07 IA regroup): destinations grouped by task —
+       resource work (Projects, Fleet, Activity), then service operations
+       (Monitors, Restore Tests, Templates), then Settings. Labels name the
+       task; URLs are unchanged (aliases /projects /fleet /activity also
+       deep-link here). -->
   <ul class="navbar-nav">
     <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" :aria-current="$store.router.page === 'homepage' ? 'page' : null" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
-    <li><a href="#" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" :aria-current="['projects', 'project-detail', 'app-detail'].includes($store.router.page) ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Deployments</a></li>
+    <li><a href="#" title="Groups, projects, and the apps deployed to them" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" :aria-current="['projects', 'project-detail', 'app-detail'].includes($store.router.page) ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Projects</a></li>
+    <li><a href="#" title="Every server this dash manages — health, host detail, routes" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" :aria-current="$store.router.page === 'servers' || $store.router.page === 'server-detail' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Fleet</a></li>
+    <li><a href="#" title="Operations started through dash — deploys, rollbacks, removals, with live logs" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" :aria-current="$store.router.page === 'operations' || $store.router.page === 'operation-detail' ? 'page' : null" @click.prevent="$store.router.navigate('operations')">Activity</a></li>
+    <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" :aria-current="$store.router.page === 'servers' || $store.router.page === 'server-detail' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" :aria-current="$store.router.page === 'operations' || $store.router.page === 'operation-detail' ? 'page' : null" @click.prevent="$store.router.navigate('operations')">Operations</a></li>
+    <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'settings' }" :aria-current="$store.router.page === 'settings' ? 'page' : null" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
   <div class="navbar-spacer"></div>
@@ -119,7 +126,17 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading && visibleItems.length === 0 && !editing">
+      <!-- D07: a failed load is an error state with a retry — never the
+           empty state, and never data that paints as fresh. -->
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && visibleItems.length === 0 && !editing">
         <div class="empty-state">
           <p>No shortcuts yet.</p>
           <button class="btn btn-primary" style="margin-top:12px;" @click="editing = true; openAdd()">Add your first shortcut</button>
@@ -199,7 +216,10 @@
   <template x-if="$store.router.page === 'projects'">
     <div x-data="projectsPage">
       <div class="page-header">
-        <h1 class="page-title">Deployments</h1>
+        <div>
+          <h1 class="page-title">Projects</h1>
+          <p class="subtitle">Groups organize projects; projects hold the apps you deploy.</p>
+        </div>
         <div style="display: flex; gap: 12px; align-items: center; flex: 1; max-width: 500px; margin: 0 24px;">
           <input type="text" class="search-input" placeholder="Search apps..." aria-label="Search apps" x-model="search" style="flex: 1;">
         </div>
@@ -334,13 +354,21 @@
   <!-- ═══ Project Detail Page ═══ -->
   <template x-if="$store.router.page === 'project-detail'">
     <div x-data="projectDetailPage">
-      <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Deployments</a>
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Projects</a>
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed">
         <div>
           <div class="page-header">
             <div>
@@ -443,36 +471,55 @@
         <a href="#" class="back-link" @click.prevent="$store.router.navigate('project-detail', { group: $store.router.params.fromGroup, project: $store.router.params.fromProject })">&larr; <span x-text="$store.router.params.fromProject"></span></a>
       </template>
       <template x-if="!$store.router.params.fromProject">
-        <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Deployments</a>
+        <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Projects</a>
       </template>
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
+      <template x-if="!loading && !app && loadFailed">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="reload()">Retry</button></div>
+      </template>
+
       <template x-if="!loading && app">
         <div>
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+          </template>
           <div class="page-header">
             <h1 class="page-title" x-text="app.name"></h1>
             <span class="card-meta" x-text="app.server"></span>
           </div>
 
-          <!-- Tabs -->
-          <div class="tabs">
-            <button class="tab" :class="{ active: tab === 'general' }" @click="switchTab('general')">General</button>
-            <button class="tab" :class="{ active: tab === 'env' }" @click="switchTab('env')">Environment</button>
-            <button class="tab" :class="{ active: tab === 'logs' }" @click="switchTab('logs')">Logs</button>
-            <button class="tab" :class="{ active: tab === 'deploys' }" @click="switchTab('deploys')">Deploys</button>
-            <button class="tab" :class="{ active: tab === 'kv' }" @click="switchTab('kv')">KV</button>
+          <!-- Tabs. role=tablist/tab + aria-selected give screen readers the
+               section semantics; Arrow Left/Right move between tabs (and
+               activate, matching the click path). -->
+          <div class="tabs" role="tablist" aria-label="App sections"
+               @keydown.arrow-right.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.nextElementSibling?.focus()"
+               @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
+            <button class="tab" :class="{ active: tab === 'general' }" role="tab" id="app-tab-general" aria-controls="app-panel-general" :aria-selected="(tab === 'general').toString()" :tabindex="tab === 'general' ? 0 : -1" @focus="switchTab('general')">General</button>
+            <button class="tab" :class="{ active: tab === 'env' }" role="tab" id="app-tab-env" aria-controls="app-panel-env" :aria-selected="(tab === 'env').toString()" :tabindex="tab === 'env' ? 0 : -1" @focus="switchTab('env')">Environment</button>
+            <button class="tab" :class="{ active: tab === 'logs' }" role="tab" id="app-tab-logs" aria-controls="app-panel-logs" :aria-selected="(tab === 'logs').toString()" :tabindex="tab === 'logs' ? 0 : -1" @focus="switchTab('logs')">Logs</button>
+            <button class="tab" :class="{ active: tab === 'deploys' }" role="tab" id="app-tab-deploys" aria-controls="app-panel-deploys" :aria-selected="(tab === 'deploys').toString()" :tabindex="tab === 'deploys' ? 0 : -1" @focus="switchTab('deploys')">Deploys</button>
+            <button class="tab" :class="{ active: tab === 'kv' }" role="tab" id="app-tab-kv" aria-controls="app-panel-kv" :aria-selected="(tab === 'kv').toString()" :tabindex="tab === 'kv' ? 0 : -1" @focus="switchTab('kv')">KV</button>
           </div>
 
-          <!-- General Tab -->
+          <!-- General Tab: the resource overview (D07 exemplar). One place
+               answers: what is running (release), how fresh that answer is,
+               what changed last, how to act, and how to recover. -->
           <template x-if="tab === 'general'">
-            <div>
+            <div role="tabpanel" id="app-panel-general" aria-labelledby="app-tab-general" tabindex="-1">
               <div class="status-grid">
                 <div class="status-item">
-                  <div class="status-label">Version</div>
+                  <div class="status-label">Current release</div>
                   <div class="status-value mono" x-text="app.current_hash || 'N/A'"></div>
+                  <div class="card-meta" style="margin-top:4px;" x-show="app.previous_hash" x-text="'was ' + shortHash(app.previous_hash)"></div>
+                </div>
+                <div class="status-item">
+                  <div class="status-label">Deployed</div>
+                  <div class="status-value" style="font-size: 13px;" x-text="lastChangeWhen()"></div>
+                  <div class="card-meta" style="margin-top:4px;" x-text="observedAge() ? 'observed ' + observedAge() : 'observation age unknown'"></div>
                 </div>
                 <div class="status-item">
                   <div class="status-label">Port</div>
@@ -496,7 +543,22 @@
                 </div>
               </div>
 
-              <div class="btn-group" style="margin-bottom: 24px;">
+              <!-- Partial observation errors (D07 misleading states): the
+                   status payload carries per-scope errors (e.g. container
+                   listing failed while routes read fine). They were dropped
+                   entirely — a partially-blind read painted as complete. -->
+              <template x-if="app.errors && app.errors.length > 0">
+                <div role="alert" class="stale-banner" style="margin-bottom: 20px;">
+                  <strong>Partial observation</strong> — status read at <span x-text="observedWhen()"></span> with errors:
+                  <ul style="margin: 6px 0 0 16px;">
+                    <template x-for="(err, i) in app.errors" :key="i">
+                      <li><span class="mono" style="font-size: 12px;" x-text="err.scope"></span>: <span x-text="err.message"></span></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <div class="btn-group" style="margin-bottom: 8px;">
                 <button class="btn" x-show="app.port" @click="doAction('restart')" :disabled="actionLoading">Restart</button>
                 <button class="btn" x-show="app.port" @click="doAction('stop')" :disabled="actionLoading">Stop</button>
                 <button class="btn" x-show="app.port" @click="doAction('start')" :disabled="actionLoading">Start</button>
@@ -504,6 +566,17 @@
                 <button class="btn" @click="doAction(app.locked ? 'unlock' : 'lock')" :disabled="actionLoading" x-text="app.locked ? 'Unlock' : 'Lock'"></button>
                 <button class="btn" @click="doAction(app.maintenance ? 'maintenance/off' : 'maintenance/on')" :disabled="actionLoading" x-text="app.maintenance ? 'End Maintenance' : 'Maintenance'"></button>
                 <button class="btn btn-danger" @click="removeApp()" :disabled="actionLoading">Remove</button>
+              </div>
+
+              <!-- Recovery row (D07): rollback is above; these are the
+                   non-destructive recovery paths — the change history for
+                   this app and the scheduled restore verifications that
+                   prove its backups actually restore. -->
+              <div class="card-meta" style="margin-bottom: 24px; display: flex; gap: 16px;">
+                <a href="#" @click.prevent="switchTab('deploys')" style="color: var(--accent);">Deploy history</a>
+                <a href="#" @click.prevent="switchTab('logs')" style="color: var(--accent);">Live logs</a>
+                <a href="#" @click.prevent="openRestoreTests()" style="color: var(--accent);">Restore tests</a>
+                <span>Configuration: <a href="#" @click.prevent="switchTab('env')" style="color: var(--accent);">environment</a> · <a href="#" @click.prevent="switchTab('kv')" style="color: var(--accent);">KV</a></span>
               </div>
 
               <!-- Drift: live containers vs what was deployed -->
@@ -717,7 +790,7 @@
 
           <!-- Environment Tab -->
           <template x-if="tab === 'env'">
-            <div>
+            <div role="tabpanel" id="app-panel-env" aria-labelledby="app-tab-env" tabindex="-1">
               <div class="form-row" style="margin-bottom: 16px;">
                 <div class="form-group">
                   <input class="form-input" placeholder="KEY" x-model="newEnvKey">
@@ -763,7 +836,7 @@
 
           <!-- Logs Tab -->
           <template x-if="tab === 'logs'">
-            <div x-data="logViewer" @start-logs.window="connect()">
+            <div role="tabpanel" id="app-panel-logs" aria-labelledby="app-tab-logs" tabindex="-1" x-data="logViewer" @start-logs.window="connect()">
               <div class="log-controls">
                 <label for="log-process" class="sr-only">Process name</label>
                 <input type="text" id="log-process" class="process-input" :value="process" placeholder="web"
@@ -790,7 +863,7 @@
 
           <!-- Deploys Tab -->
           <template x-if="tab === 'deploys'">
-            <div>
+            <div role="tabpanel" id="app-panel-deploys" aria-labelledby="app-tab-deploys" tabindex="-1">
               <template x-if="deployLog && deployLog.length > 0">
                 <div class="table-wrap">
                   <table>
@@ -836,7 +909,7 @@
                Note the store is one global keyspace: prefixes are convention,
                not isolation. -->
           <template x-if="tab === 'kv'">
-            <div>
+            <div role="tabpanel" id="app-panel-kv" aria-labelledby="app-tab-kv" tabindex="-1">
               <div class="form-row" style="margin-bottom: 16px;">
                 <div class="form-group">
                   <label class="form-label">Pattern</label>
@@ -942,17 +1015,31 @@
             <div class="loading"><div class="spinner"></div></div>
           </template>
 
-          <!-- Monitor List -->
+          <template x-if="!loading && loadFailed && !showingStale">
+            <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="loadMonitors()">Retry</button></div>
+          </template>
+
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+          </template>
+
+          <!-- Monitor List (also renders under a stale banner: earlier data
+               stays visible when a refresh fails — D07) -->
           <template x-if="!loading && monitors.length > 0">
             <div class="monitor-list">
               <template x-for="m in monitors" :key="m.id">
                 <div class="monitor-card" @click="selectMonitor(m.id)">
                   <div class="monitor-header">
-                    <div class="monitor-status">
-                      <span class="dot" :class="getMonitorDot(m)"></span>
-                      <span class="monitor-name" x-text="m.name"></span>
-                      <span class="monitor-type badge" x-text="m.type"></span>
-                    </div>
+                <div class="monitor-status">
+                  <span class="dot" :class="getMonitorDot(m)"></span>
+                  <span class="monitor-name" x-text="m.name"></span>
+                  <span class="monitor-type badge" x-text="m.type"></span>
+                  <!-- D08: a failing alert delivery warns at list level. -->
+                  <span class="badge" x-show="deliveryWarns(m.delivery)"
+                        style="background: transparent; border: 1px solid var(--yellow); color: var(--yellow);"
+                        :title="(m.delivery && m.delivery.last_error) || ''"
+                        x-text="deliveryLabel(m.delivery)"></span>
+                </div>
                     <div class="monitor-uptime">
                       <span class="uptime-pct" x-text="m.stats ? m.stats.uptime_percent.toFixed(1) + '%' : '--'"></span>
                       <span class="uptime-label">24h uptime</span>
@@ -969,7 +1056,7 @@
           </template>
 
           <!-- Empty State -->
-          <template x-if="!loading && monitors.length === 0">
+          <template x-if="!loading && !loadFailed && monitors.length === 0">
             <div class="empty-state">
               <div class="empty-icon">
                 <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1034,6 +1121,35 @@
               <div class="stat-card">
                 <div class="stat-value" x-text="selectedMonitor.stats.down_checks || 0"></div>
                 <div class="stat-label">Downtime Events</div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Alert delivery (D08): the durable outbox's last delivery for
+               this monitor — status, attempts, the exact last failure, and
+               the next retry. Hidden when there is nothing to say (no
+               delivery yet, or the last one landed). -->
+          <template x-if="selectedMonitor?.delivery">
+            <div class="section" style="margin-top: 4px;">
+              <h2>Alert delivery</h2>
+              <div class="table-wrap" style="padding: 12px 16px;">
+                <div style="display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;">
+                  <span class="badge"
+                        :class="selectedMonitor.delivery.status === 'delivered' ? 'green' : (selectedMonitor.delivery.status === 'dead_lettered' ? 'red' : 'yellow')"
+                        x-text="selectedMonitor.delivery.status"></span>
+                  <span x-text="'attempt ' + (selectedMonitor.delivery.attempts || 0)"></span>
+                  <span class="card-meta" style="margin: 0;"
+                        x-text="'event: ' + selectedMonitor.delivery.event_status + ' at ' + formatDate(selectedMonitor.delivery.occurred_at)"></span>
+                  <span class="card-meta" style="margin: 0;"
+                        x-show="selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at"
+                        x-text="'next retry: ' + formatDate(selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at)"></span>
+                </div>
+                <p x-show="selectedMonitor.delivery.last_error"
+                   style="margin: 10px 0 0; color: var(--red); font-size: 12px; font-family: var(--mono); word-break: break-word;"
+                   x-text="'last failure: ' + selectedMonitor.delivery.last_error"></p>
+                <p x-show="selectedMonitor.delivery.last_attempt_at"
+                   class="card-meta" style="margin: 4px 0 0;"
+                   x-text="'last attempt: ' + formatDate(selectedMonitor.delivery.last_attempt_at)"></p>
               </div>
             </div>
           </template>
@@ -1157,6 +1273,14 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="loadTests()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
       <template x-if="!loading && tests.length > 0">
         <div class="monitor-list">
           <template x-for="t in tests" :key="t.id">
@@ -1201,7 +1325,7 @@
         </div>
       </template>
 
-      <template x-if="!loading && tests.length === 0">
+      <template x-if="!loading && !loadFailed && tests.length === 0">
         <div class="empty-state">
           <h3>No restore tests yet</h3>
           <p>A restore test regularly restores an accessory's latest backup into a scratch container and verifies it's usable — so a backup that can't restore gets caught before you need it.</p>
@@ -1273,14 +1397,25 @@
   <template x-if="$store.router.page === 'servers'">
     <div x-data="serversPage">
       <div class="page-header">
-        <h1 class="page-title">Servers</h1>
+        <div>
+          <h1 class="page-title">Fleet</h1>
+          <p class="subtitle">Every server this dash manages. Unreachable hosts stay listed with their last-known state.</p>
+        </div>
       </div>
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading && (!servers || servers.length === 0)">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && (!servers || servers.length === 0)">
         <div class="empty-state"><p>No servers configured. Add servers in Settings.</p></div>
       </template>
 
@@ -1315,10 +1450,14 @@
   <!-- ═══ Server Detail Page ═══ -->
   <template x-if="$store.router.page === 'server-detail'">
     <div x-data="serverDetailPage">
-      <a href="#" class="back-link" @click.prevent="$store.router.navigate('servers')">&larr; Servers</a>
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('servers')">&larr; Fleet</a>
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && !status && loadFailed">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="reload()">Retry</button></div>
       </template>
 
       <template x-if="!loading && status">
@@ -1328,15 +1467,17 @@
             <span class="card-meta" x-text="status.host"></span>
           </div>
 
-          <!-- Tabs -->
-          <div class="tabs">
-            <button class="tab" :class="{ active: tab === 'overview' }" @click="switchTab('overview')">Overview</button>
-            <button class="tab" :class="{ active: tab === 'proxy' }" @click="switchTab('proxy')">Proxy</button>
+          <!-- Tabs (tablist semantics as on the app page). -->
+          <div class="tabs" role="tablist" aria-label="Server sections"
+               @keydown.arrow-right.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.nextElementSibling?.focus()"
+               @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
+            <button class="tab" :class="{ active: tab === 'overview' }" role="tab" id="srv-tab-overview" aria-controls="srv-panel-overview" :aria-selected="(tab === 'overview').toString()" :tabindex="tab === 'overview' ? 0 : -1" @focus="switchTab('overview')">Overview</button>
+            <button class="tab" :class="{ active: tab === 'proxy' }" role="tab" id="srv-tab-proxy" aria-controls="srv-panel-proxy" :aria-selected="(tab === 'proxy').toString()" :tabindex="tab === 'proxy' ? 0 : -1" @focus="switchTab('proxy')">Proxy</button>
           </div>
 
           <!-- Overview Tab -->
           <template x-if="tab === 'overview'">
-            <div>
+            <div role="tabpanel" id="srv-panel-overview" aria-labelledby="srv-tab-overview" tabindex="-1">
               <div class="status-grid">
                 <div class="status-item">
                   <div class="status-label">Uptime</div>
@@ -1409,7 +1550,7 @@
 
           <!-- Proxy Tab -->
           <template x-if="tab === 'proxy'">
-            <div>
+            <div role="tabpanel" id="srv-panel-proxy" aria-labelledby="srv-tab-proxy" tabindex="-1">
               <div class="status-grid" style="margin-bottom: 24px;">
                 <div class="status-item">
                   <div class="status-label">Caddy</div>
@@ -1485,7 +1626,15 @@
         <div class="loading"><div class="spinner"></div></div>
       </template>
 
-      <template x-if="!loading && (templates || []).length === 0">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && (templates || []).length === 0">
         <div class="empty-state">
           <p>No templates available. Check that teploy CLI is installed and `teploy template list` returns results.</p>
         </div>
@@ -1566,7 +1715,7 @@
   <template x-if="$store.router.page === 'operations'">
     <div x-data="operationsPage">
       <div class="page-header">
-        <div><h1 class="page-title">Operations</h1><p style="color: var(--text-muted); margin-top: 6px;">Jobs started through Dash: deploys, rollbacks, restarts, and more. Open a job for its progress and logs.</p></div>
+        <div><h1 class="page-title">Activity</h1><p style="color: var(--text-muted); margin-top: 6px;">Operations started through Dash: deploys, rollbacks, restarts, and more. Open a job for its progress and logs.</p></div>
         <div class="header-actions">
           <select class="form-input" style="width:auto;" aria-label="Filter by status" x-model="statusFilter" @change="load()">
             <option value="">All statuses</option>
@@ -1581,7 +1730,15 @@
         </div>
       </div>
 
-      <template x-if="!loading && ops.length === 0">
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && ops.length === 0">
         <div class="empty-state">
           <p>No operations yet.</p>
           <p style="color: var(--text-muted); font-size: 12px; margin-top: 6px;">
@@ -1627,7 +1784,15 @@
   <!-- ═══ Operation Detail ═══ -->
   <template x-if="$store.router.page === 'operation-detail'">
     <div x-data="operationDetailPage">
-      <a href="#" class="back-link" @click.prevent="$store.router.navigate('operations')">&larr; Operations</a>
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('operations')">&larr; Activity</a>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && !op && loadFailed">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="init()">Retry</button></div>
+      </template>
 
       <template x-if="!loading && op">
         <div>
