@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/outbox"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
@@ -273,16 +272,18 @@ func run() error {
 		return fmt.Errorf("alert outbox: %w", err)
 	}
 	mon.SetAlerter(alertOutbox)
-
-	// Load alert config for the restore runner (which keeps the direct
-	// dispatcher; routing it through the outbox is recorded D08 remainder).
+	// D08: restore-test alerts ride the same durable outbox (retries,
+	// dead-letter, restart resume, per-channel accounting) under their own
+	// source label. The outbox no-ops when no channel is configured AND the
+	// config is readable — the same condition the old direct-dispatcher
+	// wiring checked — and enqueues (failing loudly on retry) when the
+	// config is unreadable, which used to be silent.
 	// R14: an unreadable/corrupt config is loud at startup — it previously
 	// read as "not configured" and a later partial save destroyed secrets.
-	notifCfg, notifErr := server.LoadNotificationsConfig()
-	if notifErr != nil {
+	rst.SetAlerter(alertOutbox)
+	if _, notifErr := server.LoadNotificationsConfig(); notifErr != nil {
 		log.Printf("Warning: %v (alerts disabled until the config is repaired; saving from Settings is refused in this state)", notifErr)
-	} else if notifCfg.WebhookURL != "" || notifCfg.SMTPHost != "" {
-		rst.SetAlerter(alert.New(notifCfg))
+	} else {
 		log.Printf("Alerts configured")
 	}
 

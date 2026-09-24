@@ -25,7 +25,6 @@ type Runner struct {
 	store    store.Store
 	alerter  Alerter
 	client   *http.Client
-	timers   map[string]*time.Ticker
 	stopChs  map[string]chan struct{}
 	lastStat map[string]string // last known status per monitor (for transition detection)
 	// generations invalidates in-flight checks: every teardown (remove or
@@ -60,7 +59,6 @@ func New(st store.Store) *Runner {
 				return nil
 			},
 		},
-		timers:  make(map[string]*time.Ticker),
 		stopChs: make(map[string]chan struct{}),
 	}
 }
@@ -121,13 +119,9 @@ func (r *Runner) CheckNow(m store.Monitor) store.CheckResult {
 // A straggler is logged rather than silently racing the closing store.
 func (r *Runner) Stop(ctx context.Context) {
 	r.mu.Lock()
-	for id, ch := range r.stopChs {
+	for _, ch := range r.stopChs {
 		close(ch)
-		if t, ok := r.timers[id]; ok {
-			t.Stop()
-		}
 	}
-	r.timers = make(map[string]*time.Ticker)
 	r.stopChs = make(map[string]chan struct{})
 	r.mu.Unlock()
 
@@ -156,16 +150,20 @@ func (r *Runner) Reload(m store.Monitor) {
 }
 
 func (r *Runner) startMonitor(m store.Monitor) {
-	// Read the last persisted status outside the lock (the store call can be
-	// slow). Seeding it lets the first check after a restart fire a transition
-	// alert instead of silently adopting the new status with no baseline.
+	// Read the last persisted status and check time outside the lock (the
+	// store call can be slow). Seeding the status lets the first check after
+	// a restart fire a transition alert instead of silently adopting the new
+	// status with no baseline; the check time is the durable schedule
+	// anchor (D08, pass-7 A25 residual).
 	var seed string
+	var anchor time.Time
 	if r.store != nil {
 		// No time floor: the seed only establishes a baseline status, so an old
 		// timestamp is fine. A 24h window meant a monitor down longer than a day
 		// had no baseline after a restart and its recovery alert was suppressed.
 		if checks, err := r.store.GetChecks(m.ID, time.Time{}, 1); err == nil && len(checks) > 0 {
 			seed = checks[0].Status
+			anchor = checks[0].CheckedAt
 		}
 	}
 
@@ -184,10 +182,7 @@ func (r *Runner) startMonitor(m store.Monitor) {
 		interval = 10 * time.Second
 	}
 
-	ticker := time.NewTicker(interval)
 	stopCh := make(chan struct{})
-
-	r.timers[m.ID] = ticker
 	r.stopChs[m.ID] = stopCh
 
 	// R33: capture the generation THIS scheduler runs under while the
@@ -204,14 +199,38 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		// Run first check immediately
-		r.runCheck(m, generation)
-
-		for {
+		// D08 (durable next_due_at, pass-7 A25 residual): the schedule
+		// survives restarts off the PERSISTED check history, the same
+		// contract the restore runner has with LastRunAt. The first fire
+		// waits the true remainder of anchor+interval; an overdue monitor
+		// (or one with no history — newly created, or history pruned by
+		// retention) fires immediately. Restarting dash more often than the
+		// interval can no longer multiply checks. A RELOAD also derives
+		// from the anchor, so an edit keeps the cadence — instant
+		// verification stays available through the test-monitor button
+		// (CheckNow), which is unaffected.
+		if delay := initialDelay(anchor, interval, time.Now()); delay > 0 {
+			timer := time.NewTimer(delay)
 			select {
-			case <-ticker.C:
-				r.runCheck(m, generation)
+			case <-timer.C:
 			case <-stopCh:
+				timer.Stop()
+				return
+			}
+		}
+		// F035 discipline (the restore runner's fix, applied here): a
+		// resettable ONE-SHOT timer, not a Ticker. A Ticker created before
+		// the initial-delay wait is phased to scheduler start, and its
+		// buffered tick could fire a second check immediately after the
+		// first; one-shot timers recomputed after each completion also stop
+		// a slow check (timeout up to 60s) from pile-up drift.
+		for {
+			r.runCheck(m, generation)
+			timer := time.NewTimer(interval)
+			select {
+			case <-timer.C:
+			case <-stopCh:
+				timer.Stop()
 				return
 			}
 		}
@@ -224,18 +243,30 @@ func (r *Runner) stopMonitor(id string) {
 	r.teardownLocked(id)
 }
 
-// teardownLocked stops and removes a monitor's ticker + goroutine. The caller
+// teardownLocked stops and removes a monitor's scheduler goroutine. The caller
 // must hold r.mu (so startMonitor can reuse it without a non-reentrant relock).
+// The goroutine's one-shot timers are owned by the goroutine itself — closing
+// stopCh is the whole cancellation story.
 func (r *Runner) teardownLocked(id string) {
 	r.generations[id]++
 	if ch, ok := r.stopChs[id]; ok {
 		close(ch)
 		delete(r.stopChs, id)
 	}
-	if t, ok := r.timers[id]; ok {
-		t.Stop()
-		delete(r.timers, id)
+}
+
+// initialDelay returns how long a (re)started schedule waits before its first
+// check: the remainder of anchor+interval, or 0 when there is no anchor (never
+// checked, or history pruned) or the schedule is already overdue (D08, pass-7
+// A25 residual — same semantics as the restore runner's LastRunAt derivation).
+func initialDelay(anchor time.Time, interval time.Duration, now time.Time) time.Duration {
+	if anchor.IsZero() || interval <= 0 {
+		return 0
 	}
+	if due := anchor.Add(interval); due.After(now) {
+		return due.Sub(now)
+	}
+	return 0
 }
 
 // Remove stops a monitor's checker and clears its last-known status. Call this
@@ -330,6 +361,7 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 			Status:      result.Status,
 			Message:     result.Message,
 			OccurredAt:  result.CheckedAt,
+			Source:      alert.SourceMonitor,
 		})
 	}
 }

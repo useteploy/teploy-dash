@@ -289,6 +289,25 @@ type Actor struct {
 	Kind    string `json:"kind"`
 	Subject string `json:"subject,omitempty"`
 	Label   string `json:"label,omitempty"`
+	// Capabilities is the principal's effective capability set AT ADMISSION
+	// (D06 granted-at audit trail), in canonical sorted order. A snapshot,
+	// never live: narrowing an account later must not rewrite what an
+	// already-admitted operation was allowed to do. Nil on records written
+	// before the field existed (unknown) and on principals with no
+	// capability model (webhook deliveries authenticate a signature, not a
+	// capability set).
+	Capabilities []string `json:"capabilities,omitempty"`
+	// Role is the role the capabilities were derived from at admission. For
+	// SSO principals the role arrived from the identity provider's claim and
+	// maps onto the capability preset — Role + CapBasis together ARE the
+	// recorded claim-to-capability mapping (which claim-shaped input produced
+	// which granted set). Empty where no role exists (machine tokens,
+	// webhooks).
+	Role string `json:"role,omitempty"`
+	// CapBasis records HOW the granted-at set was derived: "preset" (the
+	// role's preset), "legacy" (the frozen pre-matrix profile), or "custom"
+	// (an explicit capability list). Empty = unknown (pre-field records).
+	CapBasis string `json:"cap_basis,omitempty"`
 }
 
 // NoAuthScope is the explicit idempotency principal for --no-auth installs

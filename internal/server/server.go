@@ -670,14 +670,17 @@ const bootstrapTokenTTL = 30 * time.Minute
 // caps is the LIVE capability set, rebuilt from the principal row during
 // that same revalidation (X03): like the role, it is never trusted from
 // issuance time, so profile changes and narrowing take effect immediately.
+// capBasis records how that set was derived (preset/custom/legacy — the
+// granted-at audit basis, D06).
 type sessionInfo struct {
-	sub   string
-	user  string
-	role  string
-	exp   time.Time
-	epoch uint64
-	local bool
-	caps  caps.Set
+	sub      string
+	user     string
+	role     string
+	exp      time.Time
+	epoch    uint64
+	local    bool
+	caps     caps.Set
+	capBasis string
 }
 
 type failInfo struct {
@@ -996,11 +999,11 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			if session.local {
 				if u := g.users[session.sub]; u != nil && u.AuthEpoch == session.epoch {
 					live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(u.Role), exp: session.exp, epoch: session.epoch, local: true,
-						caps: capabilitiesForProfile(u.CapabilityProfile, u.Capabilities, u.Role)}
+						caps: capabilitiesForProfile(u.CapabilityProfile, u.Capabilities, u.Role), capBasis: capBasisForProfile(u.CapabilityProfile)}
 				}
 			} else if p := g.oidcPrincipals[session.sub]; p != nil && p.AuthEpoch == session.epoch {
 				live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(p.Role), exp: session.exp, epoch: session.epoch, local: false,
-					caps: capabilitiesForProfile(p.CapabilityProfile, p.Capabilities, p.Role)}
+					caps: capabilitiesForProfile(p.CapabilityProfile, p.Capabilities, p.Role), capBasis: capBasisForProfile(p.CapabilityProfile)}
 			}
 			g.credMu.RUnlock()
 			if live == nil {
@@ -1915,6 +1918,12 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeData(w, map[string][]string{"keys": envKeysOnly(raw)})
 
+	case action == "config-authority" && r.Method == http.MethodGet:
+		// D07: which side owns this app's configuration (git-managed
+		// manifest vs dash-managed vs unregistered) + the manifest-declared
+		// env keys. Metadata: names and repo references, never values.
+		s.handleConfigAuthority(w, r, serverName, appName)
+
 	case action == "env" && r.Method == "POST":
 		if !cli.IsInstalled() {
 			writeError(w, "teploy CLI not installed")
@@ -1932,6 +1941,11 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid env var name")
 			return
 		}
+		// D07: a key declared by a git-managed manifest belongs to the
+		// repository — refuse the competing edit with the remedy.
+		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, body.Key) {
+			return
+		}
 		result, err := cli.EnvSet(r.Context(), s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value)
 		if err != nil {
 			writeError(w, err.Error())
@@ -1947,6 +1961,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(action, "env/")
 		if !validEnvKey(key) {
 			writeError(w, "invalid env var name")
+			return
+		}
+		// D07: same guard on removal.
+		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, key) {
 			return
 		}
 		result, err := cli.EnvUnset(s.serverHost(serverName), s.serverUser(serverName), appName, key)
@@ -4496,7 +4514,21 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		if tests == nil {
 			tests = []store.RestoreTest{}
 		}
-		writeJSON(w, tests)
+		// D08: like the monitors list, each row carries the outbox's last
+		// delivery state for this test's alerts (nil when it has none).
+		type testWithDelivery struct {
+			store.RestoreTest
+			Delivery *outbox.DeliveryStatus `json:"delivery,omitempty"`
+		}
+		rows := make([]testWithDelivery, 0, len(tests))
+		for _, t := range tests {
+			row := testWithDelivery{RestoreTest: t}
+			if s.outbox != nil {
+				row.Delivery = s.outbox.LatestForRestoreTest(t.ID)
+			}
+			rows = append(rows, row)
+		}
+		writeJSON(w, rows)
 
 	case "POST":
 		// A24: configuration input is a CONFIG-ONLY DTO. Result fields
@@ -4637,7 +4669,15 @@ func (s *Server) handleRestoreTest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "restore test not found", 404)
 			return
 		}
-		writeJSON(w, t)
+		resp := map[string]interface{}{"test": t}
+		// D08: the test's last alert-delivery state rides the same outbox
+		// as monitor transitions (source-scoped, per-channel).
+		if s.outbox != nil {
+			if d := s.outbox.LatestForRestoreTest(id); d != nil {
+				resp["delivery"] = d
+			}
+		}
+		writeJSON(w, resp)
 
 	case "DELETE":
 		// Stop the schedule first so a tick can't re-persist a deleted test.

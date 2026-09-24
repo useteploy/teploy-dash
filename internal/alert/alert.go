@@ -34,6 +34,15 @@ var webhookClient = &http.Client{
 	},
 }
 
+// Event sources (D08): the label on an Event naming what produced it.
+// Monitors and restore tests share one alert outbox; the label scopes
+// delivery-status lookups and lets receivers route. Empty is legacy
+// monitor events (pre-label journals decode as monitors).
+const (
+	SourceMonitor     = "monitor"
+	SourceRestoreTest = "restore-test"
+)
+
 // Config holds alerting configuration.
 type Config struct {
 	WebhookURL string `json:"webhook_url,omitempty"`
@@ -53,6 +62,27 @@ type Config struct {
 	SMTPAllowInsecure bool `json:"smtp_allow_insecure,omitempty"`
 }
 
+// Channel names for per-channel delivery accounting (D08). A Config's
+// configured channel set is exactly these, in canonical order.
+const (
+	ChannelWebhook = "webhook"
+	ChannelEmail   = "email"
+)
+
+// ConfiguredChannels lists the channels a config actually delivers through:
+// the webhook when a URL is set, email when host AND recipient are set (the
+// same predicates SendSync has always gated on — one definition, no drift).
+func ConfiguredChannels(c Config) []string {
+	var out []string
+	if c.WebhookURL != "" {
+		out = append(out, ChannelWebhook)
+	}
+	if c.SMTPHost != "" && c.EmailTo != "" {
+		out = append(out, ChannelEmail)
+	}
+	return out
+}
+
 // Event represents a monitor state change.
 type Event struct {
 	MonitorID   string    `json:"monitor_id"`
@@ -60,6 +90,15 @@ type Event struct {
 	Status      string    `json:"status"` // "down" or "up" (recovery)
 	Message     string    `json:"message"`
 	OccurredAt  time.Time `json:"occurred_at"`
+	// Source labels what produced the event — "monitor" or "restore-test"
+	// (D08: both ride the alert outbox; the label scopes delivery-status
+	// lookups and lets receivers route). Empty is legacy monitor events.
+	Source string `json:"source,omitempty"`
+	// DeliveryID is the outbox's idempotency key for this delivery (D08:
+	// per-channel accounting). Empty on direct (non-outbox) sends; when set
+	// it travels in the webhook payload and as an email header so a receiver
+	// can dedupe the at-least-once redelivery the outbox permits.
+	DeliveryID string `json:"delivery_id,omitempty"`
 }
 
 // Dispatcher sends alerts via configured channels.
@@ -92,17 +131,33 @@ func (d *Dispatcher) Send(event Event) {
 // acknowledged the delivery.
 func (d *Dispatcher) SendSync(event Event) error {
 	var errs []error
-	if d.config.WebhookURL != "" {
-		if err := d.sendWebhook(event); err != nil {
-			errs = append(errs, fmt.Errorf("webhook: %w", err))
-		}
-	}
-	if d.config.SMTPHost != "" && d.config.EmailTo != "" {
-		if err := d.sendEmail(event); err != nil {
-			errs = append(errs, fmt.Errorf("email: %w", err))
+	for _, channel := range ConfiguredChannels(d.config) {
+		if err := d.SendChannel(event, channel); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", channel, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// SendChannel delivers through exactly one named channel (D08 per-channel
+// accounting: the outbox retries only the channels that failed, so a webhook
+// that acknowledged is never re-sent because the email leg failed). An
+// unknown or unconfigured channel name is an error, never a silent skip.
+func (d *Dispatcher) SendChannel(event Event, channel string) error {
+	switch channel {
+	case ChannelWebhook:
+		if d.config.WebhookURL == "" {
+			return errors.New("webhook channel is not configured")
+		}
+		return d.sendWebhook(event)
+	case ChannelEmail:
+		if d.config.SMTPHost == "" || d.config.EmailTo == "" {
+			return errors.New("email channel is not configured")
+		}
+		return d.sendEmail(event)
+	default:
+		return fmt.Errorf("unknown alert channel %q", channel)
+	}
 }
 
 // Webhook deliveries carry the same signature every teploy product sends:
@@ -171,14 +226,20 @@ func (d *Dispatcher) sendEmail(event Event) error {
 // from and to are sanitized (CR/LF stripped) before being placed in headers so
 // a configured email_from/email_to can't inject additional SMTP headers
 // (e.g. an unwanted Bcc). Subject values are sanitized for the same reason.
+// The delivery id (when the outbox set one) rides as X-Teploy-Delivery-Id so
+// receivers can dedupe at-least-once redelivery (D08).
 func buildEmailMessage(from, to string, event Event) string {
 	subject := fmt.Sprintf("[teploy] %s is %s",
 		sanitizeHeader(event.MonitorName), sanitizeHeader(event.Status))
 	body := fmt.Sprintf("Monitor: %s\nStatus: %s\nMessage: %s\nTime: %s",
 		event.MonitorName, event.Status, event.Message, event.OccurredAt.Format(time.RFC3339))
 
-	return fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
-		sanitizeHeader(from), sanitizeHeader(to), subject, body)
+	headers := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n",
+		sanitizeHeader(from), sanitizeHeader(to), subject)
+	if event.DeliveryID != "" {
+		headers += fmt.Sprintf("X-Teploy-Delivery-Id: %s\r\n", sanitizeHeader(event.DeliveryID))
+	}
+	return headers + "\r\n" + body
 }
 
 // sendMailTimeout is a deadline-bounded replacement for smtp.SendMail so a hung

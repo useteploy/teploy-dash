@@ -22,6 +22,14 @@ import (
 	"github.com/useteploy/teploy-dash/internal/store"
 )
 
+// Alerter is what the runner notifies with fail/recover verdicts. *alert.Dispatcher
+// satisfies it directly (fire-and-forget); the alert outbox satisfies it with
+// durable delivery (D08 — restore verdicts ride the same outbox as monitor
+// transitions, with their own source label for scoped delivery status).
+type Alerter interface {
+	Send(alert.Event)
+}
+
 // VerifyResult mirrors the CLI's --json output for `accessory verify-backup`.
 type VerifyResult struct {
 	App        string `json:"app"`
@@ -47,7 +55,7 @@ type runCLIFunc func(server, user, app, accessory, bucket, region string) (stdou
 // Runner manages restore tests and runs them on their intervals.
 type Runner struct {
 	store   store.Store
-	alerter *alert.Dispatcher
+	alerter Alerter
 	// resolveTarget resolves a server ALIAS to one registered host/user
 	// snapshot, FAILING when the alias is unknown or discovery is broken
 	// (R01). It replaces the old host/user callbacks, whose silent
@@ -101,8 +109,9 @@ func New(st store.Store) *Runner {
 	}
 }
 
-// SetAlerter configures the alert dispatcher for fail/recover notifications.
-func (r *Runner) SetAlerter(d *alert.Dispatcher) {
+// SetAlerter configures the fail/recover notifier (a dispatcher for direct
+// best-effort delivery, or the durable alert outbox — D08).
+func (r *Runner) SetAlerter(d Alerter) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.alerter = d
@@ -424,6 +433,9 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 
 	if alerter != nil {
 		name := fmt.Sprintf("restore-test %s/%s on %s", t.App, t.Accessory, t.Server)
+		// The restore-test source label scopes the outbox's delivery-status
+		// lookups (a restore verdict must never answer for a monitor) and
+		// tells receivers what kind of alert landed (D08).
 		if !t.LastOK {
 			alerter.Send(alert.Event{
 				MonitorID:   t.ID,
@@ -431,6 +443,7 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 				Status:      "down",
 				Message:     t.LastDetail,
 				OccurredAt:  t.LastRunAt,
+				Source:      alert.SourceRestoreTest,
 			})
 		} else if hadPrev && !prev {
 			alerter.Send(alert.Event{
@@ -439,6 +452,7 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 				Status:      "up",
 				Message:     fmt.Sprintf("backup %s verified (%s)", t.LastDate, t.LastMetric),
 				OccurredAt:  t.LastRunAt,
+				Source:      alert.SourceRestoreTest,
 			})
 		}
 	}

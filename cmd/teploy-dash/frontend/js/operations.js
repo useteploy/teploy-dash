@@ -199,6 +199,18 @@ document.addEventListener('alpine:init', () => {
     terminal() {
       return ['succeeded', 'failed', 'canceled', 'interrupted'].includes(this.op?.status);
     },
+    // D06 granted-at audit trail: who admitted this work and the derivation
+    // of the grant they were operating under (role + basis; the full set is
+    // the card's hover title).
+    actorLabel(op) {
+      const a = op?.actor;
+      if (!a) return 'unknown';
+      const who = a.label || a.subject || a.kind;
+      const basis = a.cap_basis
+        ? ` (${a.kind}${a.role ? ` · ${a.cap_basis} ${a.role}` : ` · ${a.cap_basis}`})`
+        : '';
+      return who + basis;
+    },
     cancelable() {
       // cancel_requested is transitional: the durable intent is already
       // recorded, so offer no second button (A09).

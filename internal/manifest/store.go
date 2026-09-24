@@ -341,6 +341,45 @@ const (
 	maxRegisteredRevisions = 128
 )
 
+// EnvKeys returns the environment variable names declared by a manifest's
+// root `env:` mapping (the CLI's teploy.yml schema: a flat string map at
+// the app level), sorted. Anything else — no env key, a non-mapping env
+// value, or unparseable YAML — answers nil: "nothing we can stand behind"
+// rather than a guessed set (D07 authority indicators consume this; an
+// empty answer renders every live key as local rather than mislabeling
+// source-owned settings as dash-side).
+func EnvKeys(content []byte) []string {
+	var document yaml.Node
+	if err := yaml.NewDecoder(strings.NewReader(string(content))).Decode(&document); err != nil {
+		return nil
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	root := document.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "env" {
+			continue
+		}
+		envNode := root.Content[i+1]
+		if envNode.Kind == yaml.AliasNode {
+			envNode = envNode.Alias
+		}
+		if envNode == nil || envNode.Kind != yaml.MappingNode {
+			return nil
+		}
+		keys := make([]string, 0, len(envNode.Content)/2)
+		for j := 0; j+1 < len(envNode.Content); j += 2 {
+			if envNode.Content[j].Kind == yaml.ScalarNode && envNode.Content[j].Value != "" {
+				keys = append(keys, envNode.Content[j].Value)
+			}
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	return nil
+}
+
 func Validate(content []byte, app string) error {
 	if len(content) == 0 {
 		return fmt.Errorf("manifest is required")

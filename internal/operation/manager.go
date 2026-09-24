@@ -1638,6 +1638,9 @@ func cloneActor(actor *Actor) *Actor {
 		return nil
 	}
 	snapshot := *actor
+	if actor.Capabilities != nil {
+		snapshot.Capabilities = append([]string(nil), actor.Capabilities...)
+	}
 	return &snapshot
 }
 
