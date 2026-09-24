@@ -483,5 +483,7 @@ teploy-dash (Go, ~17MB)  --- session-cookie auth middleware
 
 ## License
 
-AGPL-3.0-or-later. See `LICENSE`. The embedded `frontend/js/alpine.js`
+FSL-1.1-MIT (Functional Source License) — any use is permitted except
+offering a competing product, and each version automatically becomes MIT two
+years after its release. See `LICENSE`. The embedded `frontend/js/alpine.js`
 is Alpine.js, MIT-licensed and used unmodified.
