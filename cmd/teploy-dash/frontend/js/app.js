@@ -818,6 +818,12 @@ document.addEventListener('alpine:init', () => {
     resource: null,
     app: null,
     envVars: [],
+    // D07 config authority: which side owns this app's configuration
+    // (git-managed manifest / dash-managed manifest / null = unregistered or
+    // unknown). Drives the env tab's authority banner, the per-key
+    // inherited-vs-local badges, and the read-only treatment of
+    // source-owned keys.
+    configAuthority: null,
     deployLog: [],
     accessories: [],
     // D05 database-action inventory state: dbActions holds the server's
@@ -895,6 +901,7 @@ document.addEventListener('alpine:init', () => {
       this.tab = 'general';
       this.app = null;
       this.envVars = [];
+      this.configAuthority = null;
       this.deployLog = [];
       this.accessories = [];
       this.drift = null;
@@ -932,7 +939,38 @@ document.addEventListener('alpine:init', () => {
       // parallel with each other so neither delays the view.
       this.loadDrift();
       this.loadStats();
+      this.loadConfigAuthority();
     },
+
+    // D07: which side owns this app's configuration. A manifest read is a
+    // local file read (no SSH); a failure degrades to "unknown" — the env
+    // tab then shows no indicators and the SERVER guard still refuses
+    // source-owned edits explicitly, so a degraded read can only cost the
+    // chrome, never create a competing edit.
+    async loadConfigAuthority() {
+      const target = this.resource;
+      try {
+        const value = await api.get(`${this.appPath()}/config-authority`);
+        if (this.resource !== target) return; // F058
+        this.configAuthority = value || null;
+      } catch {
+        if (this.resource === target) this.configAuthority = null;
+      }
+    },
+
+    // The authority answer, null when unknown/unregistered.
+    authority() { return this.configAuthority && this.configAuthority.registered ? this.configAuthority : null; },
+
+    // Declared-key lookup against the loaded authority.
+    declaredKeys() {
+      const a = this.authority();
+      return a && Array.isArray(a.declared_env_keys) ? a.declared_env_keys : [];
+    },
+
+    envKeySource(key) { return this.declaredKeys().includes(key) ? 'manifest' : 'local'; },
+
+    // Git-managed authority: declared keys are owned by the repository.
+    gitManaged() { const a = this.authority(); return !!a && a.mode === 'git-managed'; },
 
     // Resource usage per container. Like drift, a failure here (older bundled
     // CLI without `stats --app`) hides the panel rather than breaking the page.
@@ -1250,6 +1288,13 @@ document.addEventListener('alpine:init', () => {
 
     async addEnvVar() {
       if (!this.newEnvKey) return;
+      // D07: a declared key under git-managed authority belongs to the
+      // repository — the affordance must send the operator to the source,
+      // never fire an edit the server would (rightly) refuse as competing.
+      if (this.gitManaged() && this.envKeySource(this.newEnvKey) === 'manifest') {
+        showToast(`${this.newEnvKey} is declared in the git-managed manifest — change it at the source`, 'error');
+        return;
+      }
       try {
         await api.post(`${this.appPath()}/env`, { key: this.newEnvKey, value: this.newEnvValue });
         showToast('Env var added', 'success');
@@ -1262,6 +1307,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteEnvVar(key) {
+      if (this.gitManaged() && this.envKeySource(key) === 'manifest') return; // read-only: source-owned
       if (!confirm(`Delete ${key}?`)) return;
       try {
         await api.del(`${this.appPath()}/env/${key}`);

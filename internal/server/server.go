@@ -1918,6 +1918,12 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeData(w, map[string][]string{"keys": envKeysOnly(raw)})
 
+	case action == "config-authority" && r.Method == http.MethodGet:
+		// D07: which side owns this app's configuration (git-managed
+		// manifest vs dash-managed vs unregistered) + the manifest-declared
+		// env keys. Metadata: names and repo references, never values.
+		s.handleConfigAuthority(w, r, serverName, appName)
+
 	case action == "env" && r.Method == "POST":
 		if !cli.IsInstalled() {
 			writeError(w, "teploy CLI not installed")
@@ -1935,6 +1941,11 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid env var name")
 			return
 		}
+		// D07: a key declared by a git-managed manifest belongs to the
+		// repository — refuse the competing edit with the remedy.
+		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, body.Key) {
+			return
+		}
 		result, err := cli.EnvSet(r.Context(), s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value)
 		if err != nil {
 			writeError(w, err.Error())
@@ -1950,6 +1961,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(action, "env/")
 		if !validEnvKey(key) {
 			writeError(w, "invalid env var name")
+			return
+		}
+		// D07: same guard on removal.
+		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, key) {
 			return
 		}
 		result, err := cli.EnvUnset(s.serverHost(serverName), s.serverUser(serverName), appName, key)

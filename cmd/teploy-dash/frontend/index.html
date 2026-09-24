@@ -541,6 +541,17 @@
                   <div class="status-label">Domain</div>
                   <div class="status-value mono" x-text="app.domain || 'N/A'"></div>
                 </div>
+                <!-- D07 authority indicator: which side owns the
+                     configuration. -->
+                <div class="status-item">
+                  <div class="status-label">Configuration</div>
+                  <div class="status-value" style="font-size: 13px;">
+                    <a href="#" @click.prevent="switchTab('env')" style="color: var(--accent);"
+                       x-text="authority() ? (authority().mode === 'git-managed' ? 'Git-managed' : 'Dash-managed') : 'Not registered'"></a>
+                  </div>
+                  <div class="card-meta" style="margin-top:4px;" x-show="authority() && authority().mode === 'git-managed'"
+                       x-text="authority() && authority().git ? (authority().git.repository || '') + (authority().git.manifest_path ? ' — ' + authority().git.manifest_path : '') : ''"></div>
+                </div>
               </div>
 
               <!-- Partial observation errors (D07 misleading states): the
@@ -791,14 +802,37 @@
           <!-- Environment Tab -->
           <template x-if="tab === 'env'">
             <div role="tabpanel" id="app-panel-env" aria-labelledby="app-tab-env" tabindex="-1">
+
+              <!-- D07 authority indicator: which side owns this app's
+                   configuration. Git-managed = the repository is the source
+                   of truth (dash holds a pinned revision); the affordance
+                   is "create a source change", never a silent competing
+                   edit. -->
+              <template x-if="authority() && authority().mode === 'git-managed'">
+                <div class="stale-banner" style="margin-bottom: 16px;">
+                  <strong>Configuration is managed in Git</strong> —
+                  <span x-text="(authority().git && authority().git.repository) || 'the source repository'"></span>
+                  <span x-show="authority().git && authority().git.manifest_path" x-text="' at ' + ((authority().git && authority().git.manifest_path) || '')"></span>.
+                  Keys declared there are read-only here; change them at the source.
+                  <a x-show="authority().repository_url" :href="authority().repository_url" target="_blank" rel="noreferrer noopener" style="color: var(--accent); margin-left: 6px;">Create a source change</a>
+                </div>
+              </template>
+              <template x-if="authority() && authority().mode === 'dash-managed'">
+                <div class="card-meta" style="margin-bottom: 16px;">
+                  Configuration is owned by the dash manifest (keys it declares show a "from manifest" badge; edit them in the manifest to stay in sync).
+                </div>
+              </template>
+
               <div class="form-row" style="margin-bottom: 16px;">
                 <div class="form-group">
-                  <input class="form-input" placeholder="KEY" x-model="newEnvKey">
+                  <input class="form-input" placeholder="KEY" x-model="newEnvKey" aria-label="Environment variable name">
                 </div>
                 <div class="form-group">
-                  <input class="form-input" placeholder="value" x-model="newEnvValue">
+                  <input class="form-input" placeholder="value" x-model="newEnvValue" aria-label="Environment variable value">
                 </div>
-                <button class="btn btn-primary" @click="addEnvVar" >Add</button>
+                <button class="btn btn-primary" @click="addEnvVar"
+                        :disabled="gitManaged() && envKeySource(newEnvKey) === 'manifest'"
+                        :title="gitManaged() && envKeySource(newEnvKey) === 'manifest' ? 'Declared in the git-managed manifest — change it at the source' : ''">Add</button>
               </div>
 
               <template x-if="envVars && envVars.length > 0">
@@ -814,12 +848,26 @@
                     <tbody>
                       <template x-for="v in envVars" :key="v.key">
                         <tr>
-                          <td style="font-family: var(--mono); font-size: 12px;" x-text="v.key"></td>
+                          <td style="font-family: var(--mono); font-size: 12px;">
+                            <span x-text="v.key"></span>
+                            <!-- D07 inherited-vs-local: keys the (registered)
+                                 manifest declares are inherited from the
+                                 config source; the rest are set locally. -->
+                            <template x-if="authority()">
+                              <span class="badge" style="margin-left: 6px; font-size: 10px; opacity: 0.85;"
+                                    :style="envKeySource(v.key) === 'manifest' ? 'background:var(--accent, #0969da);color:#fff;' : ''"
+                                    :title="envKeySource(v.key) === 'manifest' ? 'Declared in the registered manifest' : 'Set outside the manifest'"
+                                    x-text="envKeySource(v.key) === 'manifest' ? 'from manifest' : 'local'"></span>
+                            </template>
+                          </td>
                           <td>
                             <span x-data="{ show: false }" style="font-family: var(--mono); font-size: 12px;" :style="v.restricted ? '' : 'cursor: pointer;'" @click="v.restricted || (show = !show)" x-text="v.restricted ? '(restricted)' : (show ? v.value : '--------')" title="v.restricted ? 'Values require the reveal.secrets capability' : ''"></span>
                           </td>
                           <td>
-                            <button class="btn btn-sm btn-danger" @click="deleteEnvVar(v.key)">Remove</button>
+                            <!-- Git-managed declared keys render read-only:
+                                 no Remove, the source owns them. -->
+                            <button x-show="!(gitManaged() && envKeySource(v.key) === 'manifest')" class="btn btn-sm btn-danger" @click="deleteEnvVar(v.key)">Remove</button>
+                            <span x-show="gitManaged() && envKeySource(v.key) === 'manifest'" class="card-meta" style="font-size: 11px;">in source</span>
                           </td>
                         </tr>
                       </template>
