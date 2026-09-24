@@ -1320,6 +1320,13 @@
               <div class="monitor-meta" x-show="!t.last_ok && t.last_detail">
                 <span class="check-msg" x-text="t.last_detail"></span>
               </div>
+              <!-- D08: a failing alert delivery for this test's verdict warns
+                   at card level, exactly like the monitors list. -->
+              <div class="monitor-meta" x-show="deliveryWarns(t.delivery)">
+                <span class="badge" style="background:var(--red, #cf222e);color:#fff;opacity:0.9"
+                      :title="(t.delivery && t.delivery.last_error) || ''"
+                      x-text="deliveryLabel(t.delivery)"></span>
+              </div>
             </div>
           </template>
         </div>

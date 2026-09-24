@@ -93,3 +93,43 @@ func TestMonitorListExposesDeliveryStatus(t *testing.T) {
 		t.Fatalf("pending delivery not visible in list: %s", w.Body.String())
 	}
 }
+
+// D08: restore tests ride the same outbox under their own source label —
+// the list and detail responses carry the delivery state, and a restore
+// record never leaks into a monitor's (or vice versa, same id).
+func TestRestoreTestsExposeDeliveryStatus(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	rt := store.RestoreTest{ID: "rt1", Server: "srv", App: "web", Accessory: "db", Bucket: "b", Region: "us-east-1", IntervalHours: 24, Enabled: true}
+	if err := st.SaveRestoreTest(rt); err != nil {
+		t.Fatal(err)
+	}
+	ob, err := outbox.New(t.TempDir(), outbox.Options{
+		ConfigFn: func() (alert.Config, error) { return alert.Config{WebhookURL: "http://configured.example/"}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ob.Stop(context.Background())
+	// A pending restore-verdict delivery (worker not started).
+	ob.Send(alert.Event{MonitorID: "rt1", MonitorName: "restore-test web/db on srv", Status: "down", Message: "verify-backup did not complete", OccurredAt: time.Now(), Source: alert.SourceRestoreTest})
+
+	s := &Server{store: st, outbox: ob}
+	w := httptest.NewRecorder()
+	s.handleRestoreTests(w, httptest.NewRequest("GET", "/api/restore-tests", nil))
+	if w.Code != 200 {
+		t.Fatalf("list restore tests: %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"delivery"`) || !strings.Contains(body, `"pending"`) {
+		t.Fatalf("restore-test delivery not visible in list: %s", body)
+	}
+
+	w2 := httptest.NewRecorder()
+	s.handleRestoreTest(w2, httptest.NewRequest("GET", "/api/restore-tests/rt1", nil))
+	if w2.Code != 200 {
+		t.Fatalf("get restore test: %d", w2.Code)
+	}
+	if !strings.Contains(w2.Body.String(), `"delivery"`) {
+		t.Fatalf("restore-test delivery not visible in detail: %s", w2.Body.String())
+	}
+}

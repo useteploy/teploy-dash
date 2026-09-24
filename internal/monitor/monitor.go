@@ -361,6 +361,7 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 			Status:      result.Status,
 			Message:     result.Message,
 			OccurredAt:  result.CheckedAt,
+			Source:      alert.SourceMonitor,
 		})
 	}
 }

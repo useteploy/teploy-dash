@@ -1,14 +1,14 @@
 // Package outbox provides durable alert delivery for monitor state
-// transitions (D08): attempts persist in an append-only journal, failures
-// retry with exponential backoff up to a bounded attempt count, exhausted
-// records dead-letter, and the last failure is visible per monitor. A
-// restart resumes PENDING deliveries and never re-sends delivered ones
-// (delivery-id dedupe against the journal).
+// transitions and restore-test verdicts (D08): attempts persist in an
+// append-only journal, failures retry with exponential backoff up to a
+// bounded attempt count, exhausted records dead-letter, and the last
+// failure is visible per channel. A restart resumes PENDING deliveries and
+// never re-sends delivered ones (delivery-id dedupe against the journal).
 //
-// Semantics are at-least-once per channel attempt: a webhook that succeeded
-// before an email failure is re-sent on retry. Receivers already need
-// idempotent handling of at-least-once delivery; the delivery id is the
-// dedupe key they can use once exposed in payloads (recorded as remainder).
+// Delivery is accounted PER CHANNEL: a webhook that acknowledged before an
+// email failure is not re-sent on retry. Payloads carry the delivery id
+// (webhook JSON field, X-Teploy-Delivery-Id email header) so receivers can
+// dedupe the at-least-once redelivery a crash mid-attempt still permits.
 package outbox
 
 import (
@@ -32,17 +32,44 @@ import (
 
 const journalName = "alert-outbox.jsonl"
 
-// Status of a delivery record.
+// Status of a delivery record (and of one channel leg inside it).
 const (
 	StatusPending      = "pending"
 	StatusDelivered    = "delivered"
 	StatusDeadLettered = "dead_lettered"
 )
 
+// Event sources sharing one outbox (D08): the label scopes delivery-status
+// lookups so a restore test's record never answers for a monitor (and vice
+// versa). Empty on records/events from before the label existed — read as
+// monitor. Canonical values live in the alert package (they are part of the
+// Event contract); these aliases keep call sites local.
+const (
+	SourceMonitor     = alert.SourceMonitor
+	SourceRestoreTest = alert.SourceRestoreTest
+)
+
 // Sender delivers one event synchronously; a nil error means every
 // configured channel acknowledged it. *alert.Dispatcher satisfies it.
 type Sender interface {
 	SendSync(alert.Event) error
+}
+
+// ChannelSender delivers one event through exactly one named channel
+// (D08 per-channel accounting): the outbox retries only the legs that
+// failed. *alert.Dispatcher satisfies it; a plain Sender falls back to
+// whole-record attempts (legacy semantics — every configured channel
+// re-sent per retry).
+type ChannelSender interface {
+	SendChannel(event alert.Event, channel string) error
+}
+
+// ChannelRecord is one channel leg's delivery ledger entry.
+type ChannelRecord struct {
+	Status        string    `json:"status"` // pending | delivered | dead_lettered
+	Attempts      int       `json:"attempts"`
+	LastError     string    `json:"last_error,omitempty"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
 }
 
 // Record is one durable delivery attempt chain, journal-snake-shot on every
@@ -57,18 +84,32 @@ type Record struct {
 	LastError     string      `json:"last_error,omitempty"`
 	LastAttemptAt time.Time   `json:"last_attempt_at,omitempty"`
 	CreatedAt     time.Time   `json:"created_at"`
+	// Channels is the per-channel ledger (D08). Nil on records written
+	// before per-channel accounting landed: those replay with record-level
+	// semantics (each retry re-sends every configured channel), and once
+	// such a record delivers it stays delivered exactly as before.
+	Channels map[string]ChannelRecord `json:"channels,omitempty"`
 }
 
-// DeliveryStatus is the read-only view exposed on the monitor API.
-type DeliveryStatus struct {
-	ID            string    `json:"id"`
+// ChannelStatus is the read-only view of one channel leg.
+type ChannelStatus struct {
 	Status        string    `json:"status"`
 	Attempts      int       `json:"attempts"`
 	LastError     string    `json:"last_error,omitempty"`
 	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
-	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
-	EventStatus   string    `json:"event_status"`
-	OccurredAt    time.Time `json:"occurred_at"`
+}
+
+// DeliveryStatus is the read-only view exposed on the monitor API.
+type DeliveryStatus struct {
+	ID            string                   `json:"id"`
+	Status        string                   `json:"status"`
+	Attempts      int                      `json:"attempts"`
+	LastError     string                   `json:"last_error,omitempty"`
+	LastAttemptAt time.Time                `json:"last_attempt_at,omitempty"`
+	NextAttemptAt time.Time                `json:"next_attempt_at,omitempty"`
+	EventStatus   string                   `json:"event_status"`
+	OccurredAt    time.Time                `json:"occurred_at"`
+	Channels      map[string]ChannelStatus `json:"channels,omitempty"`
 }
 
 // Options configures an Outbox. Zero fields take the documented defaults.
@@ -320,18 +361,47 @@ func (o *Outbox) deliverDue() {
 // attempt delivers one due record and persists the outcome. The snapshot is
 // re-checked under the lock: a terminal transition that landed between the
 // due-scan and here wins.
+//
+// Per-channel accounting (D08): when the sender can deliver one channel at
+// a time, each configured leg gets its own verdict and a retry re-sends
+// only legs that have not acknowledged. A channel removed from the config
+// stops counting toward delivery (it can never acknowledge); its ledger
+// entry stays for audit. A channel ADDED after enqueue joins the pending
+// set — the config is re-read every attempt by design.
 func (o *Outbox) attempt(snap *Record) {
+	type channelOutcome struct {
+		channel string
+		err     error
+	}
+	var outcomes []channelOutcome
 	var deliveryErr error
+
 	cfg, cfgErr := o.currentConfig()
-	switch {
-	case cfgErr != nil:
+	if cfgErr != nil {
 		deliveryErr = fmt.Errorf("config: %w", cfgErr)
-	default:
+	} else {
 		sender := o.opts.Sender
 		if sender == nil {
 			sender = alert.New(cfg)
 		}
-		deliveryErr = sender.SendSync(snap.Event)
+		if cs, ok := sender.(ChannelSender); ok {
+			// snap.Channels nil (a pre-accounting record still pending after
+			// an upgrade): every configured leg is undelivered, so this
+			// round re-sends them all — exactly what a legacy retry did —
+			// and the ledger built here makes FUTURE retries per-channel.
+			for _, channel := range alert.ConfiguredChannels(cfg) {
+				if snap.Channels[channel].Status == StatusDelivered {
+					continue // this leg already acknowledged
+				}
+				ev := snap.Event
+				ev.DeliveryID = snap.ID
+				outcomes = append(outcomes, channelOutcome{channel, cs.SendChannel(ev, channel)})
+			}
+		} else {
+			ev := snap.Event
+			ev.DeliveryID = snap.ID
+			deliveryErr = sender.SendSync(ev)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -343,23 +413,87 @@ func (o *Outbox) attempt(snap *Record) {
 	}
 	rec.Attempts++
 	rec.LastAttemptAt = now
-	if deliveryErr == nil {
-		rec.Status = StatusDelivered
-		rec.LastError = ""
-		rec.NextAttemptAt = time.Time{}
-	} else {
-		rec.LastError = deliveryErr.Error()
-		if rec.Attempts >= o.opts.MaxAttempts {
-			rec.Status = StatusDeadLettered
-			rec.NextAttemptAt = time.Time{}
+	if len(outcomes) > 0 && rec.Channels == nil {
+		rec.Channels = make(map[string]ChannelRecord)
+	}
+	for _, out := range outcomes {
+		st := rec.Channels[out.channel] // zero value = pending
+		st.Attempts++
+		st.LastAttemptAt = now
+		if out.err == nil {
+			st.Status = StatusDelivered
+			st.LastError = ""
 		} else {
-			rec.NextAttemptAt = now.Add(o.backoff(rec.Attempts))
+			st.Status = StatusPending
+			st.LastError = out.err.Error()
 		}
+		rec.Channels[out.channel] = st
+	}
+
+	switch {
+	case cfgErr != nil:
+		rec.LastError = deliveryErr.Error()
+	case rec.Channels != nil:
+		// Record-level error = the first failing leg this round (stable order).
+		pending := 0
+		var firstErr string
+		for _, channel := range alert.ConfiguredChannels(cfg) {
+			st := rec.Channels[channel]
+			if st.Status != StatusDelivered {
+				pending++
+				if firstErr == "" {
+					firstErr = channel + ": " + st.LastError
+				}
+			}
+		}
+		if pending == 0 {
+			rec.Status = StatusDelivered
+			rec.LastError = ""
+			rec.NextAttemptAt = time.Time{}
+			snapshot := *rec
+			o.mu.Unlock()
+			o.persistQuiet(&snapshot)
+			return
+		}
+		rec.LastError = firstErr
+	default:
+		if deliveryErr == nil {
+			rec.Status = StatusDelivered
+			rec.LastError = ""
+			rec.NextAttemptAt = time.Time{}
+			snapshot := *rec
+			o.mu.Unlock()
+			o.persistQuiet(&snapshot)
+			return
+		}
+		rec.LastError = deliveryErr.Error()
+	}
+
+	if rec.Attempts >= o.opts.MaxAttempts {
+		// Exhausted: dead-letter the record and every still-pending leg
+		// (delivered legs keep their delivered state — that history is the
+		// audit answer to "who was actually told?").
+		rec.Status = StatusDeadLettered
+		rec.NextAttemptAt = time.Time{}
+		for channel, st := range rec.Channels {
+			if st.Status == StatusPending {
+				st.Status = StatusDeadLettered
+				rec.Channels[channel] = st
+			}
+		}
+	} else {
+		rec.NextAttemptAt = now.Add(o.backoff(rec.Attempts))
 	}
 	snapshot := *rec
 	o.mu.Unlock()
 
 	if err := o.persist(&snapshot); err != nil {
+		log.Printf("[outbox] ALERT JOURNAL APPEND FAILED (state in memory only until next write): %v", err)
+	}
+}
+
+func (o *Outbox) persistQuiet(rec *Record) {
+	if err := o.persist(rec); err != nil {
 		log.Printf("[outbox] ALERT JOURNAL APPEND FAILED (state in memory only until next write): %v", err)
 	}
 }
@@ -454,14 +588,32 @@ func (o *Outbox) compactLocked() error {
 	return nil
 }
 
-// LatestForMonitor returns the newest delivery record for the monitor, or
-// nil when it has none.
+// LatestForMonitor returns the newest MONITOR delivery record for the
+// monitor id, or nil when it has none. Restore-test records share the
+// journal; the event source label keeps them from answering for a monitor.
 func (o *Outbox) LatestForMonitor(monitorID string) *DeliveryStatus {
+	return o.LatestForSource(SourceMonitor, monitorID)
+}
+
+// LatestForRestoreTest returns the newest restore-test delivery record for
+// the test id, or nil when it has none (D08: restore verdicts ride the same
+// durable outbox as monitor transitions).
+func (o *Outbox) LatestForRestoreTest(testID string) *DeliveryStatus {
+	return o.LatestForSource(SourceRestoreTest, testID)
+}
+
+// LatestForSource is the source-scoped lookup. An empty source matches the
+// legacy default (monitor) so pre-label journals keep answering.
+func (o *Outbox) LatestForSource(source, id string) *DeliveryStatus {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var best *Record
 	for _, rec := range o.records {
-		if rec.Event.MonitorID != monitorID {
+		recSource := rec.Event.Source
+		if recSource == "" {
+			recSource = SourceMonitor
+		}
+		if recSource != source || rec.Event.MonitorID != id {
 			continue
 		}
 		if best == nil || rec.CreatedAt.After(best.CreatedAt) {
@@ -471,7 +623,7 @@ func (o *Outbox) LatestForMonitor(monitorID string) *DeliveryStatus {
 	if best == nil {
 		return nil
 	}
-	return &DeliveryStatus{
+	status := &DeliveryStatus{
 		ID:            best.ID,
 		Status:        best.Status,
 		Attempts:      best.Attempts,
@@ -481,4 +633,16 @@ func (o *Outbox) LatestForMonitor(monitorID string) *DeliveryStatus {
 		EventStatus:   best.Event.Status,
 		OccurredAt:    best.Event.OccurredAt,
 	}
+	if len(best.Channels) > 0 {
+		status.Channels = make(map[string]ChannelStatus, len(best.Channels))
+		for channel, st := range best.Channels {
+			status.Channels[channel] = ChannelStatus{
+				Status:        st.Status,
+				Attempts:      st.Attempts,
+				LastError:     st.LastError,
+				LastAttemptAt: st.LastAttemptAt,
+			}
+		}
+	}
+	return status
 }

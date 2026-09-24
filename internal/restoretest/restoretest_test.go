@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/outbox"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
 
@@ -347,4 +349,72 @@ func TestRunNow_EmptyUserTargetFailsClosed(t *testing.T) {
 	if got.LastOK || !strings.Contains(got.LastDetail, "unavailable") {
 		t.Fatalf("expected closed failure, got ok=%v detail=%q", got.LastOK, got.LastDetail)
 	}
+}
+
+// capturingAlerter records the events the runner emits.
+type capturingAlerter struct {
+	events []alert.Event
+}
+
+func (c *capturingAlerter) Send(ev alert.Event) { c.events = append(c.events, ev) }
+
+// D08: restore verdicts carry the restore-test source label so the shared
+// alert outbox can scope delivery-status lookups (and receivers can route).
+func TestRunNow_AlertsCarryRestoreTestSource(t *testing.T) {
+	r, st := newTestRunner(t, `not json`, nil) // failed verification
+	rt := seedTest(t, st)
+	// Seed the baseline so the failure transitions.
+	r.mu.Lock()
+	r.lastOK[rt.ID] = true
+	r.mu.Unlock()
+	capture := &capturingAlerter{}
+	r.SetAlerter(capture)
+
+	if _, err := r.RunNow(rt); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.events) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(capture.events))
+	}
+	ev := capture.events[0]
+	if ev.Source != alert.SourceRestoreTest {
+		t.Fatalf("alert source = %q, want %q", ev.Source, alert.SourceRestoreTest)
+	}
+	if ev.Status != "down" || ev.MonitorID != rt.ID {
+		t.Fatalf("alert = %+v, want a down verdict for %s", ev, rt.ID)
+	}
+}
+
+// D08: the runner's Alerter contract is satisfied by the real outbox — a
+// failed verification enqueues a DURABLE restore-test delivery that a
+// restart would resume, visible through LatestForRestoreTest.
+func TestRunNow_FailedVerificationRidesTheOutbox(t *testing.T) {
+	r, st := newTestRunner(t, `not json`, nil)
+	rt := seedTest(t, st)
+	r.mu.Lock()
+	r.lastOK[rt.ID] = true
+	r.mu.Unlock()
+
+	dir := t.TempDir()
+	ob, err := outbox.New(dir, outbox.Options{
+		ConfigFn: func() (alert.Config, error) { return alert.Config{WebhookURL: "http://configured.example/"}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetAlerter(ob)
+
+	if _, err := r.RunNow(rt); err != nil {
+		t.Fatal(err)
+	}
+	if d := ob.LatestForRestoreTest(rt.ID); d == nil {
+		t.Fatal("failed verification left no durable delivery record")
+	} else if d.EventStatus != "down" {
+		t.Fatalf("delivery event status = %q, want down", d.EventStatus)
+	}
+	// A monitor lookup over the same id must NOT answer with the restore record.
+	if d := ob.LatestForMonitor(rt.ID); d != nil {
+		t.Fatalf("restore record leaked into the monitor scope: %+v", d)
+	}
+	ob.Stop(context.Background())
 }

@@ -1566,6 +1566,23 @@ document.addEventListener('alpine:init', () => {
       return t.last_ok ? 'green' : 'red';
     },
 
+    // ── Alert delivery status (D08) ──
+    // Restore verdicts ride the same durable outbox as monitor transitions
+    // (source-scoped); a failed notification for a verification result is
+    // operationally silent without this chip.
+    deliveryLabel(d) {
+      if (!d) return '';
+      if (d.status === 'dead_lettered') return 'delivery dead-lettered';
+      if (d.status === 'pending') return d.attempts > 0 ? `delivery retrying (attempt ${d.attempts})` : 'delivery pending';
+      return '';
+    },
+
+    // Only failure-ish states earn the warning chip; plain "delivered" is
+    // history, not an alert.
+    deliveryWarns(d) {
+      return !!d && (d.status === 'dead_lettered' || (d.status === 'pending' && d.attempts > 0));
+    },
+
     resetForm() {
       this.newTest = {
         server: '', app: '', accessory: '',

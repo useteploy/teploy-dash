@@ -4496,7 +4496,21 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		if tests == nil {
 			tests = []store.RestoreTest{}
 		}
-		writeJSON(w, tests)
+		// D08: like the monitors list, each row carries the outbox's last
+		// delivery state for this test's alerts (nil when it has none).
+		type testWithDelivery struct {
+			store.RestoreTest
+			Delivery *outbox.DeliveryStatus `json:"delivery,omitempty"`
+		}
+		rows := make([]testWithDelivery, 0, len(tests))
+		for _, t := range tests {
+			row := testWithDelivery{RestoreTest: t}
+			if s.outbox != nil {
+				row.Delivery = s.outbox.LatestForRestoreTest(t.ID)
+			}
+			rows = append(rows, row)
+		}
+		writeJSON(w, rows)
 
 	case "POST":
 		// A24: configuration input is a CONFIG-ONLY DTO. Result fields
@@ -4637,7 +4651,15 @@ func (s *Server) handleRestoreTest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "restore test not found", 404)
 			return
 		}
-		writeJSON(w, t)
+		resp := map[string]interface{}{"test": t}
+		// D08: the test's last alert-delivery state rides the same outbox
+		// as monitor transitions (source-scoped, per-channel).
+		if s.outbox != nil {
+			if d := s.outbox.LatestForRestoreTest(id); d != nil {
+				resp["delivery"] = d
+			}
+		}
+		writeJSON(w, resp)
 
 	case "DELETE":
 		// Stop the schedule first so a tick can't re-persist a deleted test.
