@@ -1866,3 +1866,52 @@ Deferred tails (CLI-side or later slices):
   full one-place resource page is the D05/D07 arc, not this slice.
 
 
+
+## X02 S2 tail — dash decodes the MI-2 server list, both eras — 2026-09-23
+
+Consumer side of the coordinated CLI contract bump (teploy-cli branch
+`x02-server-list-reshape`, corpus rev 4): `server list --json` now emits
+`{machine_interface: 2, servers[], observed_at}` and the bare
+map-of-servers root is gone from the CLI's wire.
+
+- `MaxSupportedMachineInterface = 2` (delegate.go). The central
+  ParseJSON gate and the capability probe both fail closed on MI > 2
+  with the upgrade remedy; the MI-2 handshake still lights the feature
+  flags (token set unchanged by the bump — pinned by test).
+- New `cli.DecodeServerList` (internal/cli/serverlist.go): decodes BOTH
+  eras — envelope (machine_interface present → strict envelope decode;
+  malformed is an error, never legacy fallback) and the legacy bare map
+  (one-time deprecation log; per-call silent thereafter). Rides
+  ParseJSON so the central MI gate refuses newer envelopes before any
+  entry is interpreted. Records sorted by name; the S4 stable id
+  (srv-<16hex>) arrives intact, empty on id-less legacy entries.
+- Rewired decode sites: resolveServers (fleet), lookupServerRecord
+  (registry edit read; also moved onto the injectable s.runCLI so the
+  path is hermetically testable — same delegate semantics), and the
+  /api/config/servers GET, which now DECODES and re-emits the bare-map
+  shape: dash's frontend contract predates the CLI reshape and the UI is
+  not touched in this slice (D07 owns it); the frontend never sees the
+  CLI wire change. Empty fleet answers `{}` as before.
+- CI: ci/contracts.pin → teploy-cli 28a42cd / corpus rev 4;
+  validate-contracts.mjs gains the server-list-envelope row (valid =
+  schema-validate, legacy bare map = decode-only, owned by the Go
+  corpus tests).
+- Evidence: internal/cli/serverlist_test.go (envelope MI-2 happy incl.
+  id-less entry + sorting; bare map; empty fleet both eras; MI-3
+  refused with remedy; malformed-envelope refusals; non-object/empty
+  refusal); internal/server/serverlist_decode_test.go (fleet resolve of
+  the envelope; /api/config/servers GET normalizes envelope → bare map
+  and never leaks machine_interface to the frontend; discovery refuses
+  MI 3 with remedy); corpus tests decode both server-list fixtures and
+  the renamed mi2 handshake/app-list fixtures; existing bare-map stubs
+  (fleet/machine/onboarding tests) now exercise the legacy branch
+  unchanged. Gates: build/vet clean; `go test ./... -count=1` 16/16
+  with TEPLOY_CONTRACTS_DIR at the pinned corpus (3 consecutive clean
+  runs); node validate-contracts.mjs against rev 4 passes. Known
+  transient: without TEPLOY_CONTRACTS_DIR the corpus tests fall back to
+  the sibling main checkout (still rev 3) — expected until the train
+  merges; CI uses the pin.
+
+Not opened/closed here: A35 groups migration (server-scoped app refs)
+still pending; the deprecation log is fire-and-forget by design (one
+line per process).

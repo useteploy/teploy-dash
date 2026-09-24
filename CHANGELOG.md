@@ -24,6 +24,18 @@ All notable changes to teploy-dash are recorded here.
   Users gains a per-account "Revoke sessions" button.
 
 ### Changed
+- **Machine interface 2: `server list` decode adopts the CLI's envelope.**
+  Dash's maximum supported machine interface is now 2 (MI 2 = MI 1 plus
+  the CLI's `server list --json` reshape; no other envelope changed). The
+  server-list decode paths (fleet discovery, the registry edit read, the
+  settings servers list) decode BOTH wire shapes during the transition —
+  the new `{machine_interface, servers[], observed_at}` envelope and the
+  legacy bare map-of-servers from a pre-reshape CLI (logged once as
+  deprecated) — so dash works against either CLI, while an envelope from
+  a newer interface is still refused centrally with the upgrade remedy.
+  `/api/config/servers` keeps answering the bare-map shape the frontend
+  reads; the CLI's wire reshape is normalized away from the UI. Contracts
+  pin: teploy-cli `28a42cd`, corpus rev 4.
 - **Log streaming is SSE-only.** The log viewer path moved from the
   hand-written WebSocket to `/api/logs/{server}/{app}`
   (`text/event-stream`, same-origin enforced); the hand-rolled RFC 6455

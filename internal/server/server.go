@@ -1677,25 +1677,24 @@ func (s *Server) resolveServers(ctx context.Context) ([]remote.ServerConn, error
 		return nil, commandFailure([]string{"server", "list", "--json"}, result)
 	}
 
-	var raw map[string]struct {
-		ID   string `json:"id"`
-		Host string `json:"host"`
-		User string `json:"user"`
-	}
-	if err := json.Unmarshal([]byte(result.Stdout), &raw); err != nil {
+	// Both wire eras decode here (X02 S2 tail): the MI-2 envelope and the
+	// legacy bare map; an envelope newer than dash's supported interface
+	// is refused by the central gate inside DecodeServerList.
+	records, err := cli.DecodeServerList(result.Stdout)
+	if err != nil {
 		return nil, fmt.Errorf("parsing the server list: %w", err)
 	}
 
 	var servers []remote.ServerConn
-	for name, s := range raw {
-		user := s.User
+	for _, record := range records {
+		user := record.User
 		if user == "" {
 			user = "root"
 		}
 		servers = append(servers, remote.ServerConn{
-			Name: name,
-			ID:   s.ID,
-			Host: s.Host,
+			Name: record.Name,
+			ID:   record.ID,
+			Host: record.Host,
 			User: user,
 		})
 	}
@@ -3204,11 +3203,11 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeData(w, []interface{}{})
 			return
 		}
-		result, err := cli.ServerList()
+		result, err := s.runCLI(r.Context(), "server", "list", "--json")
 		if err != nil {
 			writeErrorStatus(w, "server list failed: "+err.Error(), http.StatusBadGateway)
 			return
@@ -3217,7 +3216,30 @@ func (s *Server) handleConfigServers(w http.ResponseWriter, r *http.Request) {
 			writeErrorStatus(w, "server list failed: "+strings.TrimSpace(result.Stderr), http.StatusBadGateway)
 			return
 		}
-		writeRawJSON(w, result.Stdout)
+		records, err := cli.DecodeServerList(result.Stdout)
+		if err != nil {
+			writeErrorStatus(w, "server list failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		// Re-emit the bare-map shape: dash's /api/config/servers contract
+		// with the frontend predates the CLI's MI-2 envelope, and the UI is
+		// unchanged in this slice — dash normalizes both CLI wire eras so
+		// the frontend never sees the reshape.
+		entries := make(map[string]map[string]string, len(records))
+		for _, record := range records {
+			entry := map[string]string{"host": record.Host}
+			if record.ID != "" {
+				entry["id"] = record.ID
+			}
+			if record.User != "" {
+				entry["user"] = record.User
+			}
+			if record.Role != "" {
+				entry["role"] = record.Role
+			}
+			entries[record.Name] = entry
+		}
+		writeData(w, entries)
 	case "POST":
 		var body struct {
 			Name string `json:"name"`
@@ -3260,23 +3282,23 @@ func writeServerError(w http.ResponseWriter, err error) {
 // silently fall back to empty values (which fed root/default metadata into
 // the update path).
 func (s *Server) lookupServerRecord(name string) (host, user, role string, err error) {
-	result, err := cli.ServerList()
+	result, err := s.runCLI(context.Background(), "server", "list", "--json")
 	if err != nil {
 		return "", "", "", fmt.Errorf("server list failed: %w", err)
 	}
-	var raw map[string]struct {
-		Host string `json:"host"`
-		User string `json:"user"`
-		Role string `json:"role"`
+	if result.ExitCode != 0 {
+		return "", "", "", fmt.Errorf("server list failed: %s", strings.TrimSpace(result.Stderr))
 	}
-	if json.Unmarshal([]byte(result.Stdout), &raw) != nil {
+	records, decodeErr := cli.DecodeServerList(result.Stdout)
+	if decodeErr != nil {
 		return "", "", "", errors.New("server list returned unreadable output")
 	}
-	srv, ok := raw[name]
-	if !ok {
-		return "", "", "", fmt.Errorf("server not found: %s", name)
+	for _, record := range records {
+		if record.Name == name {
+			return record.Host, record.User, record.Role, nil
+		}
 	}
-	return srv.Host, srv.User, srv.Role, nil
+	return "", "", "", fmt.Errorf("server not found: %s", name)
 }
 
 func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request) {

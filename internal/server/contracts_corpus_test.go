@@ -55,7 +55,7 @@ func readCorpusFixture(t *testing.T, path string) string {
 }
 
 func TestContractsCorpusVersionHandshakeDecodes(t *testing.T) {
-	raw := readCorpusFixture(t, "version-handshake/valid/mi1.json")
+	raw := readCorpusFixture(t, "version-handshake/valid/mi2.json")
 	data, err := cli.ParseJSON(raw)
 	if err != nil {
 		t.Fatalf("version handshake fixture must decode through dash's CLI JSON gate: %v", err)
@@ -73,7 +73,7 @@ func TestContractsCorpusVersionHandshakeDecodes(t *testing.T) {
 }
 
 func TestContractsCorpusAppListEnvelopeDecodes(t *testing.T) {
-	raw := readCorpusFixture(t, "app-list-envelope/valid/mi1.json")
+	raw := readCorpusFixture(t, "app-list-envelope/valid/mi2.json")
 	if _, err := cli.ParseJSON(raw); err != nil {
 		t.Fatalf("app-list fixture must decode through dash's CLI JSON gate: %v", err)
 	}
@@ -109,6 +109,37 @@ func TestContractsCorpusAppListLegacyPreMIDecodesAsLegacy(t *testing.T) {
 	var list machineAppList
 	if err := decodeAppListEnvelope(raw, "corpus", &list); err != nil {
 		t.Fatalf("pre-MI envelope must pass the same machine decode rules (the pre-MI CLI populated every collection): %v", err)
+	}
+}
+
+// X02 S2 tail (corpus rev 4): the server-list artifact's both eras run
+// through dash's real decode. The valid fixture is the MI-2 envelope
+// (dash's MaxSupportedMachineInterface era); the legacy fixture is the
+// bare map-of-servers the pre-reshape CLI emitted — decode must not break
+// against either, and the envelope's per-server fields (name + the S4
+// stable id) must arrive intact.
+func TestContractsCorpusServerListEnvelopeDecodes(t *testing.T) {
+	raw := readCorpusFixture(t, "server-list-envelope/valid/mi2.json")
+	records, err := cli.DecodeServerList(raw)
+	if err != nil {
+		t.Fatalf("server-list envelope fixture must decode through dash's server-list path: %v", err)
+	}
+	if len(records) != 2 || records[0].Name != "prod" || records[0].ID != "srv-0123456789abcdef" {
+		t.Fatalf("server-list fixture records = %#v", records)
+	}
+	if records[1].Name != "staging" || records[1].ID != "" {
+		t.Fatalf("id-less legacy entry must decode with an empty id: %#v", records[1])
+	}
+}
+
+func TestContractsCorpusServerListLegacyBareMapDecodes(t *testing.T) {
+	raw := readCorpusFixture(t, "server-list-envelope/legacy/bare-map.json")
+	records, err := cli.DecodeServerList(raw)
+	if err != nil {
+		t.Fatalf("server-list legacy fixture must decode (pre-reshape CLI on PATH): %v", err)
+	}
+	if len(records) != 2 || records[0].Name != "prod" || records[0].ID != "srv-0123456789abcdef" {
+		t.Fatalf("server-list legacy fixture records = %#v", records)
 	}
 }
 

@@ -343,14 +343,15 @@ func TestCapabilitiesProbeRequiresJSONFlag(t *testing.T) {
 // X02 S2 done-check: an interface newer than the one dash decodes fails
 // CLOSED at the capability probe — machine features report unsupported and
 // the remedy is visible at /api/capabilities — before any envelope or
-// mutation rides the newer interface.
+// mutation rides the newer interface. Max supported is MI 2 (the
+// server-list envelope era), so the refusal class is MI 3.
 func TestCapabilitiesFailsClosedOnNewerMachineInterface(t *testing.T) {
 	s := New(Config{
 		DataDir: t.TempDir(), NoAuth: true,
 		CLIInstalled: func() bool { return true },
 		CLIRunner: func(_ context.Context, args ...string) (*cli.Result, error) {
 			if strings.Join(args, " ") == "version --json" {
-				return &cli.Result{Stdout: `{"version":"teploy v0.3.0","machine_interface":2,"capabilities":["app-list-machine","server-status-machine"]}`}, nil
+				return &cli.Result{Stdout: `{"version":"teploy v0.3.0","machine_interface":3,"capabilities":["app-list-machine","server-status-machine"]}`}, nil
 			}
 			return nil, errors.New("unexpected command: " + strings.Join(args, " "))
 		},
@@ -369,7 +370,40 @@ func TestCapabilitiesFailsClosedOnNewerMachineInterface(t *testing.T) {
 	if len(envelope.Data.Errors) == 0 || !strings.Contains(envelope.Data.Errors[0].Message, "upgrade teploy-dash") {
 		t.Fatalf("expected the upgrade remedy error, got %#v", envelope.Data.Errors)
 	}
-	if envelope.Data.CLI.MachineInterface != 2 {
+	if envelope.Data.CLI.MachineInterface != 3 {
 		t.Fatalf("machine_interface not surfaced: %#v", envelope.Data.CLI)
+	}
+}
+
+// X02 S2 tail: the MI-2 handshake (the server-list envelope era; token
+// set unchanged by the bump) still lights the feature flags — the bump
+// itself must not read as skew.
+func TestCapabilitiesMI2HandshakeLightsFeatureFlags(t *testing.T) {
+	s := New(Config{
+		DataDir: t.TempDir(), NoAuth: true,
+		CLIInstalled: func() bool { return true },
+		CLIRunner: func(_ context.Context, args ...string) (*cli.Result, error) {
+			if strings.Join(args, " ") == "version --json" {
+				return &cli.Result{Stdout: `{"version":"teploy v0.2.0","machine_interface":2,"capabilities":["app-list-machine","server-status-machine"]}`}, nil
+			}
+			return nil, errors.New("unexpected command: " + strings.Join(args, " "))
+		},
+	})
+	response := httptest.NewRecorder()
+	s.handleCapabilities(response, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
+	var envelope struct {
+		Data capabilities `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.CLI.MachineInterface != 2 {
+		t.Fatalf("machine_interface = %d, want 2: %#v", envelope.Data.CLI.MachineInterface, envelope.Data.CLI)
+	}
+	if !envelope.Data.Features.AppListJSON || !envelope.Data.Features.ServerStatusJSON {
+		t.Fatalf("MI-2 handshake must light the machine feature flags (token set unchanged): %#v", envelope.Data.Features)
+	}
+	if len(envelope.Data.Errors) != 0 {
+		t.Fatalf("MI-2 within supported max must not error: %#v", envelope.Data.Errors)
 	}
 }
