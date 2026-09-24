@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/mcp"
 	"github.com/useteploy/teploy-dash/internal/operation"
@@ -60,6 +61,16 @@ func (b mcpBackend) enqueueMutation(ctx context.Context, req operation.Request) 
 	var actor *operation.Actor
 	if tok, ok := mcp.TokenFromContext(ctx); ok {
 		actor = &operation.Actor{Kind: "mcp", Subject: "mcp-token/" + tok.ID, Label: tok.Name}
+		// D06 granted-at: snapshot the token's effective capability set —
+		// nil Capabilities is the operator-default preset (OperatorDefault),
+		// an explicit list is the custom grant.
+		if tok.Capabilities == nil {
+			actor.Capabilities = caps.OperatorDefault().Sorted()
+			actor.CapBasis = "preset"
+		} else {
+			actor.Capabilities = caps.NewSet(tok.Capabilities...).Sorted()
+			actor.CapBasis = "custom"
+		}
 	}
 	op, _, err := b.s.operations.Enqueue(req, "", actor)
 	if err != nil {

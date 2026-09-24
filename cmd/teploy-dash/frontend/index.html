@@ -1831,6 +1831,15 @@
               <div class="card-meta">Exit code</div>
               <div class="card-title mono" x-text="op.exit_code === null || op.exit_code === undefined ? '—' : op.exit_code"></div>
             </div>
+            <!-- D06 granted-at audit trail: which principal admitted this
+                 work and the capability grant it was authorized under at
+                 admission (role + basis; the full set on hover). -->
+            <div class="card" x-show="op.actor">
+              <div class="card-meta">Admitted by</div>
+              <div class="card-title" style="font-size: 13px;"
+                   :title="(op.actor && op.actor.capabilities && op.actor.capabilities.length) ? 'granted at admission: ' + op.actor.capabilities.join(', ') : ''"
+                   x-text="actorLabel(op)"></div>
+            </div>
           </div>
 
           <template x-if="op.error">

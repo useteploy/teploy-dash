@@ -670,14 +670,17 @@ const bootstrapTokenTTL = 30 * time.Minute
 // caps is the LIVE capability set, rebuilt from the principal row during
 // that same revalidation (X03): like the role, it is never trusted from
 // issuance time, so profile changes and narrowing take effect immediately.
+// capBasis records how that set was derived (preset/custom/legacy — the
+// granted-at audit basis, D06).
 type sessionInfo struct {
-	sub   string
-	user  string
-	role  string
-	exp   time.Time
-	epoch uint64
-	local bool
-	caps  caps.Set
+	sub      string
+	user     string
+	role     string
+	exp      time.Time
+	epoch    uint64
+	local    bool
+	caps     caps.Set
+	capBasis string
 }
 
 type failInfo struct {
@@ -996,11 +999,11 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 			if session.local {
 				if u := g.users[session.sub]; u != nil && u.AuthEpoch == session.epoch {
 					live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(u.Role), exp: session.exp, epoch: session.epoch, local: true,
-						caps: capabilitiesForProfile(u.CapabilityProfile, u.Capabilities, u.Role)}
+						caps: capabilitiesForProfile(u.CapabilityProfile, u.Capabilities, u.Role), capBasis: capBasisForProfile(u.CapabilityProfile)}
 				}
 			} else if p := g.oidcPrincipals[session.sub]; p != nil && p.AuthEpoch == session.epoch {
 				live = &sessionInfo{sub: session.sub, user: session.user, role: normalizeRole(p.Role), exp: session.exp, epoch: session.epoch, local: false,
-					caps: capabilitiesForProfile(p.CapabilityProfile, p.Capabilities, p.Role)}
+					caps: capabilitiesForProfile(p.CapabilityProfile, p.Capabilities, p.Role), capBasis: capBasisForProfile(p.CapabilityProfile)}
 			}
 			g.credMu.RUnlock()
 			if live == nil {

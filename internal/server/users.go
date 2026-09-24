@@ -99,6 +99,13 @@ func currentUser(r *http.Request) (*sessionInfo, bool) {
 // Actor (A27): which principal enqueued the work. Local sessions key on the
 // username; SSO sessions on the issuer-namespaced subject. Nil when the
 // request carries no session (internal callers).
+//
+// D06 granted-at audit trail: the actor snapshots the LIVE capability set
+// the request was authorized under (the same rebuilt set the route gate
+// enforced), plus the role and basis it was derived from — for SSO
+// principals the role came from the identity provider's claim, so those two
+// fields record the claim-to-capability mapping that was in force at
+// admission. Narrowing an account later never rewrites admitted history.
 func actorFromRequest(r *http.Request) *operation.Actor {
 	si, ok := currentUser(r)
 	if !ok {
@@ -108,7 +115,11 @@ func actorFromRequest(r *http.Request) *operation.Actor {
 	if si.local {
 		kind = "local"
 	}
-	return &operation.Actor{Kind: kind, Subject: si.sub, Label: si.user}
+	actor := &operation.Actor{Kind: kind, Subject: si.sub, Label: si.user, Role: si.role, CapBasis: si.capBasis}
+	if si.caps != nil {
+		actor.Capabilities = si.caps.Sorted()
+	}
+	return actor
 }
 
 // ── User store ────────────────────────────────────────────────────────────

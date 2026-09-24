@@ -49,6 +49,21 @@ func capabilitiesForProfile(profile string, explicit []string, role string) caps
 	}
 }
 
+// capBasisForProfile maps a stored capability profile onto the audit basis
+// recorded on operation actors (D06): how the granted-at set was derived.
+// The empty (pre-X03) and unknown profiles read as legacy, mirroring
+// capabilitiesForProfile's conservative default.
+func capBasisForProfile(profile string) string {
+	switch profile {
+	case profilePreset:
+		return profilePreset
+	case profileCustom:
+		return profileCustom
+	default:
+		return profileLegacy
+	}
+}
+
 // administerCredentialsPrefixes manage credential-bearing configuration.
 // Reads are included: their payloads carry secrets (registry passwords,
 // SMTP/webhook targets, token metadata, source webhook secrets).
