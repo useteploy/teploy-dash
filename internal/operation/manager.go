@@ -110,9 +110,9 @@ type Options struct {
 	// ResolverByID resolves a server by stable id for the rename
 	// reconciliation in checkTarget (X02 §1.3). Nil disables that path:
 	// a vanished name stays a hard refusal, exactly as before.
-	ResolverByID      ResolverByID
-	ProjectResolver   ProjectResolver
-	Executor          Executor
+	ResolverByID    ResolverByID
+	ProjectResolver ProjectResolver
+	Executor        Executor
 	// ReceiptReader answers whether an admitted operation's effect reached
 	// its target (D02). Reconciliation after a restart, and the honest
 	// resolution of a mid-flight cancellation, both consult it. Nil means

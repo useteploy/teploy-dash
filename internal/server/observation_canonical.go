@@ -14,13 +14,13 @@ import (
 // shared-contract projection of the same truth, so drift between the two is
 // impossible by construction (one derives from the other).
 type canonicalObservation struct {
-	Resource       canonicalResource `json:"resource"`
-	LastSuccessAt  *time.Time        `json:"last_success_at,omitempty"`
-	CollectedAt    time.Time         `json:"collected_at"`
-	Freshness      string            `json:"freshness"` // fresh|stale|unknown (§2.4 rule 2)
-	Error          string            `json:"error,omitempty"`
-	Source         string            `json:"source,omitempty"`
-	LastKnown      canonicalLastKnown `json:"last_known"`
+	Resource      canonicalResource  `json:"resource"`
+	LastSuccessAt *time.Time         `json:"last_success_at,omitempty"`
+	CollectedAt   time.Time          `json:"collected_at"`
+	Freshness     string             `json:"freshness"` // fresh|stale|unknown (§2.4 rule 2)
+	Error         string             `json:"error,omitempty"`
+	Source        string             `json:"source,omitempty"`
+	LastKnown     canonicalLastKnown `json:"last_known"`
 }
 
 type canonicalResource struct {
