@@ -105,6 +105,71 @@ teploy-dash --nucleus-url postgres://localhost:5432/teploy_dash   # use Nucleus
 teploy-dash --no-auth                                   # local dev only
 ```
 
+## First success
+
+Terminal to first deploy action through the dashboard. Every step below
+was executed against a scratch SSH+Docker host; each names the surface it
+drives.
+
+1. **Have the `teploy` CLI on the same machine** — Dash delegates every
+   action to it and reads the state it writes. `GET /api/cli/status`
+   answers whether it is on `$PATH` (the dashboard also tells you in
+   Settings). Nothing else works until this does.
+2. **Connect a server.** Servers come from the CLI's
+   `~/.teploy/servers.yml` — add one with `teploy server add <name>
+   <host> --user <user>` (or Dash's onboarding flow, which shells to the
+   same command). Dash then SSH-polls each server; the fleet view shows
+   every configured server on every response, with freshness
+   (`fresh`/`stale`/`unknown`) and last-known apps even for unreachable
+   ones.
+3. **Check readiness.** The onboarding preflight
+   (`GET /api/onboarding/preflight?server=<name>`, surfaced in the UI)
+   checks the CLI, machine interface, SSH, host read, Docker, disk
+   headroom, and Caddy — each with `pass`/`fail`/`unknown`, a severity,
+   and a remediation hint. Fix blocking checks before deploying; this is
+   the "why is my server not deployable" answer, not a generic error.
+4. **First deploy through the UI.** The Deploy form submits
+   `POST /api/deploy {server, app, image, domain?, port?}` — an ad-hoc
+   image deploy **requires a domain** (Caddy routing); omitting it is
+   refused before any effect and the operation journal shows the CLI's
+   exact stderr (`'domain' is required`). Projects can also deploy from
+   registered git sources (webhook-driven) or dash-managed manifests.
+   Deploying an app that already exists on the server (deployed via the
+   CLI) needs no form at all — its page has the action buttons.
+5. **Watch the operation.** Every action is an operation:
+   `queued → running → succeeded | failed | canceled | ...` (the full
+   state list is below). The Activity view and the operation's event
+   journal (SSE at `/api/operations/{id}/events`) stream the CLI's live
+   stdout/stderr. A failed operation shows the CLI's real error text —
+   that text, plus `teploy doctor` on the target, is the diagnosis path.
+
+Operation states you can see: `queued`, `running`, `cancel_requested`,
+`stopping`, and terminal `succeeded`, `failed`, `canceled`,
+`already_committed` (a cancellation whose effect landed anyway — not
+retryable, no rollback was performed), `interrupted` (Dash restarted
+mid-flight; reconciled against the target's receipts before retry is
+allowed). Retry is refused while an interrupted operation is still
+reconciling.
+
+## Operational limits
+
+- **One Dash process**, one deployment per data dir; instances do not
+  peer or share state. Multiple dashes pointing at the same
+  `~/.teploy/servers.yml` each poll independently.
+- **Fleet view is a 60-second cache**; freshness turns `stale` past 2
+  minutes. Actions are never served from the cache — they always run the
+  CLI live.
+- **Actions are bounded**: 8 concurrent CLI subprocesses across all
+  targets (`TEPLOY_DASH_MAX_CONCURRENT_OPERATIONS`), 50 queued
+  operations per server+app and 500 manager-wide before HTTP 429, a 24h
+  idempotency window per principal, and retention defaults of 30 days /
+  5000 finished operations (env-tunable — see the table above).
+- **Monitor history without Nucleus** falls back to rolling JSONL files
+  with a 7-day check retention (`--nucleus-url` uses Nucleus instead).
+- **Public status page is off by default** and, when enabled, exposes
+  only monitor name, up/down state, and 24h uptime — never targets,
+  server names, or response bodies.
+
 ## Features
 
 ### Deployment dashboard
