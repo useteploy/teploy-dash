@@ -44,10 +44,10 @@ const artifacts = {
   // map-of-servers root a pre-MI-2 CLI emitted — a different root shape
   // this schema deliberately refuses, so the Go decode tests own it.
   "server-list-envelope": { schema: "server-list-envelope.schema.json", classes: { valid: "validate", legacy: "decode-only" } },
-  // server-status fixtures are "pending S2 tail" in the MANIFEST; the
-  // producer pre-created the valid/ class dir, so it is classified now --
-  // the moment fixtures land they are asserted, with no dash-side change.
-  "server-status-envelope": { schema: "server-status-envelope.schema.json", classes: { valid: "validate" } },
+  // server-status fixtures landed at corpus rev 5: valid is the MI-stamped
+  // serverStatusDTO; legacy is the pre-MI shape (machine_interface absent),
+  // which the schema refuses by design, so the Go decode tests own it.
+  "server-status-envelope": { schema: "server-status-envelope.schema.json", classes: { valid: "validate", legacy: "decode-only" } },
   "error-envelope": { schema: "error-envelope.schema.json", classes: { valid: "validate", invalid: "refuse" } },
   "release-record": { schema: "release-record.schema.json", classes: { valid: "validate" } },
   "attempt-name": { schema: "attempt-name.schema.json", mode: "each", classes: { valid: "validate", invalid: "refuse" } },

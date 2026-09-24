@@ -10,6 +10,8 @@ package server
 //     producer, never MI 0; newer-than-max refuses);
 //   - the app-list envelope additionally goes through decodeAppListEnvelope
 //     (the fleet read's completeness rules);
+//   - server-status fixtures (valid + pre-MI legacy) go through
+//     decodeMachineServerStatus (the host read's completeness rules);
 //   - the preview-state ambiguous fixture exercises the adoption-refusal
 //     contract: dash must never mint a canonical identity for an ambiguous
 //     legacy record (C06). Dash has no preview-state importer today; this
@@ -140,6 +142,22 @@ func TestContractsCorpusServerListLegacyBareMapDecodes(t *testing.T) {
 	}
 	if len(records) != 2 || records[0].Name != "prod" || records[0].ID != "srv-0123456789abcdef" {
 		t.Fatalf("server-list legacy fixture records = %#v", records)
+	}
+}
+
+func TestContractsCorpusServerStatusDecodes(t *testing.T) {
+	for _, path := range []string{
+		"server-status-envelope/valid/full.json",
+		"server-status-envelope/valid/partial-caddy-unavailable.json",
+		"server-status-envelope/legacy/pre-mi.json",
+	} {
+		status, err := decodeMachineServerStatus(readCorpusFixture(t, path))
+		if err != nil {
+			t.Fatalf("%s must decode through dash's server-status path: %v", path, err)
+		}
+		if status.Host == "" {
+			t.Fatalf("%s decoded without a host: %#v", path, status)
+		}
 	}
 }
 

@@ -286,14 +286,22 @@ func (s *Server) readMachineServer(ctx context.Context, serverName string) (*mac
 		}
 		return nil, false, commandFailure(args, result)
 	}
-	var status machineServerStatus
-	if err := json.Unmarshal([]byte(result.Stdout), &status); err != nil {
+	status, err := decodeMachineServerStatus(result.Stdout)
+	if err != nil {
 		return nil, false, fmt.Errorf("decoding teploy server status for %s: %w", serverName, err)
 	}
-	if status.Host == "" || status.ObservedAt.IsZero() || status.Disks == nil || status.Docker.Containers == nil || status.Docker.Images == nil || status.Caddy.Routes == nil || status.Errors == nil {
-		return nil, false, fmt.Errorf("decoding teploy server status for %s: incomplete machine response", serverName)
+	return status, false, nil
+}
+
+func decodeMachineServerStatus(stdout string) (*machineServerStatus, error) {
+	var status machineServerStatus
+	if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+		return nil, err
 	}
-	return &status, false, nil
+	if status.Host == "" || status.ObservedAt.IsZero() || status.Disks == nil || status.Docker.Containers == nil || status.Docker.Images == nil || status.Caddy.Routes == nil || status.Errors == nil {
+		return nil, fmt.Errorf("incomplete machine response")
+	}
+	return &status, nil
 }
 
 func mapMachineServer(status *machineServerStatus, requestedName string, now time.Time) *remote.ServerStatus {
