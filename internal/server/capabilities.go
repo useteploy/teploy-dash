@@ -71,8 +71,14 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 		// speaks the machine interface, and FAIL CLOSED on an interface
 		// newer than the one this dash decodes. Pre-MI CLIs do not know
 		// --json on version; that failure falls back to the legacy probes.
+		// Some pre-MI releases (v0.1.35, the one this image bundles) do not
+		// refuse the flag either: they exit 0 and print the plain
+		// `teploy <version>` line. Non-JSON output on exit 0 is that legacy
+		// answer, not a malformed handshake.
 		if result, err := s.runCLI(ctx, "version", "--json"); err != nil {
 			value.Errors = append(value.Errors, capabilityError{Probe: "version", Message: err.Error()})
+		} else if out := strings.TrimSpace(result.Stdout); result.ExitCode == 0 && out != "" && !strings.HasPrefix(out, "{") {
+			value.CLI.Version = normalizeCLIVersion(out)
 		} else if result.ExitCode == 0 {
 			// Inspection decode, deliberately NOT cli.ParseJSON: the central
 			// decode refuses newer-machine-interface envelopes (correct for

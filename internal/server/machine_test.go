@@ -340,6 +340,44 @@ func TestCapabilitiesProbeRequiresJSONFlag(t *testing.T) {
 	}
 }
 
+// A pre-MI CLI that ignores --json (v0.1.35 prints `teploy 0.1.35`, exit 0)
+// is a legacy answer, not a malformed handshake: the version reads, no
+// version-probe error is recorded, and so onboarding does not gate every
+// server on a failed teploy_cli check.
+func TestCapabilitiesPreMIIgnoringJSONFlagReadsLegacyVersion(t *testing.T) {
+	s := New(Config{
+		DataDir: t.TempDir(), NoAuth: true,
+		CLIInstalled: func() bool { return true },
+		CLIRunner: func(_ context.Context, args ...string) (*cli.Result, error) {
+			switch strings.Join(args, " ") {
+			case "version --json":
+				return &cli.Result{Stdout: "teploy 0.1.35\n"}, nil
+			case "app list --help", "server status --help":
+				return &cli.Result{Stdout: "  --json   machine-readable output"}, nil
+			default:
+				return nil, errors.New("unexpected command: " + strings.Join(args, " "))
+			}
+		},
+	})
+	response := httptest.NewRecorder()
+	s.handleCapabilities(response, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
+	var envelope struct {
+		Data capabilities `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.CLI.Version != "0.1.35" || envelope.Data.CLI.MachineInterface != 0 {
+		t.Fatalf("cli = %#v", envelope.Data.CLI)
+	}
+	if len(envelope.Data.Errors) != 0 {
+		t.Fatalf("legacy version answer recorded as probe errors: %#v", envelope.Data.Errors)
+	}
+	if !envelope.Data.Features.AppListJSON || !envelope.Data.Features.ServerStatusJSON {
+		t.Fatalf("legacy --help probes did not run: %#v", envelope.Data.Features)
+	}
+}
+
 // X02 S2 done-check: an interface newer than the one dash decodes fails
 // CLOSED at the capability probe — machine features report unsupported and
 // the remedy is visible at /api/capabilities — before any envelope or
