@@ -95,29 +95,64 @@ document.addEventListener('alpine:init', () => {
     actionLoading: false,
     _es: null,
     _alive: false,
+    _routeID: null,
+    _routeEffect: null,
+    _watchingRoute: false,
+    _loadGeneration: 0,
 
     async init() {
       this._alive = true;
+      const initialLoad = this.load();
+      // The page-level x-if does not remount for A -> B or Back/Forward.
+      // Watch the identity, and release the effect when this instance dies.
+      if (!this._watchingRoute) {
+        this._watchingRoute = true;
+        this._routeEffect = Alpine.effect(() => {
+          const router = Alpine.store('router');
+          if (this._alive && router.page === 'operation-detail' && router.params.id !== this._routeID) {
+            this.load();
+          }
+        });
+      }
+      await initialLoad;
+    },
+
+    current(id, generation = this._loadGeneration) {
+      const router = Alpine.store('router');
+      return this._alive && generation === this._loadGeneration &&
+        this._routeID === id && router.page === 'operation-detail' && router.params.id === id;
+    },
+
+    async load() {
       const id = Alpine.store('router').params.id;
+      const generation = ++this._loadGeneration;
+      this._routeID = id;
+      if (this._es) this._es.close();
+      this._es = null;
+      this.op = null;
+      this.lines = [];
       this.loading = true;
+      this.actionLoading = false;
       this.loadError = null;
+      this.loadedAt = null;
       try {
-        const op = await api.get(`/api/operations/${id}`);
-        if (!this._alive) return; // destroyed while loading (A50)
+        const op = await api.get(`/api/operations/${encodeURIComponent(id)}`);
+        if (!this.current(id, generation)) return;
         this.op = op;
         this.loadedAt = new Date().toISOString();
+        this.stream(id);
       } catch (e) {
-        // D07: an unreadable operation renders an error state with a retry —
-        // the old path left the page blank below the back link (toast only).
-        if (this._alive) this.loadError = `Could not load operation ${id}: ${e.message}`;
-        this.loading = false;
-        return;
+        if (this.current(id, generation)) this.loadError = `Could not load operation ${id}: ${e.message}`;
+      } finally {
+        if (this.current(id, generation)) this.loading = false;
       }
-      this.loading = false;
-      this.stream(id);
     },
     destroy() {
       this._alive = false;
+      this._loadGeneration++;
+      if (this._routeEffect) Alpine.release(this._routeEffect);
+      this._routeEffect = null;
+      this._watchingRoute = false;
       if (this._es) this._es.close();
       this._es = null; // R59: late promises check _es identity, never resurrect it
     },
@@ -129,8 +164,10 @@ document.addEventListener('alpine:init', () => {
     // (A53). The server terminates terminal histories with an explicit
     // replay-complete marker.
     stream(id) {
-      const source = new EventSource(`/api/operations/${id}/events`);
+      const source = new EventSource(`/api/operations/${encodeURIComponent(id)}/events`);
       this._es = source;
+      const generation = this._loadGeneration;
+      const isCurrent = () => this._es === source && this.current(id, generation);
       const maxLines = 5000;
       // R58: ONE defensive decoder for every payload-bearing event — a
       // malformed frame renders a visible marker instead of throwing out
@@ -159,14 +196,14 @@ document.addEventListener('alpine:init', () => {
           if (el) el.scrollTop = el.scrollHeight;
         });
       };
-      source.addEventListener('stdout', e => { if (this._es === source) append(e, ''); });
-      source.addEventListener('stderr', e => { if (this._es === source) append(e, 'op-line-err'); });
+      source.addEventListener('stdout', e => { if (isCurrent()) append(e, ''); });
+      source.addEventListener('stderr', e => { if (isCurrent()) append(e, 'op-line-err'); });
       // R58: explicit gap events are rendered as persistent warnings — the
       // backend emits them for retention truncation and lost output; hiding
       // them made truncated history look complete.
-      source.addEventListener('gap', e => { if (this._es === source) append(e, 'op-line-err'); });
+      source.addEventListener('gap', e => { if (isCurrent()) append(e, 'op-line-err'); });
       source.addEventListener('status', e => {
-        if (this._es !== source) return;
+        if (!isCurrent()) return;
         const value = decodeEvent(e);
         if (!value || !this.op || !value.data) return;
         this.op = { ...this.op, status: value.data };
@@ -178,10 +215,10 @@ document.addEventListener('alpine:init', () => {
       // has been replayed; EventSource's own Last-Event-ID reconnect keeps
       // trying until the marker arrives.
       source.addEventListener('replay-complete', () => {
-        if (this._es !== source) return;
+        if (!isCurrent()) return;
         source.close();
         api.get(`/api/operations/${encodeURIComponent(id)}`).then(op => {
-          if (this._es === source) this.op = op;
+          if (isCurrent()) this.op = op;
         }).catch(() => {});
       });
       source.onerror = () => {
@@ -189,9 +226,9 @@ document.addEventListener('alpine:init', () => {
         // snapshot — the retained replay may not have arrived yet. The
         // replay-complete marker owns closure; EventSource retries on its
         // own with Last-Event-ID.
-        if (this._es !== source) return;
+        if (!isCurrent()) return;
         api.get(`/api/operations/${encodeURIComponent(id)}`).then(op => {
-          if (this._es === source) this.op = op;
+          if (isCurrent()) this.op = op;
         }).catch(() => {});
       };
     },
@@ -224,30 +261,37 @@ document.addEventListener('alpine:init', () => {
     },
 
     async cancel() {
+      const id = this.op?.id;
+      if (this.actionLoading || !id || !this.current(id)) return;
+      const generation = this._loadGeneration;
       this.actionLoading = true;
       try {
-        await api.post(`/api/operations/${this.op.id}/cancel`);
-        showToast('Cancel requested', 'success');
+        await api.post(`/api/operations/${encodeURIComponent(id)}/cancel`);
+        if (this.current(id, generation)) showToast('Cancel requested', 'success');
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.current(id, generation)) showToast(e.message, 'error');
+      } finally {
+        if (this.current(id, generation)) this.actionLoading = false;
       }
-      this.actionLoading = false;
     },
 
     async retry() {
+      const id = this.op?.id;
+      if (this.actionLoading || !id || !this.current(id)) return;
+      const generation = this._loadGeneration;
       this.actionLoading = true;
       try {
-        const next = await api.post(`/api/operations/${this.op.id}/retry`);
+        const next = await api.post(`/api/operations/${encodeURIComponent(id)}/retry`);
+        // A retry may finish after the user has already left this operation.
+        if (!this.current(id, generation)) return;
         showToast('Retry queued', 'success');
         Alpine.store('router').navigate('operation-detail', { id: next.id });
-        // Re-init against the new operation.
-        if (this._es) this._es.close();
-        this.op = null; this.lines = []; this.loading = true;
-        await this.init();
+        await this.load();
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.current(id, generation)) showToast(e.message, 'error');
+      } finally {
+        if (this.current(id, generation)) this.actionLoading = false;
       }
-      this.actionLoading = false;
     },
 
     duration: opDuration,

@@ -329,7 +329,7 @@
                     <div class="card-meta" x-text="app.server"></div>
                     <div class="card-hash" x-text="app.current_hash || app.status"></div>
                     <button x-show="!group.system" title="Remove from group"
-                      @click.stop="unassignFromGroup(group.name, app.name)"
+                      @click.stop="unassignFromGroup(group.name, app)"
                       style="position: absolute; top: 8px; right: 8px; background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: 14px; opacity: 0.6;">&times;</button>
                   </div>
                 </template>
@@ -1846,7 +1846,7 @@
       </template>
 
       <template x-if="!loading && !op && loadFailed">
-        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="init()">Retry</button></div>
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
       </template>
 
       <template x-if="!loading && op">

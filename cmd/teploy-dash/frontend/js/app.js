@@ -541,14 +541,31 @@ document.addEventListener('alpine:init', () => {
       this.loading = true;
       this.loadError = null;
       try {
-        const [apps, groups, servers] = await Promise.all([
-          api.get('/api/apps'),
+        const [groups, servers] = await Promise.all([
           api.get('/api/groups'),
           // /api/servers is viewer-readable; /api/config/servers is admin-only
           // and left a 403-catch producing an empty dropdown for editors.
           api.get('/api/servers'),
         ]);
-        this.apps = apps || [];
+        // Scoped memberships need envelope identities, including legacy
+        // name-hash ids. Read the apps and ids from the SAME fleet snapshot
+        // so a rename/name swap between requests cannot misbind a card.
+        const scoped = (groups || []).some(g => (g.server_apps || []).length > 0);
+        let apps;
+        if (scoped) {
+          const fleet = await api.get('/api/fleet');
+          if (!Array.isArray(fleet?.servers)) throw new Error('Fleet identities unavailable');
+          if (fleet.servers.length && fleet.servers.every(s => s.error)) {
+            throw new Error(`Fleet app collection failed for all ${fleet.servers.length} server(s)`);
+          }
+          // Match /api/apps: only successful observations contribute apps.
+          apps = fleet.servers.filter(s => !s.error).flatMap(s =>
+            (s.apps || []).map(a => ({ ...a, server: s.server, server_id: s.id })));
+        } else {
+          apps = (await api.get('/api/apps')) || [];
+        }
+        // AppState's wire key is `app`; cards and routes use `name`.
+        this.apps = apps.map(a => ({ ...a, name: a.app ?? a.name }));
         this.groups = groups || [];
         this.serverList = Object.keys(servers || {});
       } catch (e) {
@@ -607,21 +624,22 @@ document.addEventListener('alpine:init', () => {
     },
 
     groupedApps() {
+      // Legacy bare names retain their old all-servers meaning. Scoped refs
+      // match the pair; a server rename keeps its binding, while a new server
+      // reusing the old name cannot inherit it.
+      const belongs = (g, a) => (g.apps || []).includes(a.name) ||
+        (g.server_apps || []).some(ref => a.server_id && ref.app === a.name && ref.server_id === a.server_id);
       const groups = (this.groups || []).map(g => {
         const projectAppNames = new Set((g.projects || []).flatMap(p => p.apps || []));
-        const directApps = this.filteredApps.filter(a => (g.apps || []).includes(a.name) && !projectAppNames.has(a.name));
+        const directApps = this.filteredApps.filter(a => belongs(g, a) && !projectAppNames.has(a.name));
         const projects = (g.projects || []).map(p => ({
           ...p,
           resolvedApps: this.filteredApps.filter(a => (p.apps || []).includes(a.name)),
         }));
         return { ...g, directApps, projects, system: false };
       });
-      const allAssigned = new Set((this.groups || []).flatMap(g => {
-        const groupApps = g.apps || [];
-        const projApps = (g.projects || []).flatMap(p => p.apps || []);
-        return [...groupApps, ...projApps];
-      }));
-      const ungrouped = this.filteredApps.filter(a => !allAssigned.has(a.name));
+      const ungrouped = this.filteredApps.filter(a => !(this.groups || []).some(g =>
+        belongs(g, a) || (g.projects || []).some(p => (p.apps || []).includes(a.name))));
       if (ungrouped.length > 0) {
         groups.push({ name: 'Ungrouped', directApps: ungrouped, projects: [], system: true });
       }
@@ -671,7 +689,17 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async unassignFromGroup(groupName, appName) {
+    async unassignFromGroup(groupName, app) {
+      const appName = app.name;
+      const group = (this.groups || []).find(g => g.name === groupName);
+      const refs = (group?.server_apps || []).filter(ref => ref.app === appName);
+      // The current DELETE contract resolves by name, scoped refs first.
+      // Never send it for a card that could remove another server's binding.
+      // Multiple scoped refs need a backend-specific removal route first.
+      if (refs.length && (refs.length !== 1 || refs[0].server_id !== app.server_id)) {
+        showToast('Cannot remove this app individually: server-scoped removal is not supported for these bindings', 'error');
+        return;
+      }
       if (!confirm(`Remove "${appName}" from group "${groupName}"?`)) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/apps/${encodeURIComponent(appName)}`);
@@ -1585,10 +1613,14 @@ document.addEventListener('alpine:init', () => {
 
     async toggleEnabled(t) {
       try {
-        // Config-only fields: the API rejects result fields on the upsert
-        // (A24) — spread the record minus the last-result columns.
-        const {last_run_at, last_ok, last_detail, last_metric, last_date, last_duration_ms, ...config} = t;
-        await rawFetch.post('/api/restore-tests', {...config, enabled: !t.enabled});
+        // Allowlist the configuration DTO. GET also carries read-only result
+        // and delivery metadata, which strict POST decoding must reject.
+        const config = {
+          id: t.id, server: t.server, app: t.app, accessory: t.accessory,
+          bucket: t.bucket, region: t.region, interval_hours: t.interval_hours,
+          enabled: !t.enabled,
+        };
+        await rawFetch.post('/api/restore-tests', config);
         await this.loadTests();
         showToast(!t.enabled ? 'Restore test enabled' : 'Restore test disabled', 'success');
       } catch (e) {

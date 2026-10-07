@@ -2029,3 +2029,42 @@ A25 residual); A23/R35 single-transition redesign.
   34097d7 (D08 recreate race test), fc7cc6c (misleading states), 1846575
   (IA regroup), f83fab2 (exemplar + delivery UI). Gates as above. No
   upstream defects found this lane; no cross-repo reports owed.
+
+## 2026-10-06 frontend follow-up (local patch, not published)
+
+These IDs refer to the 2026-10-06 Dash/gateway/terminal audit, not the
+older D05/D06/D09 feature-lane IDs elsewhere in this file. Base:
+`60c15096aa619a9b53a573bd3719797650abc73e`.
+
+- **D05 — implemented, component-tested:** operation detail observes the
+  route ID through Retry / Back / Forward. Each load resets record/log/action
+  state, closes the old stream, and advances a generation. Late loads, SSE
+  callbacks/refetches, and retry responses cannot republish or redirect a
+  newer route. Repeated actions are gated; route effects are released on
+  destruction. Real-browser/Alpine lifecycle verification remains pending.
+- **D06 — partially implemented:** Projects reads scoped app rows and server
+  identities from the same `/api/fleet` observation, preserving bindings
+  across rename and distinguishing reused names. It normalizes the wire
+  `app` field into the card's `name`; legacy bare-name groups/projects keep
+  their historical all-server meaning. Fleet lookup/all-server failures
+  surface instead of presenting unknown membership as empty. The existing
+  name-only DELETE is refused locally when it could remove another card's
+  scoped binding or when several bindings match. **Open:** a backend route
+  for removing one specific binding among several; project membership is
+  still legacy bare-name; deploy auto-assignment remains legacy. No new
+  backend API is assumed and the full D06 mutation gate is not closed.
+- **D09 — implemented, component-tested:** restore enable/disable sends the
+  eight explicitly allowed configuration fields, excluding Last* results,
+  `delivery`, and future GET metadata. Both directions and refreshed enabled
+  state pass against the strict-contract network stub. Actual Go HTTP/store
+  persistence verification remains pending. The earlier monitor-toggle
+  claim was withdrawn; no monitor path was changed.
+
+Verification: all nine existing Node frontend files plus nine added
+regression cases pass (18 reported tests, zero failures). The nine new
+cases fail against the untouched base scripts. `node --check` passes for
+both edited bundles. Tests use the repository's existing zero-dependency
+DOM/Alpine/network-stub convention; they are not a rendered-browser or Go
+integration result. No backend changes, dependency installation, push,
+merge, or deployment were performed. Browser execution and Go checks remain
+separate gates; the pre-existing backend CI failures are not resolved here.
