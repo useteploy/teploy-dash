@@ -813,20 +813,25 @@ func TestSourceWebhookUnknownSource(t *testing.T) {
 func TestSourceDelete(t *testing.T) {
 	s, _ := sourceTestServer(t, nil)
 	id, _ := createBoundSource(t, s, "https://github.com/team/app", "main")
-	response := httptest.NewRecorder()
-	s.handler().ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/sources/"+id, nil))
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())
+	// Legacy-census fence: a source predating durable preview ownership is
+	// refused deletion with the documented error until the former-target
+	// census is durably recorded.
+	refused := httptest.NewRecorder()
+	s.handler().ServeHTTP(refused, httptest.NewRequest(http.MethodDelete, "/api/sources/"+id, nil))
+	if refused.Code != http.StatusConflict || !strings.Contains(refused.Body.String(), "source predates durable preview ownership; former-target audit and fenced reconciliation required before deletion") {
+		t.Fatalf("pre-census delete status=%d body=%s", refused.Code, refused.Body.String())
 	}
-	gone := httptest.NewRecorder()
-	s.handler().ServeHTTP(gone, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
-	if gone.Code != http.StatusNotFound {
-		t.Fatalf("get after delete status=%d", gone.Code)
+	// The refusal leaves the source fully present: the API read stays 200
+	// and the webhook endpoint stays live (an unsigned delivery answers
+	// 401, not the 404 a deleted source's hook would).
+	present := httptest.NewRecorder()
+	s.handler().ServeHTTP(present, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
+	if present.Code != http.StatusOK {
+		t.Fatalf("get after refused delete status=%d", present.Code)
 	}
-	// The webhook endpoint is gone too.
 	hook := httptest.NewRecorder()
 	s.handler().ServeHTTP(hook, httptest.NewRequest(http.MethodPost, "/hooks/sources/"+id, strings.NewReader(`{}`)))
-	if hook.Code != http.StatusNotFound {
-		t.Fatalf("hook after delete status=%d", hook.Code)
+	if hook.Code != http.StatusUnauthorized {
+		t.Fatalf("hook after refused delete status=%d", hook.Code)
 	}
 }

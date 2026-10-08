@@ -2222,8 +2222,67 @@ five are older expectations colliding with the deliberate legacy-census /
 former-target fence ("source predates durable preview ownership...", "registered
 project bypass"); they fail identically with and without r6, and the fence is
 not weakened to turn them green. Reconciling those tests with the fenced
-lifecycle stays open with the other r5 followthrough. The CLI provenance
+lifecycle LANDED 2026-10-07 (test-only; see the test-reconciliation section
+below); the other r5 followthrough stays open. The CLI provenance
 contract (repository_id compact string, clone-locator fallback) remains
 representation-confirmed only; its producer/consumer engineering is still open
 and untouched here. No commits were made; the tree stays dirty for the
 orchestrator.
+
+## 2026-10-07 test reconciliation — five latent r4 fence collisions closed
+
+The five latent internal/server failures recorded in the r6 note above are
+reconciled to the fenced lifecycle semantics (test-only change; no production
+code touched, the fence is untouched and still fails closed):
+
+- TestSourceDelete asserts the fenced refusal — DELETE answers 409 "source
+  predates durable preview ownership; former-target audit and fenced
+  reconciliation required before deletion" — and that the refusal leaves the
+  source fully present (GET 200; the webhook endpoint answers 401 to an
+  unsigned delivery instead of the 404 a deleted source's hook would).
+- TestSourceOwnershipOutlivesBindingAndRetention asserts that preview target
+  enumeration refuses behind the census fence both before AND after retained
+  ownership is on record (deleting the manifest binding cannot manufacture a
+  census), while the unfenced ownership machinery keeps its coverage:
+  cleanupOwner resolves the renamed server by retained stable ID and refuses
+  the reused alias, deletion stays refused across a store restart, the
+  retained policy manifest still renders, and unknown stable identities fail
+  closed.
+- TestSourcePRChronologyBeforeSupersedeAndRestart asserts the fenced admission
+  contract end to end: a trusted synchronize delivery is refused 400 with
+  "former-target preview census required before new admission"; the refusal is
+  recorded refused (never seen), so replaying the same delivery id re-runs
+  admission instead of answering duplicate (the C02 rollback rule); the
+  refused delivery's watermark still orders chronology (older update ignored
+  as stale; equal timestamp with another SHA ignored by provider authority);
+  a closed delivery fails the ownership enumeration retryably (503 surfacing
+  the fence error); the watermark AND the fence survive a store restart;
+  failed lifecycle persistence answers 503 without corrupting durable state;
+  no source operation is ever admitted and the unrelated queued blocker still
+  executes.
+- TestSourcePullWebhookPinsInstallationHeadAndLifecycle keeps the installation
+  authority assertion (wrong App installation recorded-and-ignored) and
+  asserts the trusted installation's delivery is refused 400 with the census
+  error, with same-delivery-id replay re-running admission (not duplicate).
+- TestSourceQueueUsesProductionWrapperSeam keeps the exact no-bypass pin but
+  compares against the symlink-RESOLVED checkout root: source.ProjectPath
+  fences escaping roots via filepath.EvalSymlinks, so the wrapper's
+  --project-dir is the resolved workspace path (the macOS /var vs
+  /private/var distinction made the old raw-string comparison fail).
+
+Reconciliation rationale, verified before rewriting: the census flag is
+structurally un-clearable in the sealed tree — Lifecycle loads default
+legacy_audit_required=true, the field is omitempty so SaveLifecycle can never
+persist false, and Create's initial record omits it too — so every source
+(legacy or fresh) stays fenced for PR admission, preview enumeration and
+deletion until the accepted-CLI census/reconciliation path exists. Seeding a
+"completed census" in tests would test a state production cannot reach or
+even retain across one watermark save; the tests therefore assert the fenced
+behavior itself.
+
+Gates (working tree, uncommitted): gofmt clean; go build ./... and go vet
+./... clean; go test ./... -count=1 all 17 packages ok; the five reconciled
+tests also pass under -race; node --check on all three shipped frontend
+bundles; node --test frontend suite 51/51 (baseline). Production code
+untouched (git diff: four _test.go files). No commits were made; the tree
+stays dirty for the orchestrator.

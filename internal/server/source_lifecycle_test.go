@@ -67,64 +67,64 @@ func TestSourcePRChronologyBeforeSupersedeAndRestart(t *testing.T) {
 		s.handler().ServeHTTP(w, req)
 		return w
 	}
-	current := send("synchronize", "B", sha, stamp)
-	if current.Code != 200 || !strings.Contains(current.Body.String(), "admitted") {
-		t.Fatalf("B: %s", current.Body.String())
+	// The legacy-census fence: PR preview admission is refused with the
+	// documented error — the source predates durable preview ownership and
+	// no former-target census is recorded (nothing in the current tree can
+	// record one). The refusal is a refused, retryable delivery, never a
+	// seen one: the same delivery id re-runs admission (C02 rollback rule).
+	refused := send("synchronize", "B", sha, stamp)
+	if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), "former-target preview census required before new admission") {
+		t.Fatalf("B: %d %s", refused.Code, refused.Body.String())
 	}
-	var envelope struct {
-		IDs []string `json:"operation_ids"`
+	retry := send("synchronize", "B", sha, stamp)
+	if retry.Code != http.StatusBadRequest || !strings.Contains(retry.Body.String(), "former-target preview census required before new admission") {
+		t.Fatalf("refused delivery swallowed the retry: %d %s", retry.Code, retry.Body.String())
 	}
-	json.Unmarshal(current.Body.Bytes(), &envelope)
-	assertQueued := func(id string) {
-		t.Helper()
-		op, e := s.operations.Get(id)
-		if e != nil || op.Status != operation.StatusQueued {
-			t.Fatalf("newest lost: %+v %v", op, e)
-		}
-	}
-	assertQueued(envelope.IDs[0])
+	// The refused delivery still recorded its admission-intent watermark,
+	// so lifecycle chronology keeps ordering deliveries: an older update is
+	// ignored as a stale watermark...
 	old := send("synchronize", "A", strings.Repeat("a", 40), "2026-10-07T12:01:00Z")
 	if !strings.Contains(old.Body.String(), "ignored") {
 		t.Fatal(old.Body.String())
 	}
-	assertQueued(envelope.IDs[0])
-	// Equal timestamp with another SHA is resolved by provider authority.
+	// ...and an equal timestamp with another SHA is resolved by provider
+	// authority (the live head wins; the delivery is ignored).
 	equal := send("synchronize", "equal-old", strings.Repeat("a", 40), stamp)
 	if !strings.Contains(equal.Body.String(), "ignored") {
 		t.Fatal(equal.Body.String())
 	}
-	assertQueued(envelope.IDs[0])
 	mu.Lock()
 	state = "closed"
 	stamp = "2026-10-07T12:03:00Z"
 	mu.Unlock()
+	// A closed delivery must resolve its targets from the durable preview
+	// ownership record; the census fence refuses that enumeration
+	// retryably instead of guessing from manifest bindings.
 	closed := send("closed", "close", sha, stamp)
-	if !strings.Contains(closed.Body.String(), "admitted") {
-		t.Fatal(closed.Body.String())
+	if closed.Code != http.StatusServiceUnavailable || !strings.Contains(closed.Body.String(), "source predates durable preview ownership; former-target audit required") {
+		t.Fatalf("close: %d %s", closed.Code, closed.Body.String())
 	}
-	json.Unmarshal(closed.Body.Bytes(), &envelope)
-	closeID := envelope.IDs[0]
-	send("opened", "old-open", sha, "2026-10-07T12:02:00Z")
-	assertQueued(closeID)
+	// The watermark and the fence both survive a store restart: the older
+	// re-open stays ignored and admission stays refused.
 	reopenedStore, e := source.New(s.config.DataDir)
 	if e != nil {
 		t.Fatal(e)
 	}
 	s.sources = reopenedStore
-	send("opened", "restart-old-open", sha, "2026-10-07T12:02:00Z")
-	assertQueued(closeID)
+	if stale := send("opened", "restart-old-open", sha, "2026-10-07T12:02:00Z"); !strings.Contains(stale.Body.String(), "ignored") {
+		t.Fatal(stale.Body.String())
+	}
 	mu.Lock()
 	state = "open"
 	stamp = "2026-10-07T12:04:00Z"
 	sha = strings.Repeat("c", 40)
 	mu.Unlock()
-	reopened := send("reopened", "reopen", sha, stamp)
-	if !strings.Contains(reopened.Body.String(), "admitted") {
-		t.Fatal(reopened.Body.String())
+	afterRestart := send("reopened", "reopen", sha, stamp)
+	if afterRestart.Code != http.StatusBadRequest || !strings.Contains(afterRestart.Body.String(), "former-target preview census required before new admission") {
+		t.Fatalf("restart admitted without a census: %d %s", afterRestart.Code, afterRestart.Body.String())
 	}
-	json.Unmarshal(reopened.Body.Bytes(), &envelope)
-	assertQueued(envelope.IDs[0])
-	// Refused persistence cannot cancel the queued newest operation.
+	// Refused lifecycle persistence answers 503 without admitting anything
+	// or corrupting the durable state; the fence is intact afterwards.
 	lifecyclePath := filepath.Join(s.config.DataDir, "sources", id, "lifecycle.json")
 	saved, _ := os.ReadFile(lifecyclePath)
 	os.Remove(lifecyclePath)
@@ -133,16 +133,22 @@ func TestSourcePRChronologyBeforeSupersedeAndRestart(t *testing.T) {
 	stamp = "2026-10-07T12:05:00Z"
 	sha = strings.Repeat("d", 40)
 	mu.Unlock()
-	refused := send("synchronize", "journal-fail", sha, stamp)
-	if refused.Code != 503 {
-		t.Fatalf("persist refusal %d %s", refused.Code, refused.Body.String())
+	persistence := send("synchronize", "journal-fail", sha, "2026-10-07T12:05:00Z")
+	if persistence.Code != 503 {
+		t.Fatalf("persist refusal %d %s", persistence.Code, persistence.Body.String())
 	}
-	assertQueued(envelope.IDs[0])
 	os.Remove(lifecyclePath)
 	os.WriteFile(lifecyclePath, saved, 0600)
+	// Nothing was ever admitted for the source; only the blocker exists and
+	// the fence never disturbed unrelated queue execution.
+	for _, op := range s.operations.List("", "", 0) {
+		if op.Request.SourceID != "" {
+			t.Fatalf("fence admitted work: %+v", op.Request)
+		}
+	}
 	close(release)
-	if op := waitTerminal(t, s, envelope.IDs[0]); op.Status != operation.StatusSucceeded {
-		t.Fatalf("newest did not execute: %+v", op)
+	if op := waitTerminal(t, s, blocker.ID); op.Status != operation.StatusSucceeded {
+		t.Fatalf("blocker did not execute: %+v", op)
 	}
 }
 
@@ -150,7 +156,17 @@ func TestSourceOwnershipOutlivesBindingAndRetention(t *testing.T) {
 	s, _ := sourceTestServer(t, nil)
 	id, _ := createBoundSource(t, s, "https://github.com/team/app", "main")
 	src, _ := s.sources.Get(id)
+	// Legacy-census fence: until the former-target census is durably
+	// recorded, the source predates durable preview ownership and target
+	// enumeration refuses rather than guessing from manifest bindings.
+	if _, e := s.previewTargets(src); e == nil || !strings.Contains(e.Error(), "source predates durable preview ownership; former-target audit required") {
+		t.Fatalf("legacy census fence absent: %v", e)
+	}
 	state, _ := s.sources.Lifecycle(id)
+	// Seed retained preview ownership. The census flag cannot be cleared
+	// through any current writer (a legacy_audit_required=false value is
+	// dropped by omitempty on save and the loader defaults it back), so the
+	// seeded record stays behind the census fence — exactly like production.
 	key := previewOwnershipKey(id, "srv-stable", "web", 9)
 	state.Previews[key] = source.PreviewOwnership{ID: key, ServerID: "srv-stable", Server: "prod", App: "web", Pull: 9, Branch: "dash-" + id + "-pr-9", Manifest: "app: web\nport: 80\n", Policy: source.PreviewPolicy{TTL: "24h", BaseDomain: "preview.test", AllowIPs: []string{"127.0.0.1"}}}
 	if e := s.sources.SaveLifecycle(id, state); e != nil {
@@ -163,10 +179,13 @@ func TestSourceOwnershipOutlivesBindingAndRetention(t *testing.T) {
 	if e := s.manifests.Delete("prod", "web", &doc.CurrentRevision); e != nil {
 		t.Fatal(e)
 	}
-	targets, e := s.previewTargets(src)
-	if e != nil || len(targets) != 1 || targets[0].Server != "renamed" {
-		t.Fatalf("former target lost: %v %v", targets, e)
+	// Enumeration stays fenced even with retained ownership on record: the
+	// census gate is authoritative, never best-effort, and deleting the
+	// manifest binding cannot manufacture a census.
+	if _, e := s.previewTargets(src); e == nil || !strings.Contains(e.Error(), "source predates durable preview ownership; former-target audit required") {
+		t.Fatalf("retained ownership bypassed the census fence: %v", e)
 	}
+	var e error
 	if _, e = s.cleanupOwner(src, "prod", "web", 9); e == nil {
 		t.Fatal("reused name authorized cleanup")
 	}

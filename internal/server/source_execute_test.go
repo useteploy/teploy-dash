@@ -152,25 +152,27 @@ func TestSourcePullWebhookPinsInstallationHeadAndLifecycle(t *testing.T) {
 		s.handler().ServeHTTP(w, r)
 		return w
 	}
+	// Installation authority still gates the delivery itself: the wrong
+	// App installation is recorded-and-ignored, never admitted.
 	bad := send(8, "wrong-installation")
 	if bad.Code != 200 || !strings.Contains(bad.Body.String(), `"status":"ignored"`) {
 		t.Fatalf("wrong installation accepted: %s", bad.Body.String())
 	}
+	// The legacy-census fence: the trusted installation's delivery is
+	// refused admission with the documented error — the source predates
+	// durable preview ownership and no former-target census is recorded
+	// (nothing in the current tree can record one).
 	good := send(7, "trusted-head")
-	var result struct {
-		IDs []string `json:"operation_ids"`
+	if good.Code != http.StatusBadRequest || !strings.Contains(good.Body.String(), "former-target preview census required before new admission") {
+		t.Fatalf("trusted lifecycle admitted: %d %s", good.Code, good.Body.String())
 	}
-	json.Unmarshal(good.Body.Bytes(), &result)
-	if good.Code != 200 || len(result.IDs) != 1 {
-		t.Fatalf("trusted lifecycle refused: %d %s", good.Code, good.Body.String())
-	}
-	op := waitTerminal(t, s, result.IDs[0])
-	if op.Request.Kind != operation.KindSourcePreview || op.Request.SourcePullRequest != 9 || op.Request.SourceCommit != strings.Repeat("a", 40) || op.Request.SourcePullUpdatedAt != "2026-10-07T12:00:00Z" {
-		t.Fatalf("immutable lifecycle provenance missing: %+v", op.Request)
-	}
+	// The refusal is recorded as refused, never seen: replaying the same
+	// delivery id re-runs admission instead of answering duplicate (the
+	// C02 rollback rule — the forge's retry keeps its chance once a census
+	// eventually clears the fence).
 	replay := send(7, "trusted-head")
-	if !strings.Contains(replay.Body.String(), `"status":"duplicate"`) {
-		t.Fatalf("delivery replay admitted: %s", replay.Body.String())
+	if replay.Code != http.StatusBadRequest || strings.Contains(replay.Body.String(), `"status":"duplicate"`) {
+		t.Fatalf("refused delivery swallowed the retry: %d %s", replay.Code, replay.Body.String())
 	}
 }
 

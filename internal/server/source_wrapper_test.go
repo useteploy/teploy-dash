@@ -219,7 +219,12 @@ func TestSourceQueueUsesProductionWrapperSeam(t *testing.T) {
 					consumed = cmd.Args[i+1]
 				}
 			}
-			if consumed != workspace {
+			// The wrapper pins --project-dir to the symlink-RESOLVED checkout
+			// root (source.ProjectPath fences escaping roots), so the seam
+			// must compare against the resolved workspace, not the raw temp
+			// path the fixture created.
+			resolved, e := filepath.EvalSymlinks(workspace)
+			if e != nil || consumed != resolved {
 				return -1, fmt.Errorf("registered project bypass")
 			}
 			return 0, nil
