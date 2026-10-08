@@ -1411,3 +1411,36 @@ func TestAppendFailureProducesGapMarker(t *testing.T) {
 	}
 	manager.Shutdown(context.Background())
 }
+
+func TestPrincipalAdmissionBudgetAcrossTargetsAndReplay(t *testing.T) {
+	gate := make(chan struct{})
+	m, err := New(t.TempDir(), Options{Resolver: testResolver, MaxLivePerPrincipal: 1, Executor: func(ctx context.Context, _ Command, _ func(Stream, string)) (int, error) {
+		select {
+		case <-gate:
+			return 0, nil
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+	defer close(gate)
+	a := &Actor{Kind: "local", Subject: "A"}
+	b := &Actor{Kind: "local", Subject: "B"}
+	first, replayed, err := m.Enqueue(deployRequest("one", "example/web:1"), "same", a)
+	if err != nil || replayed {
+		t.Fatalf("first: %v %v", replayed, err)
+	}
+	if _, _, err := m.Enqueue(deployRequest("two", "example/web:1"), "other", a); !errors.Is(err, ErrPrincipalAdmissionBudget) {
+		t.Fatalf("principal budget: %v", err)
+	}
+	replay, replayed, err := m.Enqueue(deployRequest("one", "example/web:1"), "same", a)
+	if err != nil || !replayed || replay.ID != first.ID {
+		t.Fatalf("replay denied: %v %v", replayed, err)
+	}
+	if _, _, err := m.Enqueue(deployRequest("two", "example/web:1"), "same", b); err != nil {
+		t.Fatalf("other principal denied: %v", err)
+	}
+}

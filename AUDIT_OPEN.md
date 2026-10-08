@@ -2068,3 +2068,162 @@ DOM/Alpine/network-stub convention; they are not a rendered-browser or Go
 integration result. No backend changes, dependency installation, push,
 merge, or deployment were performed. Browser execution and Go checks remain
 separate gates; the pre-existing backend CI failures are not resolved here.
+
+
+## 2026-10-07 implementation reconciliation (unpublished working tree)
+
+This addendum supersedes stale open claims above; October D01–D20 are
+separate from the historical programme IDs with the same labels.
+
+October findings: D01/D03 capability enforcement covers alternate admission
+and operation output; D02/D11 JSONL tails are durably repaired before append;
+D04 MCP enforces source-owned environment authority. D05/D09 frontend fixes
+are retained and D09 now has actual HTTP/store coverage. D06 now has scoped
+backend group/project deletion (`server_id`, or explicit `legacy=1`), scoped
+project membership, and scoped deploy assignment. Ambiguous bare deletions
+return conflict. D07 joins cold fleet refreshes and rejects invalidated
+observations. D08 KV tests use the injected capability probe. D10 returns
+persisted restore scheduling/results. D12 keeps restore alerts in the durable
+outbox after notification settings changes. D13 preserves future-version
+records/journals byte-for-byte and disables recovery/retention writes; D14
+retains read-only history/SSE while refusing mutations. D15 normalizes both
+server envelope eras and refuses unknown versions. D16 handles tiny event
+budgets. D17 permits secret replacement when no secret exists. D18 raises
+the container shutdown allowance to 180 seconds. D19 requires trusted SSH
+host enrollment. D20 preserves refreshed shortcut state and ETag on conflict.
+
+Historical tails implemented here: custom capability editor, configurable
+per-principal live admission budget, live SSE grant/epoch/session checks,
+restore incarnation CAS in file and pgwire stores, context-canceled restore
+resolution/verification, and sealed monitor/restore scheduler reloads after
+Stop. Older per-channel outbox/scheduling deferrals above were already
+implemented in code and are not outstanding defects. The outbox remains a
+local durable journal in both store modes by deliberate current contract.
+
+Validation includes Go build/vet/unit/race, Node component tests, pinned
+contract schemas/decoders, real PostgreSQL restore persistence/CAS, and
+immutable CLI template consumer fixtures. Rendered browser acceptance and
+live target install/migration/backup/restore remain separate acceptance
+gates. No deployment, commit or release is claimed. GitHub App credential
+verification and authenticated git-build/preview journeys remain actual
+feature work; the nil verifier still returns 501. This addendum does not
+claim those historical feature journeys exist.
+
+## 2026-10-07 historical D04 source journeys (r2, unpublished)
+
+The nil production verifier, unused private-repository credentials and
+attribution-only SourceCommit omissions above now have implementation:
+operator-owned named provider scopes, bounded remote repository/content access
+verification, real GitHub App JWT/installation token exchange and rotation,
+authenticated immutable checkout, and CLI-backed same-repository App PR preview
+build/close/expiry journeys. The Sources page exposes verdicts, deliveries,
+immutable heads and live CLI preview state. Preview policy excludes production
+environment/secrets/accessories/volumes, and requires explicit access/TTL.
+
+This is historical programme D04, not October D04's already implemented MCP
+source-owned environment protection. October D01–D20, R60, F037/R37 and R47/R38
+remain retained. C02 trigger convergence and C06's CLI-owned lifecycle still
+have their own acceptance/ownership. Monorepo manifest-directory selection is
+implemented, including conservative changed-file filters matching the existing
+CLI autodeploy.paths grammar. Provider-specific webhook freshness beyond
+GitHub PR lifecycle timestamps, GitLab signature variants, and source admission
+convergence with a separately configured CLI listener remain explicit residues.
+Current CLI previews support container port 80 only; Dash refuses other preview
+ports pending the owning CLI change. No CLI patch or release is made here.
+
+Focused actual Go provider-process/Git/server tests and Node component checks are
+recorded separately from the predecessor's complete validation. Full final-byte
+Go/race/build/vet/contracts/PostgreSQL/CLI-consumer reruns remain capacity-gated.
+Real credentials, live target journeys, rendered browser, WordPress migration
+and actual Nucleus execution remain acceptance gates. The templates CLI pin
+remains its honest old immutable commit until a corrected public commit exists.
+
+CLI receipt qualification from independent review: the `176e5da5…` source
+snapshot is historical test evidence with nine material objections, not a final
+release candidate. CLI fix-r3 is active. Current integration requires the revised
+immutable receipt and final consumer reruns; PlanRecord2/env_literal stay additive.
+
+## 2026-10-07 r4 source correction and retained acceptance
+
+R3-01 runtime package declarations now include Git, rsync and OpenSSH in both
+images. R3-02 admission checks live forge heads/PR chronology and durably records
+intent before queue replacement; this is local admission, not shared publication
+convergence. R3-03 stores stable server/app/PR ownership and admitted policy
+independent of manifest bindings. Cleanup/expiry/source deletion fail closed
+and retain ownership until the accepted CLI supplies atomic generation fencing
+and authoritative absence replay. Legacy sources require a former-target census.
+R3-04 seals every source refresh continuation and once-only secret to component
+lifetime and selection. R3-05 watches project/server route identity with response
+and action guards. R3-06 extracts env and env_literal aliases/merges with strict
+malformed-authority refusal. R3-07 adds an actual production-wrapper test seam,
+immutable Git fixtures, build receipt/rotation/policy checks and hook suppression.
+Webhook principal-budget refusals now return 429.
+
+Final frontend and template structural checks are recorded privately. Newly
+authored Go regressions are uncompiled under the shared Go-slot hold; earlier
+full Go/race and 24-Node receipts remain historical. The common D04/C02 CLI
+trigger wire is being implemented by its owning lane; provisional types and
+reserved capabilities are not consumed or advertised here. The 544 source
+snapshot and older 176 snapshot are historical; no public CLI/image repin is
+made without accepted producer artifacts and final consumers. PlanRecord2,
+env_literal, volume_ownership and ConfigDigest/ManifestSHA256 separation stay
+required. Native Nucleus, real provider/Git/build/preview, both runtime images,
+rendered browser and all catalog install/restore/WordPress migration gates remain.
+
+## 2026-10-07 r6 push-admission repairs (R5-01/R5-02, unpublished working tree)
+
+The r5 review required two push-admission changes; both are implemented on the
+frozen r4 tree (seals re-verified before work: both complete-patch digests, HEADs,
+porcelain inventories and recomputed candidate digests match the r4 receipt;
+templates' 11 dirty paths untouched).
+
+R5-01 — ParsePush now decodes the explicit "deleted":true marker and honors it
+before commit selection, for both the after and checkout_sha forms, matching
+teploy-cli's autodeploy contract (explicit false still pins; strict single-frame
+parsing and the null/zero/tag/full-SHA rules are unchanged). A signed deletion can
+no longer become deploy intent just because a recreated live ref happens to sit
+at the payload's SHA: the handler now refuses it at classification, records an
+honest ignored delivery, admits nothing and leaves queued work and the push
+watermark alone, before and after a store restart. Reverting only this repair
+makes the new signed-handler fixture admit an operation, which is the defect
+demonstrated.
+
+R5-02 — generic PushHead no longer folds every ls-remote problem into
+ErrStaleAuthority. A failed, canceled or bounded-output gitRun (including the
+flattened --exit-code no-match exit, from which absence cannot be distinguished)
+returns a retryable unavailable error, so the handler answers 503 without
+recording any seen delivery; the same delivery id therefore re-runs admission
+on retry instead of answering duplicate. A new classifyLsRemote step requires a
+well-formed advertisement of exactly the watched ref before any mismatch may be
+called stale; malformed output is an invalid observation and stays retryable.
+Genuine observed mismatches remain durable ignores. The signed-handler fixture
+drives the production fallback (resolveSourceAccess -> Access.PushHead) against
+a real local git smart-HTTP advertisement server: unreachable transport refuses
+retryably with no ledger entry, a proven newer head is ignored, and the healed
+transport admits the very same delivery id. Reverting only this repair makes
+that fixture record an ignored delivery and swallow the retry.
+
+New coverage: parser table rows for the deletion marker; TestPushHeadGeneric
+AuthorityClassifications (real transport: unreachable, canceled mid-flight,
+garbage response, no-match advertisement, valid match, proven mismatch, plus a
+malformed-shape table); TestSourceWebhookDeletionMarkerNeverAdmitsDeployIntent;
+TestSourceWebhookPushAuthorityFailureStaysRetryable. Validation: go build/vet
+green across the repo; node --check on all shipped frontend JS; 51/51 frontend
+component tests; full go test shows NO new failures versus the frozen r4 base.
+
+Two facts surfaced by finally compiling and running the frozen tree's Go (r4/r5
+had left final Go uncompiled): the earlier "4 pre-existing TestAppKV failures"
+do not reproduce at this base — every TestAppKV test passes here; and
+internal/server carries five latent failures already present in the sealed r4
+tree itself (TestSourceDelete, TestSourceOwnershipOutlivesBindingAndRetention,
+TestSourcePRChronologyBeforeSupersedeAndRestart, TestSourcePullWebhookPins
+InstallationHeadAndLifecycle, TestSourceQueueUsesProductionWrapperSeam). All
+five are older expectations colliding with the deliberate legacy-census /
+former-target fence ("source predates durable preview ownership...", "registered
+project bypass"); they fail identically with and without r6, and the fence is
+not weakened to turn them green. Reconciling those tests with the fenced
+lifecycle stays open with the other r5 followthrough. The CLI provenance
+contract (repository_id compact string, clone-locator fallback) remains
+representation-confirmed only; its producer/consumer engineering is still open
+and untouched here. No commits were made; the tree stays dirty for the
+orchestrator.

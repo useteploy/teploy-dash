@@ -52,6 +52,7 @@
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'sources' }" @click.prevent="$store.router.navigate('sources')">Sources</a></li>
     <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'settings' }" :aria-current="$store.router.page === 'settings' ? 'page' : null" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
@@ -450,7 +451,7 @@
                 <div class="card-meta" x-text="app.server"></div>
                 <div class="card-hash" x-text="app.current_hash || app.status"></div>
                 <button title="Remove from project"
-                  @click.stop="unassignFromProject(app.name)"
+                  @click.stop="unassignFromProject(app)"
                   style="position: absolute; top: 8px; right: 8px; background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: 14px; opacity: 0.6;">&times;</button>
               </div>
             </template>
@@ -1670,6 +1671,49 @@
   </template>
 
   <!-- ═══ Templates Page ═══ -->
+  <template x-if="$store.router.page === 'sources'">
+    <div x-data="sourcesPage">
+      <h1>Sources</h1>
+      <p>Connect a repository to its Git-managed app. Provider names select credentials configured by the operator.</p>
+      <p role="alert" x-show="loadError" x-text="loadError"></p>
+      <button @click="load()" :disabled="loading">Refresh</button>
+      <p role="alert" x-show="error" x-text="error"></p>
+      <p x-show="!loading && !loadError && sources.length === 0">No sources configured.</p>
+      <template x-for="src in sources" :key="src.id">
+        <div class="card">
+          <button @click="select(src.id)" :disabled="busy" x-text="src.display_name || src.clone_url"></button>
+          <span x-text="src.credential_verdict"></span><span x-text="src.degrade_reason || ''"></span>
+        </div>
+      </template>
+      <form @submit.prevent="create()" class="card">
+        <h2>Add repository</h2>
+        <label>Forge <select x-model="form.forge"><option>github</option><option>gitlab</option><option>forgejo</option><option>gitea</option><option>generic</option></select></label>
+        <label>Clone URL <input type="url" required x-model="form.clone_url"></label>
+        <label>Watched branch <input x-model="form.default_branch"></label>
+        <label>Provider name <input required x-model="form.credential_ref" autocomplete="off"></label>
+        <label>Display name <input x-model="form.display_name"></label>
+        <button type="submit" :disabled="busy">Add source</button>
+      </form>
+      <template x-if="selected">
+        <section class="card">
+          <h2 x-text="selected.display_name || selected.clone_url"></h2>
+          <p>Webhook URL: <code x-text="selected.webhook_url"></code></p>
+          <button @click="action('verify')" :disabled="busy">Verify credentials</button>
+          <button @click="action('rotate-secret')" :disabled="busy">Rotate webhook secret</button>
+          <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button @click="webhookSecret = ''">Hide</button></div>
+          <h3>Recent deliveries</h3>
+          <template x-for="delivery in selected.deliveries || []" :key="delivery.id + delivery.received_at"><p><code x-text="delivery.commit"></code> <span x-text="delivery.disposition"></span> <span x-text="delivery.reason"></span></p></template>
+          <h3>Pull request previews</h3>
+          <p role="status" x-show="previewError" x-text="previewError"></p>
+          <template x-if="previews"><div>
+            <template x-for="row in previews.live" :key="row.server + row.app + row.preview.branch"><p><span x-text="row.preview.branch"></span> <span x-text="row.preview.url"></span> · expires <span x-text="row.preview.expires_at"></span></p></template>
+            <template x-for="op in previews.operations" :key="op.id"><p><a :href="previews.review_base + op.request.source_pull_request" target="_blank" rel="noopener noreferrer" x-text="'PR #' + op.request.source_pull_request"></a> <code x-text="op.request.source_commit"></code> <button @click="$store.router.navigate('operation-detail', {id: op.id})" x-text="op.status"></button><span x-text="op.error || ''"></span></p></template>
+          </div></template>
+        </section>
+      </template>
+    </div>
+  </template>
+
   <template x-if="$store.router.page === 'templates'">
     <div x-data="templatesPage">
       <div class="page-header">
@@ -2080,7 +2124,7 @@
               <input class="form-input" type="password" x-model="webhookSecretDraft"
                      :disabled="webhookSecretMode === 'keep'"
                      :placeholder="webhookSecretMode === 'keep' ? (notifications.webhook_secret_set ? '(set — unchanged)' : '(not set)') : 'replacement secret'">
-              <select class="form-input" style="max-width:130px;" aria-label="Webhook secret: keep, replace, or clear" x-model="webhookSecretMode" :disabled="!notifications.webhook_secret_set && webhookSecretMode === 'keep'">
+              <select class="form-input" style="max-width:130px;" aria-label="Webhook secret: keep, replace, or clear" x-model="webhookSecretMode">
                 <option value="keep" :disabled="!notifications.webhook_secret_set">Keep</option>
                 <option value="replace">Replace</option>
                 <option value="clear" :disabled="!notifications.webhook_secret_set">Clear</option>
@@ -2327,6 +2371,7 @@
                           <button class="btn btn-sm" x-show="u.capability_profile === 'legacy'"
                                   title="Replace this account's pre-matrix permissions with its role's preset. Takes effect immediately on live sessions."
                                   @click="narrowToPreset(u.username)">Narrow to preset</button>
+                          <button class="btn btn-sm" @click="editCapabilities(u)">Edit capabilities</button>
                           <button class="btn btn-sm" @click="resetUserPassword(u.username)">Reset password</button>
                           <button class="btn btn-sm" @click="revokeUserSessions(u.username)">Revoke sessions</button>
                           <button class="btn btn-sm btn-danger" @click="deleteUser(u.username)"
@@ -2336,6 +2381,20 @@
                     </template>
                   </tbody>
                 </table>
+              </div>
+            </template>
+            <template x-if="capabilityEditor">
+              <div class="card" style="padding:16px; margin-top:16px;">
+                <h4 x-text="'Capabilities for ' + capabilityEditor.username"></h4>
+                <p class="text-muted">Saving creates a custom profile. Unchecked permissions are removed immediately.</p>
+                <template x-for="token in capabilityTokens" :key="token">
+                  <label style="display:block; margin:8px 0;">
+                    <input type="checkbox" :value="token" x-model="capabilityEditor.capabilities" :disabled="capabilityEditor.saving">
+                    <span x-text="token"></span>
+                  </label>
+                </template>
+                <button class="btn btn-primary" @click="saveCapabilities()" :disabled="capabilityEditor.saving">Save capabilities</button>
+                <button class="btn" @click="capabilityEditor = null" :disabled="capabilityEditor.saving">Cancel</button>
               </div>
             </template>
             <template x-if="users.length === 0">

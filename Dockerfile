@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 FROM alpine:3.21
 # tini is PID 1 (see ENTRYPOINT): it reaps orphaned healthcheck processes,
 # which teploy-dash itself never does.
-RUN apk add --no-cache ca-certificates tzdata wget tini
+RUN apk add --no-cache ca-certificates tzdata wget tini git rsync openssh-client
 
 # Teploy CLI — used by dash to delegate deploy/rollback actions.
 #

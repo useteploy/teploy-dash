@@ -42,10 +42,19 @@ func TestParsePush(t *testing.T) {
 		{"sha256 commit", `{"ref":"refs/heads/main","after":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`, "main", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
 		{"tag push", `{"ref":"refs/tags/v1.0.0","after":"0123456789abcdef0123456789abcdef01234567"}`, "v1.0.0", ""},
 		{"branch deletion", `{"ref":"refs/heads/gone","after":"0000000000000000000000000000000000000000"}`, "gone", ""},
+		// The explicit marker pins nothing even when after/checkout_sha
+		// still name a valid full SHA a recreated live ref could match
+		// (R5-01: deletion must never become deploy intent).
+		{"explicit deletion marker over live sha", `{"ref":"refs/heads/main","deleted":true,"after":"0123456789abcdef0123456789abcdef01234567"}`, "main", ""},
+		{"explicit deletion marker checkout_sha", `{"ref":"refs/heads/gone","deleted":true,"checkout_sha":"ffffffffffffffffffffffffffffffffffffffff","after":"0123456789abcdef0123456789abcdef01234567"}`, "gone", ""},
+		{"explicit deletion marker malformed hash", `{"ref":"refs/heads/main","deleted":true,"after":"not-a-hash"}`, "main", ""},
+		{"deletion flag false still pins", `{"ref":"refs/heads/main","deleted":false,"after":"0123456789abcdef0123456789abcdef01234567"}`, "main", "0123456789abcdef0123456789abcdef01234567"},
 		{"malformed hash", `{"ref":"refs/heads/main","after":"not-a-hash"}`, "main", ""},
 		{"missing after", `{"ref":"refs/heads/main"}`, "main", ""},
 		{"no ref (ping/PR shapes)", `{"action":"opened","number":1}`, "", ""},
 		{"not json", `nope`, "", ""},
+		{"malformed trailing frame", `{"ref":"refs/heads/main","after":"0123456789abcdef0123456789abcdef01234567"} trailing`, "", ""},
+		{"second frame", `{"ref":"refs/heads/main","after":"0123456789abcdef0123456789abcdef01234567"} {}`, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,4 +174,42 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestDeliveryTornTailAppendRepeatedReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := s.Create(CreateInput{Forge: ForgeGitHub, CloneURL: "https://github.com/team/app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordDelivery(src.ID, Delivery{ID: "first", Disposition: "admitted"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.dir(src.ID), "deliveries.jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"id":"torn`)
+	f.Close()
+	s, err = New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordDelivery(src.ID, Delivery{ID: "second", Disposition: "admitted"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		s, err = New(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.DeliverySeen(src.ID, "first") || !s.DeliverySeen(src.ID, "second") {
+			t.Fatal("committed delivery/dedupe lost")
+		}
+	}
 }

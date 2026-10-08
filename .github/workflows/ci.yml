@@ -11,9 +11,20 @@ on:
 
 # The frontend is committed at cmd/teploy-dash/frontend/ and embedded into
 # the binary at build time via //go:embed. CI only needs the Go toolchain —
-# no Node, no pnpm, no asset pipeline.
+# no asset build pipeline. Node runs the dependency-free frontend regressions.
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check cmd/teploy-dash/frontend/js/app.js
+      - run: node --check cmd/teploy-dash/frontend/js/operations.js
+      - run: node --test cmd/teploy-dash/frontend-test/*.test.mjs
+
   go:
     runs-on: ubuntu-latest
     steps:

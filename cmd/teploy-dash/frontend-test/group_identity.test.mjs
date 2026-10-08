@@ -67,29 +67,53 @@ test('D06: unavailable fleet identities surface an error; failed envelopes never
 });
 
 
-test('D06: name-only removal cannot remove a different scoped card or guess among multiple bindings', { timeout: 2000 }, async () => {
+test('D06: scoped deletion sends exact identity and legacy deletion cannot touch scoped refs', async () => {
   const h = harness('/deployments'), page = h.page('projectsPage');
   globalThis.confirm = () => true;
-  const scoped = { server_id: prodID, app: 'web' };
-  page.groups = [{ name: 'Mixed', apps: ['web'], server_apps: [scoped] }];
+  page.groups = [{ name: 'Mixed', apps: ['web'], server_apps: [{ server_id: prodID, app: 'web' }, {server_id: stageID, app: 'web'}] }];
   page.load = async () => {};
   h.respond(() => response({ status: 'unassigned' }));
-  // Invoke the actual card binding in each source snapshot, so a base run
-  // passes its original app.name argument rather than inventing an input.
   const binding = h.readHTML().match(/@click.stop="(unassignFromGroup\([^"]+)"/)[1];
   const remove = app => new Function('page', 'group', 'app', `return page.${binding}`)(page, page.groups[0], app);
+  await remove({ name: 'web', server: 'prod', server_id: prodID });
+  assert.equal(h.requests.at(-1).url, `/api/groups/Mixed/apps/web?server_id=${prodID}`);
   await remove({ name: 'web', server: 'staging', server_id: stageID });
-  assert.equal(h.requests.length, 0, 'legacy staging card must not delete the prod binding');
-  assert.match(h.toasts.at(-1), /not supported/);
-  page.groups[0].server_apps.push({ server_id: stageID, app: 'web' });
-  await remove({ name: 'web', server: 'prod', server_id: prodID });
-  assert.equal(h.requests.length, 0, 'two bindings cannot be removed by name');
-  page.groups[0].server_apps = [scoped];
-  await remove({ name: 'web', server: 'prod', server_id: prodID });
-  assert.equal(h.requests.at(-1).url, '/api/groups/Mixed/apps/web');
-  assert.equal(h.requests.at(-1).method, 'DELETE');
+  assert.equal(h.requests.at(-1).url, `/api/groups/Mixed/apps/web?server_id=${stageID}`);
   page.groups[0].server_apps = [];
   await remove({ name: 'web', server: 'staging' });
-  assert.equal(h.requests.length, 2, 'legacy unassignment remains supported');
-  assert.ok(h.readHTML().includes('unassignFromGroup(group.name, app)'), 'card passes its full identity');
+  assert.equal(h.requests.at(-1).url, '/api/groups/Mixed/apps/web?legacy=1');
+});
+
+test('D06: scoped project membership hides only its own direct card and detail/removal use full identity', async () => {
+ const h = harness('/deployments'), page = h.page('projectsPage');
+ globalThis.confirm = () => true;
+ const groups = [{name:'G',apps:['web'],projects:[{name:'P',apps:[],server_apps:[{app:'web',server_id:prodID}]}]}];
+ configure(h, groups, [envelope('renamed',prodID),envelope('staging',stageID)]);
+ await page.load();
+ assert.deepEqual(members(page,'G'),['staging/web']);
+ assert.equal(page.groupedApps()[0].projects[0].resolvedApps[0].server,'renamed');
+ h.stores.router.navigate('project-detail',{group:'G',project:'P'});
+ const detail=h.page('projectDetailPage'); detail.groupName='G';detail.projectName='P';
+ await detail.load();
+ assert.deepEqual(detail.projectApps.map(a => `${a.server}/${a.name}`),['renamed/web']);
+ const card=detail.projectApps[0]; detail.load=async()=>{};
+ h.respond(()=>response({status:'unassigned'}));
+ await detail.unassignFromProject(card);
+ assert.equal(h.requests.at(-1).url,`/api/groups/G/projects/P/apps/web?server_id=${prodID}`);
+ assert.ok(h.readHTML().includes('unassignFromProject(app)'));
+});
+
+test('D06: both deployment forms bind group and project to the selected server', async () => {
+ for (const component of ['projectsPage','projectDetailPage']) {
+  const h=harness('/deployments'),page=h.page(component);
+  if(component==='projectDetailPage') h.stores.router.navigate('project-detail',{group:'G',project:'P'});
+  page.groupName='G';page.projectName='P';
+  page.deployForm={app:'web',image:'example/web:1',domain:'web.test',server:'prod',port:80};
+  page.load=async()=>{};
+  h.respond(url => response(url==='/api/deploy'?{id:'A',status:'queued',request:{kind:'deploy'}}:{status:'assigned'}));
+  await page.doDeploy('G');
+  const assignments=h.requests.filter(r=>r.url.startsWith('/api/groups/'));
+  assert.equal(assignments.length,component==='projectsPage'?1:2);
+  for(const request of assignments) assert.deepEqual(request.body,{app:'web',server:'prod'});
+ }
 });

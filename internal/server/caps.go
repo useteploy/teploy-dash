@@ -110,6 +110,9 @@ func requiredCapabilities(method, path string) []string {
 		return appActionCapabilities(method, path)
 	}
 
+	if strings.HasPrefix(path, "/api/manifests/") && strings.HasSuffix(path, "/apply") {
+		return []string{caps.ExecuteDeploy}
+	}
 	if path == "/api/deploy" || path == "/api/templates/install" {
 		return []string{caps.ExecuteDeploy}
 	}
@@ -117,6 +120,9 @@ func requiredCapabilities(method, path string) []string {
 		// Listing and event replay are metadata; enqueue/cancel/retry are
 		// deploy-flow control.
 		if method == http.MethodGet {
+			if strings.HasSuffix(path, "/events") {
+				return []string{caps.ViewLogs}
+			}
 			return []string{caps.ViewMetadata}
 		}
 		return []string{caps.ExecuteDeploy}

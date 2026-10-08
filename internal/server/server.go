@@ -87,7 +87,11 @@ type Config struct {
 	OperationResolver     operation.Resolver
 	OperationResolverByID operation.ResolverByID
 	OperationExecutor     operation.Executor
-	OperationMaxEvents    int
+	// Source seams preserve the production wrapper; they replace only transport.
+	SourceCLIExecutor    operation.Executor
+	SourceAccessResolver func(context.Context, *source.Source) (*source.Access, error)
+	SourceCheckout       func(context.Context, *source.Access, string) (string, func(), error)
+	OperationMaxEvents   int
 	// Operation retention knobs (useteploy__teploy-dash-04). Zero values take
 	// the operation package defaults; negative values disable a bound.
 	OperationMaxJournalBytes int64
@@ -100,8 +104,9 @@ type Config struct {
 	// OperationMaxLive bounds TOTAL non-terminal operations across targets,
 	// and OperationMaxConcurrent bounds simultaneous CLI executions (R17;
 	// 0 = package default, negative disables).
-	OperationMaxLive       int
-	OperationMaxConcurrent int
+	OperationMaxLive             int
+	OperationMaxLivePerPrincipal int
+	OperationMaxConcurrent       int
 	// OperationIdempotencyWindow bounds how long an admitted idempotency key
 	// is honored, measured from the admitted operation's creation (D02
 	// namespacing; 0 = package default 24h, negative disables expiry).
@@ -110,12 +115,12 @@ type Config struct {
 	// production behavior.
 	CLIRunner          func(context.Context, ...string) (*cli.Result, error)
 	CLIInstalled       func() bool
+	KVStdinSupport     func() (bool, error)
 	RemoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
 	RemoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
 	// SourceCredentialVerifier checks a source's credential reference
-	// against its forge (D04 revoked-permission handling). Nil (the default
-	// this slice) leaves credentials unverified — never silently degraded;
-	// the verify endpoint answers explicitly that no verifier exists.
+	// against its forge. Nil uses the production named-provider verifier,
+	// configured through TEPLOY_DASH_SOURCE_PROVIDERS, failing closed when absent.
 	SourceCredentialVerifier func(context.Context, *source.Source) error
 }
 
@@ -144,7 +149,8 @@ type fleetCache struct {
 	lastGoodObs []ServerObservation
 	// refreshing is a single-flight latch: a background refresh SSHes every
 	// server, so concurrent stale reads must not each start their own sweep.
-	refreshing bool
+	refreshing  bool
+	refreshDone chan struct{}
 }
 
 // beginRefresh claims the right to run a background refresh. Returns false when
@@ -158,13 +164,57 @@ func (fc *fleetCache) beginRefresh() (uint64, bool) {
 		return 0, false
 	}
 	fc.refreshing = true
+	fc.refreshDone = make(chan struct{})
 	return fc.generation, true
 }
 
 func (fc *fleetCache) endRefresh() {
 	fc.mu.Lock()
 	fc.refreshing = false
+	if fc.refreshDone != nil {
+		close(fc.refreshDone)
+	}
 	fc.mu.Unlock()
+}
+
+func (fc *fleetCache) waitRefresh(ctx context.Context) error {
+	fc.mu.RLock()
+	done := fc.refreshDone
+	fc.mu.RUnlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) coldFleet(ctx context.Context) ([]ServerObservation, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		if cached, ok := s.fleet.getObservations(); ok {
+			return cached, nil
+		}
+		generation, claimed := s.fleet.beginRefresh()
+		if !claimed {
+			if err := s.fleet.waitRefresh(ctx); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		envelopes, err := s.collectFleetObservations(ctx, nil)
+		published := err == nil && s.fleet.publish(generation, envelopes)
+		s.fleet.endRefresh()
+		if err != nil {
+			return nil, err
+		}
+		if published {
+			return envelopes, nil
+		}
+	}
+	return nil, fmt.Errorf("fleet changed during discovery; retry")
 }
 
 // snapshotGeneration reads the current generation WITHOUT claiming a refresh
@@ -255,29 +305,37 @@ func (fc *fleetCache) getObservations() ([]ServerObservation, bool) {
 
 // Server is the teploy-dash HTTP server.
 type Server struct {
-	mux                *http.ServeMux
-	config             Config
-	gate               *authGate
-	state              *state.Reader
-	monitor            *monitor.Runner
-	restore            *restoretest.Runner
-	store              store.Store
-	fleet              *fleetCache
-	frontend           fs.FS
-	mcpTokens          *mcp.TokenStore
-	outbox             *outbox.Outbox
-	operations         *operation.Manager
-	operationInitErr   error
-	manifests          *manifest.Store
-	manifestInitErr    error
-	sources            *source.Store
-	sourceInitErr      error
-	sourceVerifier     func(context.Context, *source.Source) error
-	runCLI             cliRunner
-	cliInstalled       func() bool
-	remoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
-	remoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
-	capabilitiesCache  capabilityCache
+	mux                     *http.ServeMux
+	config                  Config
+	gate                    *authGate
+	state                   *state.Reader
+	monitor                 *monitor.Runner
+	restore                 *restoretest.Runner
+	store                   store.Store
+	fleet                   *fleetCache
+	frontend                fs.FS
+	mcpTokens               *mcp.TokenStore
+	outbox                  *outbox.Outbox
+	operations              *operation.Manager
+	operationInitErr        error
+	manifests               *manifest.Store
+	manifestInitErr         error
+	sources                 *source.Store
+	sourceInitErr           error
+	sourcePushAuthority     func(context.Context, *source.Source, string, string) error
+	sourceProviders         *source.Providers
+	sourceAccessResolver    func(context.Context, *source.Source) (*source.Access, error)
+	sourceCheckout          func(context.Context, *source.Access, string) (string, func(), error)
+	sourceActionMu          sync.Mutex
+	sourceMaintenanceOnce   sync.Once
+	sourceMaintenanceCancel context.CancelFunc
+	sourceMaintenanceDone   chan struct{}
+	sourceVerifier          func(context.Context, *source.Source) error
+	runCLI                  cliRunner
+	cliInstalled            func() bool
+	remoteListApps          func(context.Context, remote.ServerConn) ([]remote.AppState, error)
+	remoteServerStatus      func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
+	capabilitiesCache       capabilityCache
 
 	httpSrvMu sync.Mutex
 	httpSrv   *http.Server
@@ -331,8 +389,8 @@ func New(config Config) *Server {
 		// fail-closed lookup — an unregistered alias or broken discovery
 		// fails the run instead of silently falling back to the alias as a
 		// hostname or the CLI's root user.
-		s.restore.SetTargetResolver(func(name string) (restoretest.Target, error) {
-			srv, err := s.lookupServerStrict(context.Background(), name)
+		s.restore.SetTargetResolverContext(func(ctx context.Context, name string) (restoretest.Target, error) {
+			srv, err := s.lookupServerStrict(ctx, name)
 			if err != nil {
 				return restoretest.Target{}, err
 			}
@@ -347,7 +405,13 @@ func New(config Config) *Server {
 	if s.sourceInitErr != nil {
 		log.Printf("sources: disabled: %v", s.sourceInitErr)
 	}
+	s.sourceAccessResolver = config.SourceAccessResolver
+	s.sourceCheckout = config.SourceCheckout
+	s.sourceProviders = &source.Providers{Path: os.Getenv("TEPLOY_DASH_SOURCE_PROVIDERS")}
 	s.sourceVerifier = config.SourceCredentialVerifier
+	if s.sourceVerifier == nil {
+		s.sourceVerifier = s.sourceProviders.Verify
+	}
 	resolver := config.OperationResolver
 	if resolver == nil {
 		resolver = s.resolveOperationServer
@@ -360,6 +424,13 @@ func New(config Config) *Server {
 	if executor == nil {
 		executor = func(ctx context.Context, command operation.Command, emit func(operation.Stream, string)) (int, error) {
 			defer s.fleet.invalidate()
+			if command.SourceRequest != nil {
+				underlying := config.SourceCLIExecutor
+				if underlying == nil {
+					underlying = executeOperation
+				}
+				return s.executeSourceOperation(ctx, command, emit, underlying)
+			}
 			return executeOperation(ctx, command, emit)
 		}
 	}
@@ -379,6 +450,7 @@ func New(config Config) *Server {
 		MaxOperations:           config.OperationMaxOperations,
 		MaxQueuedPerTarget:      config.OperationMaxQueued,
 		MaxLiveOperations:       config.OperationMaxLive,
+		MaxLivePerPrincipal:     config.OperationMaxLivePerPrincipal,
 		MaxConcurrentExecutions: config.OperationMaxConcurrent,
 		IdempotencyWindow:       config.OperationIdempotencyWindow,
 		Resolver:                resolver,
@@ -408,6 +480,7 @@ func New(config Config) *Server {
 // matching the http.Server convention that callers shouldn't treat that as a
 // real error.
 func (s *Server) ListenAndServe(addr string) error {
+	s.startSourceMaintenance()
 	s.warmFleet()
 	srv := s.httpServer(addr)
 	s.httpSrvMu.Lock()
@@ -423,6 +496,7 @@ func (s *Server) ListenAndServe(addr string) error {
 // before starting background services, so a failed bind cannot leave
 // monitors, restore schedules, and cleanup goroutines racing an early exit.
 func (s *Server) Serve(ln net.Listener) error {
+	s.startSourceMaintenance()
 	s.warmFleet()
 	srv := s.httpServer(ln.Addr().String())
 	s.httpSrvMu.Lock()
@@ -438,6 +512,7 @@ func (s *Server) Serve(ln net.Listener) error {
 // (bounded by ctx) for in-flight requests to finish. Safe to call before
 // ListenAndServe has run (e.g. in tests) — it's then a no-op.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.stopSourceMaintenance(ctx)
 	s.httpSrvMu.Lock()
 	srv := s.httpSrv
 	s.httpSrvMu.Unlock()
@@ -465,6 +540,7 @@ func (s *Server) CloseHTTP() {
 // grace so terminal states persist. Call after Shutdown so no new operations
 // are admitted while draining, and before closing the store.
 func (s *Server) DrainOperations(ctx context.Context) {
+	s.stopSourceMaintenance(ctx)
 	if s.operations == nil {
 		return
 	}
@@ -476,7 +552,7 @@ func (s *Server) DrainOperations(ctx context.Context) {
 // context: the refresh must outlive the request that triggered it, or a client
 // navigating away would cancel it and the cache would never re-warm.
 func (s *Server) refreshFleetAsync() {
-	if !cli.IsInstalled() {
+	if !s.cliInstalled() {
 		return
 	}
 	generation, claimed := s.fleet.beginRefresh()
@@ -508,10 +584,9 @@ func (s *Server) refreshFleetAsync() {
 // entries until then. Runs detached so a slow or unreachable fleet never delays
 // the listener.
 func (s *Server) warmFleet() {
-	if !cli.IsInstalled() {
+	if !s.cliInstalled() {
 		return
-	}
-	// R50: warmFleet shares the single-flight latch with the stale-refresh
+	} // R50: warmFleet shares the single-flight latch with the stale-refresh
 	// path instead of bypassing it — a cold request burst at startup
 	// previously launched one full sweep per request.
 	generation, claimed := s.fleet.beginRefresh()
@@ -1615,12 +1690,11 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envelopes, err := s.collectFleetObservations(r.Context(), nil)
+	envelopes, err := s.coldFleet(r.Context())
 	if err != nil {
 		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.fleet.publish(s.fleet.snapshotGeneration(), envelopes)
 	apps, err := fleetAppsOrError(envelopes)
 	if err != nil {
 		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
@@ -1653,12 +1727,11 @@ func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
 	// Cold path: no fleet endpoint exists for a fleet whose server set
 	// cannot even be discovered — the same 502 /api/apps answers. A dead
 	// fleet (discovery OK, every probe failing) still gets envelopes.
-	envelopes, err := s.collectFleetObservations(r.Context(), nil)
+	envelopes, err := s.coldFleet(r.Context())
 	if err != nil {
 		writeErrorStatus(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.fleet.publish(s.fleet.snapshotGeneration(), envelopes)
 	writeData(w, buildFleetResponse(envelopes, time.Now().UTC()))
 }
 
@@ -2264,6 +2337,22 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	// explicit comment frame; stream failures surface as a typed
 	// stream-error event instead of a silent close.
 	stream := newSSELogStream(w, flusher)
+	stream.authorize = func() bool { return s.streamAuthorized(r) }
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !s.streamAuthorized(r) {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	if err := stream.writeFrame([]byte(": connected\n\n")); err != nil {
 		return
 	}
@@ -2277,6 +2366,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 // complete logical lines (R57) and bounds every write with a deadline so a
 // non-reading client cannot pin the handler (R60).
 type sseLogStream struct {
+	authorize  func() bool
 	w          http.ResponseWriter
 	flusher    http.Flusher
 	controller *http.ResponseController
@@ -2293,6 +2383,9 @@ const (
 )
 
 func (s *sseLogStream) writeFrame(frame []byte) error {
+	if s.authorize != nil && !s.authorize() {
+		return errors.New("log stream authorization expired")
+	}
 	// Best-effort deadline: unsupported instrumentation (test recorders)
 	// must not kill the stream — only a WRITE failure aborts.
 	_ = s.controller.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
@@ -2493,38 +2586,33 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 // ── Servers ───────────────────────────────────────────────────────────────
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
-	if !cli.IsInstalled() {
-		writeError(w, "teploy CLI not installed on this host — install from https://teploy.dev")
+	if !s.cliInstalled() {
+		writeError(w, "teploy CLI not installed on this host")
 		return
 	}
-	result, err := cli.Run("server", "list", "--json")
+	result, err := s.runCLI(r.Context(), "server", "list", "--json")
+	if err == nil {
+		err = cli.CheckExit(result)
+	}
 	if err != nil {
 		writeErrorStatus(w, "server list failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	if result.ExitCode != 0 {
-		writeErrorStatus(w, "server list failed: "+strings.TrimSpace(result.Stderr), http.StatusBadGateway)
+	records, err := cli.DecodeServerList(result.Stdout)
+	if err != nil {
+		writeErrorStatus(w, "server list failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	// The CLI returns a { name: {host, user} } map. Enrich each entry with an
-	// "online" flag from a short TCP dial to the SSH port, so the Servers page
-	// shows real reachability instead of defaulting every server to offline.
-	var servers map[string]map[string]interface{}
-	if err := json.Unmarshal([]byte(result.Stdout), &servers); err != nil {
-		writeRawJSON(w, result.Stdout) // unknown shape — pass through unchanged
-		return
-	}
+	servers := make(map[string]map[string]interface{}, len(records))
 	var wg sync.WaitGroup
-	for _, cfg := range servers {
-		host, _ := cfg["host"].(string)
-		if host == "" {
-			continue
-		}
+	for _, record := range records {
+		cfg := map[string]interface{}{"host": record.Host, "user": record.User, "role": record.Role, "id": record.ID}
+		servers[record.Name] = cfg
 		wg.Add(1)
-		go func(cfg map[string]interface{}, host string) {
+		go func(host string, cfg map[string]interface{}) {
 			defer wg.Done()
 			cfg["online"] = tcpReachable(host, 2*time.Second)
-		}(cfg, host)
+		}(record.Host, cfg)
 	}
 	wg.Wait()
 	writeData(w, servers)
@@ -2675,8 +2763,9 @@ type groupEntry struct {
 }
 
 type projectEntry struct {
-	Name string   `json:"name"`
-	Apps []string `json:"apps"`
+	Name       string        `json:"name"`
+	Apps       []string      `json:"apps"`
+	ServerApps []groupAppRef `json:"server_apps,omitempty"`
 }
 
 func groupsFilePath() string {
@@ -2906,53 +2995,7 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case resource == "apps" && len(parts) == 3 && r.Method == "DELETE":
-		// DELETE /api/groups/{name}/apps/{app} — unassign app from group.
-		// X02 §5 row 7: the name may match server-scoped refs. Exactly one
-		// match removes that ref; multiple matches are ambiguous — the
-		// same app name on several servers has no correct default, so the
-		// mutation refuses naming the servers instead of guessing. Legacy
-		// bare entries keep the historical remove-by-name behavior.
-		appName := parts[2]
-		var ambiguous []string
-		_, terr := updateGroups(func(data *groupData) error {
-			for i, g := range data.Groups {
-				if g.Name == groupName {
-					var keptRefs []groupAppRef
-					for _, ref := range g.ServerApps {
-						if ref.App == appName {
-							ambiguous = append(ambiguous, ref.ServerID)
-							continue
-						}
-						keptRefs = append(keptRefs, ref)
-					}
-					if len(ambiguous) > 1 {
-						return errGroupAppAmbiguous
-					}
-					if len(ambiguous) == 1 {
-						data.Groups[i].ServerApps = keptRefs
-						return nil
-					}
-					filtered := make([]string, 0, len(g.Apps))
-					for _, a := range g.Apps {
-						if a != appName {
-							filtered = append(filtered, a)
-						}
-					}
-					data.Groups[i].Apps = filtered
-					return nil
-				}
-			}
-			return errGroupNotFound
-		})
-		if terr != nil {
-			if errors.Is(terr, errGroupAppAmbiguous) {
-				writeErrorStatus(w, fmt.Sprintf("app %q is bound to %d servers in this group (%s); remove the specific binding instead of guessing", appName, len(ambiguous), strings.Join(ambiguous, ", ")), http.StatusConflict)
-				return
-			}
-			writeError(w, terr.Error())
-			return
-		}
-		writeData(w, map[string]string{"status": "unassigned"})
+		s.removeGroupMembership(w, r, groupName, "", parts[2])
 		return
 
 	case resource == "apps" && r.Method == "POST":
@@ -3134,82 +3177,11 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 		return
 
 	case resource == "projects" && len(parts) == 5 && parts[3] == "apps" && r.Method == "DELETE":
-		// DELETE /api/groups/{name}/projects/{project}/apps/{app} — unassign from project
-		projectName := parts[2]
-		appName := parts[4]
-		_, terr := updateGroups(func(data *groupData) error {
-			for i, g := range data.Groups {
-				if g.Name != groupName {
-					continue
-				}
-				for j, p := range g.Projects {
-					if p.Name != projectName {
-						continue
-					}
-					filtered := make([]string, 0, len(p.Apps))
-					for _, a := range p.Apps {
-						if a != appName {
-							filtered = append(filtered, a)
-						}
-					}
-					data.Groups[i].Projects[j].Apps = filtered
-					return nil
-				}
-			}
-			return errGroupNotFound
-		})
-		if terr != nil {
-			writeError(w, terr.Error())
-			return
-		}
-		writeData(w, map[string]string{"status": "unassigned"})
+		s.removeGroupMembership(w, r, groupName, parts[2], parts[4])
 		return
-
-	case resource == "projects" && len(parts) >= 3:
-		projectName := parts[2]
-		if len(parts) == 4 && parts[3] == "apps" && r.Method == "POST" {
-			// POST /api/groups/{name}/projects/{project}/apps — assign app to project
-			var body struct {
-				App string `json:"app"`
-			}
-			if err := strictDecode(r, &body); err != nil || body.App == "" {
-				writeError(w, "app is required")
-				return
-			}
-			already := false
-			_, terr := updateGroups(func(data *groupData) error {
-				for i, g := range data.Groups {
-					if g.Name != groupName {
-						continue
-					}
-					for j, p := range g.Projects {
-						if p.Name != projectName {
-							continue
-						}
-						for _, a := range p.Apps {
-							if a == body.App {
-								already = true
-								return nil
-							}
-						}
-						data.Groups[i].Projects[j].Apps = append(data.Groups[i].Projects[j].Apps, body.App)
-						return nil
-					}
-				}
-				return errGroupNotFound
-			})
-			if terr != nil {
-				writeError(w, terr.Error())
-				return
-			}
-			if already {
-				writeData(w, map[string]string{"status": "already assigned"})
-				return
-			}
-			writeData(w, map[string]string{"status": "assigned"})
-		} else {
-			writeError(w, "not found")
-		}
+	case resource == "projects" && len(parts) == 4 && parts[3] == "apps" && r.Method == "POST":
+		s.assignProjectMembership(w, r, groupName, parts[2])
+		return
 
 	default:
 		writeError(w, "not found")
@@ -3543,13 +3515,9 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err.Error())
 			return
 		}
-		// Update the restore runner's dispatcher with the new config. The
-		// MONITOR path needs no rewiring under D08: it goes through the
-		// alert outbox, which reads the live config at every attempt — a
-		// patch here fixes pending retries on their next attempt.
-		if s.restore != nil {
-			s.restore.SetAlerter(alert.New(cfg))
-		}
+		// Both runners retain the durable outbox, which loads current
+		// notification configuration for every attempt, including retries.
+
 		writeData(w, map[string]bool{"saved": true})
 	default:
 		http.Error(w, "method not allowed", 405)
@@ -4603,10 +4571,15 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		if s.restore != nil {
-			s.restore.Reload(t)
+		stored, err := s.store.GetRestoreTest(t.ID)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
 		}
-		writeJSON(w, t)
+		if s.restore != nil {
+			s.restore.Reload(*stored)
+		}
+		writeJSON(w, stored)
 
 	default:
 		http.Error(w, "method not allowed", 405)

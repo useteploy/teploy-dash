@@ -34,8 +34,9 @@ type Runner struct {
 	generations map[string]uint64
 	// wg tracks in-flight checks so Stop can join them before the store
 	// closes (A46).
-	wg sync.WaitGroup
-	mu sync.Mutex
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	stopped bool
 }
 
 // New creates a monitor runner.
@@ -119,6 +120,7 @@ func (r *Runner) CheckNow(m store.Monitor) store.CheckResult {
 // A straggler is logged rather than silently racing the closing store.
 func (r *Runner) Stop(ctx context.Context) {
 	r.mu.Lock()
+	r.stopped = true
 	for _, ch := range r.stopChs {
 		close(ch)
 	}
@@ -150,6 +152,15 @@ func (r *Runner) Reload(m store.Monitor) {
 }
 
 func (r *Runner) startMonitor(m store.Monitor) {
+	// Register the configuration read before Stop starts joining workers.
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return
+	}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	defer r.wg.Done()
 	// Read the last persisted status and check time outside the lock (the
 	// store call can be slow). Seeding the status lets the first check after
 	// a restart fire a transition alert instead of silently adopting the new
@@ -169,6 +180,10 @@ func (r *Runner) startMonitor(m store.Monitor) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.stopped {
+		return
+	}
 
 	// Idempotent: tear down any existing checker for this ID before registering
 	// a new one, so a re-add/reload can't leak the previous ticker + goroutine.

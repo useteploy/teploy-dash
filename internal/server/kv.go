@@ -335,7 +335,11 @@ func (s *Server) handleKVSet(w http.ResponseWriter, r *http.Request, serverName,
 	// transport because a transient probe failure was cached as
 	// "unsupported". R03: a VERIFIED-unsupported CLI refuses nonempty values
 	// unless the operator opted into the legacy argv transport.
-	stdinSupported, probeErr := cli.KVStdinSupport()
+	probe := s.config.KVStdinSupport
+	if probe == nil {
+		probe = cli.KVStdinSupport
+	}
+	stdinSupported, probeErr := probe()
 	if probeErr != nil {
 		writeErrorStatus(w, probeErr.Error()+"; retry the request rather than exposing the value on the process list", http.StatusBadGateway)
 		return

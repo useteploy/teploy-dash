@@ -343,9 +343,18 @@ func TestLiveRetentionWhenCountExceeded(t *testing.T) {
 		waitForStatus(t, manager, op.ID, StatusSucceeded)
 		ids = append(ids, op.ID)
 	}
-	manager.retire() // deterministic trigger (finish() fires it async)
-	if _, err := manager.Get(ids[0]); err != ErrNotFound {
-		t.Fatalf("oldest operation survived the count cap: %v", err)
+	// An asynchronous completion sweep may already own retireMu. Join its
+	// observable result instead of assuming a TryLock-based trigger joined it.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		manager.retire()
+		if _, err := manager.Get(ids[0]); err == ErrNotFound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("oldest operation survived the count cap")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	for _, id := range ids[1:] {
 		if _, err := manager.Get(id); err != nil {
@@ -752,5 +761,27 @@ func TestShutdownSealsAdmission(t *testing.T) {
 	_, _, err := manager.Enqueue(Request{Kind: KindDeploy, Server: "prod", App: "sealed"}, "", nil)
 	if !errors.Is(err, ErrShuttingDown) {
 		t.Fatalf("enqueue after shutdown: %v", err)
+	}
+}
+
+func TestTinyJournalCapsNeverPanic(t *testing.T) {
+	for _, cap := range []int64{1, 128, 16384} {
+		t.Run(fmt.Sprint(cap), func(t *testing.T) {
+			s, err := openFileStore(t.TempDir(), journalConfig{MaxEvents: 10, MaxJournalBytes: cap})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := "0123456789abcdef0123456789abcdef"
+			for seq := uint64(1); seq <= 3; seq++ {
+				if err := s.appendEvent(id, Event{Sequence: seq, OperationID: id, Type: EventStdout, Data: strings.Repeat("x", 16*1024)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			events, err := s.loadEvents(id)
+			if err != nil || len(events) == 0 || events[len(events)-1].Sequence != 3 {
+				t.Fatalf("tail missing: %v %v", events, err)
+			}
+			s.CloseJournal(id)
+		})
 	}
 }

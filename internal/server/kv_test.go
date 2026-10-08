@@ -54,10 +54,11 @@ func (k *kvRunner) kvCalls() [][]string {
 func newKVServer(t *testing.T, k *kvRunner) *Server {
 	t.Helper()
 	return New(Config{
-		DataDir:      t.TempDir(),
-		NoAuth:       true,
-		CLIInstalled: func() bool { return true },
-		CLIRunner:    k.run,
+		DataDir:        t.TempDir(),
+		NoAuth:         true,
+		CLIInstalled:   func() bool { return true },
+		CLIRunner:      k.run,
+		KVStdinSupport: func() (bool, error) { return false, nil },
 	})
 }
 

@@ -73,6 +73,7 @@ type UptimeStats struct {
 // usable. Only the most recent result is persisted on the entity itself —
 // these run hourly/daily, so a per-run history table would be noise.
 type RestoreTest struct {
+	Incarnation   string `json:"incarnation,omitempty"`
 	ID            string `json:"id"`
 	Server        string `json:"server"` // server name from servers.yml
 	App           string `json:"app"`

@@ -26,6 +26,8 @@ import (
 // satisfies it directly (fire-and-forget); the alert outbox satisfies it with
 // durable delivery (D08 — restore verdicts ride the same outbox as monitor
 // transitions, with their own source label for scoped delivery status).
+var ErrStopped = errors.New("restore runner is stopped")
+
 type Alerter interface {
 	Send(alert.Event)
 }
@@ -54,6 +56,9 @@ type runCLIFunc func(server, user, app, accessory, bucket, region string) (stdou
 
 // Runner manages restore tests and runs them on their intervals.
 type Runner struct {
+	stopped bool
+	ctx     context.Context
+	cancel  context.CancelFunc
 	store   store.Store
 	alerter Alerter
 	// resolveTarget resolves a server ALIAS to one registered host/user
@@ -61,7 +66,7 @@ type Runner struct {
 	// (R01). It replaces the old host/user callbacks, whose silent
 	// fallbacks (alias-as-host, empty user -> CLI root default) could aim a
 	// verification run at an unregistered host or an unintended user.
-	resolveTarget func(server string) (Target, error)
+	resolveTarget func(context.Context, string) (Target, error)
 	runCLI        runCLIFunc
 	timers        map[string]*time.Ticker
 	stopChs       map[string]chan struct{}
@@ -84,14 +89,16 @@ type Target struct {
 
 // New creates a restore-test runner.
 func New(st store.Store) *Runner {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Runner{
-		store:   st,
+		store: st,
+		ctx:   ctx, cancel: cancel,
 		timers:  make(map[string]*time.Ticker),
 		stopChs: make(map[string]chan struct{}),
 		lastOK:  make(map[string]bool),
 		running: make(map[string]bool),
 		runCLI: func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
-			res, err := cli.AccessoryVerifyBackup(server, user, app, accessory, bucket, region)
+			res, err := cli.AccessoryVerifyBackupContext(ctx, server, user, app, accessory, bucket, region)
 			if res == nil {
 				return "", "", nil, err
 			}
@@ -120,7 +127,11 @@ func (r *Runner) SetAlerter(d Alerter) {
 // SetTargetResolver installs the fail-closed server-alias -> host/user
 // lookup (R01). The resolver must return an error for an unregistered alias
 // or a failed discovery; an empty host or user is rejected at run time.
-func (r *Runner) SetTargetResolver(f func(server string) (Target, error)) {
+func (r *Runner) SetTargetResolver(f func(string) (Target, error)) {
+	r.SetTargetResolverContext(func(_ context.Context, server string) (Target, error) { return f(server) })
+}
+
+func (r *Runner) SetTargetResolverContext(f func(context.Context, string) (Target, error)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resolveTarget = f
@@ -149,6 +160,10 @@ func (r *Runner) Start() {
 // rather than silently racing the closing store.
 func (r *Runner) Stop(ctx context.Context) {
 	r.mu.Lock()
+	r.stopped = true
+	if r.cancel != nil {
+		r.cancel()
+	}
 	for id, ch := range r.stopChs {
 		close(ch)
 		if t, ok := r.timers[id]; ok {
@@ -193,6 +208,10 @@ func (r *Runner) Remove(id string) {
 
 func (r *Runner) startTest(t store.RestoreTest) {
 	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return
+	}
 
 	// Idempotent: tear down any existing schedule for this ID first.
 	r.teardownLocked(t.ID)
@@ -319,6 +338,10 @@ var ErrAlreadyRunning = errors.New("restore test already running")
 // verified the backup.
 func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return t, ErrStopped
+	}
 	if r.running[t.ID] {
 		r.mu.Unlock()
 		return t, ErrAlreadyRunning
@@ -343,35 +366,23 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 	// host/user is a failed verification — never a silent fallback to the
 	// alias-as-host or the CLI's root default, which could aim the run at
 	// an unintended target.
+	var stdout, stderr string
+	var err error
 	if resolveTarget == nil {
-		t.LastRunAt = time.Now()
-		t.LastOK = false
-		t.LastMetric, t.LastDate, t.LastDurationMs = "", "", 0
-		t.LastDetail = "restore target resolver unavailable"
-		applied, err := r.store.SaveRestoreTestResult(t.ID, t)
-		if err != nil || !applied {
-			log.Printf("[restoretest] unresolved target for %s and result not persisted (applied=%v err=%v)", t.ID, applied, err)
-		}
-		return t, nil
-	}
-	target, err := resolveTarget(t.Server)
-	if err != nil || target.Host == "" || target.User == "" {
-		t.LastRunAt = time.Now()
-		t.LastOK = false
-		t.LastMetric, t.LastDate, t.LastDurationMs = "", "", 0
-		reason := fmt.Sprintf("restore target %q is unavailable", t.Server)
+		err = errors.New("restore target resolver unavailable")
+	} else {
+		var target Target
+		target, err = resolveTarget(r.ctx, t.Server)
 		if err != nil {
-			reason = fmt.Sprintf("restore target %q could not be resolved: %v", t.Server, err)
+			err = fmt.Errorf("restore target %q could not be resolved: %w", t.Server, err)
 		}
-		t.LastDetail = reason
-		applied, saveErr := r.store.SaveRestoreTestResult(t.ID, t)
-		if saveErr != nil || !applied {
-			log.Printf("[restoretest] unresolved target for %s; result not persisted (applied=%v err=%v)", t.ID, applied, saveErr)
+		if err == nil && (target.Host == "" || target.User == "") {
+			err = fmt.Errorf("restore target %q is unavailable", t.Server)
 		}
-		return t, nil
+		if err == nil {
+			stdout, stderr, _, err = runCLI(target.Host, target.User, t.App, t.Accessory, t.Bucket, t.Region)
+		}
 	}
-
-	stdout, stderr, _, err := runCLI(target.Host, target.User, t.App, t.Accessory, t.Bucket, t.Region)
 
 	// A26: the verdict starts from a FRESH projection — failure branches
 	// must not inherit the previous run's metric/date/duration, and a

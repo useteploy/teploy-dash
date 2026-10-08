@@ -44,7 +44,12 @@ func (s *Server) handleConfigAuthority(w http.ResponseWriter, r *http.Request, s
 			resp.Mode = string(doc.Mode)
 			resp.Git = doc.Git
 			resp.ManifestRevision = doc.CurrentRevision
-			resp.DeclaredEnvKeys = manifest.EnvKeys([]byte(doc.Manifest))
+			keys, err := manifest.AuthorityEnvKeys([]byte(doc.Manifest))
+			if err != nil {
+				writeErrorStatus(w, "manifest environment authority unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			resp.DeclaredEnvKeys = keys
 			if doc.Git != nil && doc.Git.Repository != "" {
 				if normalized, err := source.NormalizeCloneURL(doc.Git.Repository); err == nil {
 					resp.RepositoryURL = normalized
@@ -66,13 +71,23 @@ func (s *Server) handleConfigAuthority(w http.ResponseWriter, r *http.Request, s
 // the verdict; the string is the repository to point the operator at.
 func (s *Server) envKeySourceOwned(serverName, appName, key string) (bool, string) {
 	if s.manifests == nil {
-		return false, ""
+		return true, "authority unavailable"
 	}
 	doc, err := s.manifests.Get(serverName, appName)
-	if err != nil || doc.Mode != manifest.ModeGitManaged {
+	if errors.Is(err, manifest.ErrNotFound) {
 		return false, ""
 	}
-	for _, declared := range manifest.EnvKeys([]byte(doc.Manifest)) {
+	if err != nil {
+		return true, "authority unavailable"
+	}
+	if doc.Mode != manifest.ModeGitManaged {
+		return false, ""
+	}
+	keys, err := manifest.AuthorityEnvKeys([]byte(doc.Manifest))
+	if err != nil {
+		return true, "authority unavailable"
+	}
+	for _, declared := range keys {
 		if declared == key {
 			repo := ""
 			if doc.Git != nil {

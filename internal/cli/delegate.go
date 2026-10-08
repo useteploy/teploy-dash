@@ -603,11 +603,15 @@ func EnvUnset(server, user, app, key string) (*Result, error) {
 // stdout — the caller parses that and treats ok=false as a result, not an
 // operational error.
 func AccessoryVerifyBackup(server, user, app, accessory, bucket, region string) (*Result, error) {
-	args := []string{"accessory", "verify-backup", accessory,
-		"--app", app, "--host", server,
-		"--bucket", bucket, "--region", region, "--json"}
+	return AccessoryVerifyBackupContext(context.Background(), server, user, app, accessory, bucket, region)
+}
+
+// AccessoryVerifyBackupContext uses the runner lifetime, independent of a
+// browser request, so shutdown can cancel the subprocess before closing stores.
+func AccessoryVerifyBackupContext(ctx context.Context, server, user, app, accessory, bucket, region string) (*Result, error) {
+	args := []string{"accessory", "verify-backup", accessory, "--app", app, "--host", server, "--bucket", bucket, "--region", region, "--json"}
 	args = append(args, userArgs(user)...)
-	return Run(args...)
+	return RunContext(ctx, args...)
 }
 
 // ServerList returns configured servers.

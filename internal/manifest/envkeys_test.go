@@ -56,3 +56,21 @@ func TestEnvKeysOnValidManifest(t *testing.T) {
 		t.Fatalf("EnvKeys = %v, want [A B]", got)
 	}
 }
+
+func TestAuthorityLiteralAliasesMergesAndMalformed(t *testing.T) {
+	for _, text := range []string{
+		"app: web\nenv_literal: {RAILS_ENV: production}\n",
+		"app: web\nbase: &base {RAILS_ENV: production}\nenv_literal: {<<: *base, TOKEN: auto}\nenv: {TOKEN: generate}\n",
+		"base: &base {env_literal: {RAILS_ENV: production}}\n<<: *base\napp: web\n",
+	} {
+		keys, err := AuthorityEnvKeys([]byte(text))
+		if err != nil || !strings.Contains(strings.Join(keys, ","), "RAILS_ENV") {
+			t.Fatalf("%s: %v %v", text, keys, err)
+		}
+	}
+	for _, text := range []string{"app: web\nenv_literal: [x]\n", "app: web\nenv: {A: {nested: x}}\n", "app: web\nenv_literal: {A: one, A: two}\n", "app: web\n---\nenv: {}\n"} {
+		if _, err := AuthorityEnvKeys([]byte(text)); err == nil {
+			t.Fatalf("malformed authority accepted: %s", text)
+		}
+	}
+}

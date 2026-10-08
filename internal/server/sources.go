@@ -23,12 +23,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/useteploy/teploy-dash/internal/manifest"
 	"github.com/useteploy/teploy-dash/internal/operation"
 	"github.com/useteploy/teploy-dash/internal/source"
+	"gopkg.in/yaml.v3"
 )
 
 type sourceCreateRequest struct {
@@ -142,6 +144,10 @@ func (s *Server) handleSources(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.sourceActionMu.Lock()
+		defer s.sourceActionMu.Unlock()
+	}
 	noStore(w)
 	if !s.sourcesAvailable(w) {
 		return
@@ -185,6 +191,12 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 			}
 			writeData(w, s.sourceViewOf(*updated, false))
 		case http.MethodDelete:
+			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			defer cancel()
+			if err := s.sourceDeletionReady(ctx, id); err != nil {
+				writeErrorStatus(w, err.Error(), http.StatusConflict)
+				return
+			}
 			if err := s.sources.Delete(id); err != nil {
 				writeSourceError(w, err)
 				return
@@ -197,6 +209,9 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 {
 		switch parts[1] {
+		case "previews":
+			s.handleSourcePreviews(w, r, id)
+			return
 		case "verify":
 			s.handleSourceVerify(w, r, id)
 			return
@@ -305,7 +320,7 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, "source webhook secret unavailable", http.StatusInternalServerError)
 		return
 	}
-	if !deliveryAuthenticated(r, secret, body) {
+	if !deliveryAuthenticatedFor(src.Forge, r, secret, body) {
 		// Unauthenticated deliveries are never recorded: an attacker could
 		// spray fabricated delivery ids into the ledger otherwise. The
 		// refusal is logged, nothing more.
@@ -314,6 +329,20 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.sourceActionMu.Lock()
+	defer s.sourceActionMu.Unlock()
+	// Re-read after admission/deletion serialization. Authentication against
+	// a rotated or deleted incarnation must never admit stale work.
+	src, err = s.sources.Get(id)
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	currentSecret, err := s.sources.WebhookSecret(id)
+	if err != nil || !deliveryAuthenticatedFor(src.Forge, r, currentSecret, body) {
+		writeErrorStatus(w, "delivery authority changed", http.StatusUnauthorized)
+		return
+	}
 	deliveryID := deliveryIDOf(r, body)
 	event := source.NormalizeEvent(deliveryEventHeader(r))
 	branch, commit := source.ParsePush(body)
@@ -335,7 +364,65 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		writeDeliveryStatus(w, http.StatusOK, "ignored", reason, nil)
 	}
 
-	if event != "push" {
+	previewNumber := 0
+	previewUpdatedAt := ""
+	previewClosed := false
+	if event == "pull_request" {
+		var pull struct {
+			Action       string `json:"action"`
+			Number       int    `json:"number"`
+			Installation struct {
+				ID int64 `json:"id"`
+			} `json:"installation"`
+			Repository struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+			Pull struct {
+				UpdatedAt time.Time `json:"updated_at"`
+				Head      struct {
+					SHA  string `json:"sha"`
+					Repo *struct {
+						FullName string `json:"full_name"`
+					} `json:"repo"`
+				} `json:"head"`
+				Base struct {
+					Repo struct {
+						FullName string `json:"full_name"`
+					} `json:"repo"`
+				} `json:"base"`
+			} `json:"pull_request"`
+		}
+		if json.Unmarshal(body, &pull) != nil || pull.Number <= 0 || pull.Pull.UpdatedAt.IsZero() || !source.ValidCommit(pull.Pull.Head.SHA) {
+			ignore("invalid pull request delivery")
+			return
+		}
+		policy, err := s.sourceProviders.Policy(src)
+		if err != nil || policy.PrivateKeyFile == "" || policy.Preview == nil || src.Forge != source.ForgeGitHub || pull.Installation.ID != policy.InstallationID {
+			ignore("pull request lacks configured App installation authority")
+			return
+		}
+		parts := strings.SplitN(src.CloneURL, "://", 2)
+		repo := ""
+		if len(parts) == 2 {
+			_, repo, _ = strings.Cut(parts[1], "/")
+		}
+		if !strings.EqualFold(pull.Repository.FullName, repo) || !strings.EqualFold(pull.Pull.Base.Repo.FullName, repo) || pull.Pull.Head.Repo == nil || !strings.EqualFold(pull.Pull.Head.Repo.FullName, repo) {
+			ignore("pull request repository scope mismatch or untrusted fork")
+			return
+		}
+		switch pull.Action {
+		case "opened", "reopened", "synchronize":
+		case "closed":
+			previewClosed = true
+		default:
+			ignore("pull request action is not a lifecycle transition")
+			return
+		}
+		previewNumber = pull.Number
+		previewUpdatedAt = pull.Pull.UpdatedAt.UTC().Format(time.RFC3339Nano)
+		commit = pull.Pull.Head.SHA
+	}
+	if event != "push" && previewNumber == 0 {
 		ignore(fmt.Sprintf("event %q is not a push", event))
 		return
 	}
@@ -357,7 +444,7 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		writeDeliveryStatus(w, http.StatusOK, "ignored", "source degraded: "+src.DegradeReason, nil)
 		return
 	}
-	if src.DefaultBranch != "" && branch != "" && branch != src.DefaultBranch {
+	if previewNumber == 0 && src.DefaultBranch != "" && branch != "" && branch != src.DefaultBranch {
 		// The default branch is an as-of-added snapshot: a forge-side
 		// default-branch change does not silently retarget deploys — the
 		// operator updates the source deliberately.
@@ -365,14 +452,143 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if previewNumber == 0 {
+		_, err := s.sources.Lifecycle(id)
+		if err != nil {
+			writeErrorStatus(w, "source lifecycle unavailable", 503)
+			return
+		}
+		if s.sourcePushAuthority != nil {
+			err = s.sourcePushAuthority(r.Context(), src, branch, commit)
+		} else {
+			access, resolveErr := s.resolveSourceAccess(r.Context(), src)
+			if resolveErr != nil {
+				writeErrorStatus(w, "push authority unavailable", 503)
+				return
+			}
+			err = access.PushHead(r.Context(), src, branch, commit)
+			access.Close()
+		}
+		if err != nil {
+			if source.IsStaleAuthority(err) {
+				ignore("push ref is no longer authoritative")
+			} else {
+				writeErrorStatus(w, "push authority unavailable", 503)
+			}
+			return
+		}
+
+	}
+	if previewNumber > 0 {
+		state, err := s.sources.Lifecycle(id)
+		if err != nil {
+			writeErrorStatus(w, "source lifecycle unavailable", 503)
+			return
+		}
+		watermarkKey := fmt.Sprintf("pr:%d", previewNumber)
+		old := state.Watermarks[watermarkKey]
+		oldTime, timeErr := time.Parse(time.RFC3339Nano, old.UpdatedAt)
+		incomingTime, _ := time.Parse(time.RFC3339Nano, previewUpdatedAt)
+		if old.UpdatedAt != "" && timeErr != nil {
+			writeErrorStatus(w, "source lifecycle timestamp invalid", 503)
+			return
+		}
+		if old.UpdatedAt != "" && incomingTime.Before(oldTime) {
+			ignore("stale pull request lifecycle watermark")
+			return
+		}
+		access, err := s.resolveSourceAccess(r.Context(), src)
+		if err != nil {
+			writeErrorStatus(w, "pull request authority unavailable", 503)
+			return
+		}
+		err = access.Pull(r.Context(), src, previewNumber, commit, previewUpdatedAt, previewClosed)
+		access.Close()
+		if err != nil {
+			if source.IsStaleAuthority(err) {
+				ignore("pull request no longer authoritative")
+			} else {
+				writeErrorStatus(w, "pull request authority unavailable", 503)
+			}
+			return
+		}
+		if old.UpdatedAt != previewUpdatedAt || old.Commit != commit || old.Closed != previewClosed {
+			state.Watermarks[watermarkKey] = source.Watermark{UpdatedAt: previewUpdatedAt, Commit: commit, Closed: previewClosed}
+		}
+		if err = s.sources.SaveLifecycle(id, state); err != nil {
+			writeErrorStatus(w, "source lifecycle persistence failed", 503)
+			return
+		}
+	}
+
 	bound, err := s.manifestsBoundTo(src)
+	if previewClosed {
+		bound, err = s.previewTargets(src)
+	}
 	if err != nil {
 		writeErrorStatus(w, "manifest service unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	if previewNumber == 0 {
+		filtered := bound[:0]
+		for _, metadata := range bound {
+			doc, err := s.manifests.Get(metadata.Server, metadata.App)
+			if err != nil || doc.CurrentRevision != metadata.CurrentRevision {
+				writeErrorStatus(w, "source path policy unavailable or changed", http.StatusServiceUnavailable)
+				return
+			}
+			var policy struct {
+				Autodeploy struct {
+					Paths []string `yaml:"paths"`
+				} `yaml:"autodeploy"`
+			}
+			if yaml.Unmarshal([]byte(doc.Manifest), &policy) != nil {
+				writeErrorStatus(w, "source path policy invalid", http.StatusServiceUnavailable)
+				return
+			}
+			if source.PushMatchesPaths(body, policy.Autodeploy.Paths) {
+				filtered = append(filtered, metadata)
+			}
+		}
+		bound = filtered
+	}
 	if len(bound) == 0 {
-		ignore("no git-managed manifest is bound to this source")
+		ignore("no bound git-managed manifest matches this source push path policy")
 		return
+	}
+
+	{
+		state, err := s.sources.Lifecycle(id)
+		if err != nil {
+			writeErrorStatus(w, "source lifecycle unavailable", 503)
+			return
+		}
+		watermarkKey := "push:" + branch
+		if previewNumber > 0 {
+			watermarkKey = fmt.Sprintf("pr:%d", previewNumber)
+		}
+		identities := []string{}
+		for _, m := range bound {
+			srv, err := s.operationsServer(m.Server)
+			if err != nil || srv.ID == "" {
+				writeErrorStatus(w, "source requires stable server identity", 503)
+				return
+			}
+			identities = append(identities, srv.ID+"/"+m.App+"/"+m.CurrentRevision)
+		}
+		sort.Strings(identities)
+		sum := sha256.Sum256([]byte(strings.Join(identities, "\x00")))
+		binding := hex.EncodeToString(sum[:])
+		old := state.Watermarks[watermarkKey]
+		if old.Commit == commit && old.Binding == binding && old.Complete {
+			ignore("source identity already admitted by durable lifecycle authority")
+			return
+		}
+		state.Watermarks[watermarkKey] = source.Watermark{UpdatedAt: previewUpdatedAt, Commit: commit, Closed: previewClosed, Binding: binding}
+		if err = s.sources.SaveLifecycle(id, state); err != nil {
+			writeErrorStatus(w, "source lifecycle persistence failed", 503)
+			return
+		}
 	}
 
 	// Forward onto the EXISTING operation queue (D02 machinery): one
@@ -388,20 +604,40 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		// — the running one is never interrupted; the newest runs next.
 		// Operations from THIS delivery (a ledger-failure retry) are
 		// identified by their idempotency key and left alone.
-		s.supersedeQueuedSourceOps(src.ID, "server:"+metadata.Server+"/app:"+metadata.App, key, deliveryID)
+		kind := operation.KindManifestApply
+		if previewNumber > 0 {
+			kind = operation.KindSourcePreview
+			if previewClosed {
+				kind = operation.KindSourcePreviewDestroy
+			}
+		}
+		if previewNumber > 0 && !previewClosed {
+			if err := s.retainPreviewOwnership(r.Context(), src, metadata, previewNumber); err != nil {
+				refused = err
+				break
+			}
+		}
+		manifestPath := ""
+		if metadata.Git != nil {
+			manifestPath = metadata.Git.ManifestPath
+		}
 		op, _, err := s.operations.Enqueue(operation.Request{
-			Kind:             operation.KindManifestApply,
-			Server:           metadata.Server,
-			App:              metadata.App,
-			Mode:             string(manifest.ModeGitManaged),
-			ManifestRevision: metadata.CurrentRevision,
-			SourceID:         src.ID,
-			SourceCommit:     commit,
+			Kind:                kind,
+			Server:              metadata.Server,
+			App:                 metadata.App,
+			Mode:                string(manifest.ModeGitManaged),
+			ManifestRevision:    metadata.CurrentRevision,
+			SourceID:            src.ID,
+			SourceCommit:        commit,
+			SourcePullRequest:   previewNumber,
+			SourcePullUpdatedAt: previewUpdatedAt,
+			SourceManifestPath:  manifestPath,
 		}, key, &operation.Actor{Kind: "webhook", Subject: "source/" + src.ID, Label: src.DisplayName})
 		if err != nil {
 			refused = err
 			break
 		}
+		s.supersedeQueuedSourceOps(src.ID, op.Target, key, deliveryID, previewNumber)
 		operationIDs = append(operationIDs, op.ID)
 	}
 	if refused != nil {
@@ -417,6 +653,24 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		writeRefusedDelivery(w, refused)
 		return
+	}
+	{
+		state, err := s.sources.Lifecycle(id)
+		if err != nil {
+			writeErrorStatus(w, "source lifecycle unavailable", 503)
+			return
+		}
+		watermarkKey := "push:" + branch
+		if previewNumber > 0 {
+			watermarkKey = fmt.Sprintf("pr:%d", previewNumber)
+		}
+		mark := state.Watermarks[watermarkKey]
+		mark.Complete = true
+		state.Watermarks[watermarkKey] = mark
+		if err = s.sources.SaveLifecycle(id, state); err != nil {
+			writeErrorStatus(w, "source lifecycle persistence failed", 503)
+			return
+		}
 	}
 	if err := s.sources.RecordDelivery(id, source.Delivery{
 		ID: deliveryID, Event: event, Branch: branch, Commit: commit,
@@ -434,12 +688,12 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 // retry after a ledger failure replays, it does not supersede itself).
 // Canceled operations keep their honest D02 status; the delivery ledger
 // carries the supersede marker.
-func (s *Server) supersedeQueuedSourceOps(sourceID, target, incomingKey, newDeliveryID string) {
+func (s *Server) supersedeQueuedSourceOps(sourceID, target, incomingKey, newDeliveryID string, previewNumber int) {
 	if s.operations == nil {
 		return
 	}
 	for _, op := range s.operations.List(operation.StatusQueued, target, 0) {
-		if op.Request.SourceID != sourceID || op.IdempotencyKey == incomingKey {
+		if op.Request.SourceID != sourceID || op.Request.SourcePullRequest != previewNumber || op.IdempotencyKey == incomingKey {
 			continue
 		}
 		if _, err := s.operations.Cancel(op.ID); err != nil {
@@ -509,7 +763,39 @@ func (s *Server) manifestsBoundTo(src *source.Source) ([]manifest.Metadata, erro
 
 // deliveryAuthenticated verifies the forge's own signature schemes against
 // the raw body: X-Hub-Signature-256 (GitHub/Forgejo/Gitea HMAC-SHA256) or
-// X-Gitlab-Token (shared secret, constant-time).
+// native Gitea/Forgejo signatures, and GitLab token or SHA256 signature.
+func deliveryAuthenticatedFor(forge source.Forge, r *http.Request, secret string, body []byte) bool {
+	if forge == source.ForgeGitLab {
+		token := r.Header.Get("X-Gitlab-Token")
+		if token != "" {
+			return hmac.Equal([]byte(token), []byte(secret))
+		}
+		signature := strings.TrimPrefix(strings.TrimSpace(r.Header.Get("X-Gitlab-Signature")), "sha256=")
+		expected, err := hex.DecodeString(signature)
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		return err == nil && len(expected) == sha256.Size && hmac.Equal(expected, mac.Sum(nil))
+	}
+	if forge == source.ForgeGitea || forge == source.ForgeForgejo {
+		headers := []string{"X-Gitea-Signature"}
+		if forge == source.ForgeForgejo {
+			headers = append([]string{"X-Forgejo-Signature"}, headers...)
+		}
+		for _, header := range headers {
+			if signature := strings.TrimSpace(r.Header.Get(header)); signature != "" {
+				expected, err := hex.DecodeString(signature)
+				mac := hmac.New(sha256.New, []byte(secret))
+				mac.Write(body)
+				return err == nil && len(expected) == sha256.Size && hmac.Equal(expected, mac.Sum(nil))
+			}
+		}
+	}
+	if r.Header.Get("X-Hub-Signature-256") == "" {
+		return false
+	}
+	return deliveryAuthenticated(r, secret, body)
+}
+
 func deliveryAuthenticated(r *http.Request, secret string, body []byte) bool {
 	if signature := strings.TrimSpace(r.Header.Get("X-Hub-Signature-256")); signature != "" {
 		if !strings.HasPrefix(signature, "sha256=") {
@@ -535,7 +821,12 @@ func deliveryEventHeader(r *http.Request) string {
 	if event := r.Header.Get("X-GitHub-Event"); event != "" {
 		return event
 	}
-	return r.Header.Get("X-Gitlab-Event")
+	for _, header := range []string{"X-Forgejo-Event", "X-Gitea-Event", "X-Gitlab-Event"} {
+		if event := r.Header.Get(header); event != "" {
+			return event
+		}
+	}
+	return ""
 }
 
 // deliveryIDOf reads the provider's delivery identity. Without a delivery
@@ -545,8 +836,10 @@ func deliveryIDOf(r *http.Request, body []byte) string {
 	if id := strings.TrimSpace(r.Header.Get("X-GitHub-Delivery")); id != "" {
 		return id
 	}
-	if id := strings.TrimSpace(r.Header.Get("X-Gitlab-Event-UUID")); id != "" {
-		return id
+	for _, header := range []string{"X-Forgejo-Delivery", "X-Gitea-Delivery", "X-Gitlab-Event-UUID"} {
+		if id := strings.TrimSpace(r.Header.Get(header)); id != "" {
+			return id
+		}
 	}
 	digest := sha256.Sum256(body)
 	return "body:" + hex.EncodeToString(digest[:])[:16]
@@ -567,7 +860,7 @@ func writeDeliveryStatus(w http.ResponseWriter, status int, disposition, reason 
 
 func writeRefusedDelivery(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, operation.ErrAdmissionBudget), errors.Is(err, operation.ErrGlobalAdmissionBudget):
+	case errors.Is(err, operation.ErrAdmissionBudget), errors.Is(err, operation.ErrGlobalAdmissionBudget), errors.Is(err, operation.ErrPrincipalAdmissionBudget):
 		writeErrorStatus(w, err.Error(), http.StatusTooManyRequests)
 	case errors.Is(err, operation.ErrShuttingDown):
 		writeErrorStatus(w, err.Error(), http.StatusServiceUnavailable)

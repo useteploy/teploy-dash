@@ -13,6 +13,7 @@ package outbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -190,28 +191,14 @@ func New(dir string, opts Options) (*Outbox, error) {
 func (o *Outbox) journalPath() string { return filepath.Join(o.dir, journalName) }
 
 func (o *Outbox) load() error {
-	f, err := os.Open(o.journalPath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("open alert outbox journal: %w", err)
+	data, err := durable.ReadJSONL(o.journalPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	defer f.Close()
-
-	// Read raw first so a torn tail can be detected by shape (no newline
-	// before EOF), not just by decode failure.
-	data, err := os.ReadFile(o.journalPath())
 	if err != nil {
 		return fmt.Errorf("read alert outbox journal: %w", err)
 	}
-	var tornTail bool
-	s := string(data)
-	if s != "" && !endsWithNewline(s) {
-		tornTail = true
-	}
-
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	line := 0
 	for scanner.Scan() {
@@ -222,10 +209,6 @@ func (o *Outbox) load() error {
 		}
 		var rec Record
 		if err := json.Unmarshal(raw, &rec); err != nil {
-			if tornTail && line == lastLineIndex(s) {
-				log.Printf("[outbox] dropping torn journal tail (crash mid-append)")
-				continue
-			}
 			return fmt.Errorf("alert outbox journal line %d: %w", line, err)
 		}
 		if prev, ok := o.records[rec.ID]; ok {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // X02 §5 row 6: operation records carry record_version (absent = 1); this
@@ -126,5 +127,55 @@ func TestUnknownFieldsWithinVersionStayMutable(t *testing.T) {
 	defer manager.Shutdown(context.Background())
 	if h := manager.Health(); h.ReadOnly != "" {
 		t.Fatalf("own-version record with unknown fields tripped read-only: %q", h.ReadOnly)
+	}
+}
+
+// D13: no recovery, receipt work, retention, or journal repair may rewrite
+// future-schema history, including expired terminals and active statuses.
+func TestFutureHistoryBytePreservedAcrossRestarts(t *testing.T) {
+	for _, status := range []string{"queued", "running", "stopping", "cancel_requested", "interrupted", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			dir := t.TempDir()
+			id := "0123456789abcdef0123456789abcdef"
+			writeFutureRecord(t, dir, id, currentRecordVersion+1)
+			path := filepath.Join(dir, "operations", "records", id+".json")
+			var record map[string]interface{}
+			data, _ := os.ReadFile(path)
+			json.Unmarshal(data, &record)
+			record["status"] = status
+			record["finished_at"] = "2000-01-01T00:00:00Z"
+			record["future_commit"] = map[string]interface{}{"must_survive": true}
+			record["reconciliation"] = map[string]interface{}{"state": "reconciling"}
+			before, _ := json.Marshal(record)
+			os.WriteFile(path, before, 0600)
+			eventsDir := filepath.Join(dir, "operations", "events")
+			os.MkdirAll(eventsDir, 0700)
+			journal := filepath.Join(eventsDir, id+".jsonl")
+			tail := []byte(`{"operation_id":"` + id + `","sequence":1,"type":"stdout","data":"retained"}`)
+			os.WriteFile(journal, tail, 0600)
+			for restart := 0; restart < 2; restart++ {
+				m, err := New(dir, Options{Resolver: testResolver, Executor: func(context.Context, Command, func(Stream, string)) (int, error) {
+					t.Error("executor called in read-only mode")
+					return 0, nil
+				}, MaxHistoryAge: time.Hour})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if m.Health().ReadOnly == "" {
+					t.Fatal("downgrade not detected")
+				}
+				m.EventsAfter(id, 0)
+				m.retire()
+				m.Shutdown(context.Background())
+				after, err := os.ReadFile(path)
+				if err != nil || string(after) != string(before) {
+					t.Fatalf("record changed: %v", err)
+				}
+				after, err = os.ReadFile(journal)
+				if err != nil || string(after) != string(tail) {
+					t.Fatalf("journal changed: %v", err)
+				}
+			}
+		})
 	}
 }

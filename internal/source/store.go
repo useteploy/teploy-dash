@@ -205,6 +205,13 @@ func (s *Store) Create(input CreateInput) (*CreatedSource, error) {
 	if err := durable.Replace(filepath.Join(s.dir(id), "webhook-secret"), []byte(secret+"\n"), 0600); err != nil {
 		return nil, fmt.Errorf("persist webhook secret: %w", err)
 	}
+	initialLifecycle, err := json.Marshal(&Lifecycle{Version: 1, Watermarks: map[string]Watermark{}, Previews: map[string]PreviewOwnership{}})
+	if err != nil {
+		return nil, err
+	}
+	if err = durable.Replace(filepath.Join(s.dir(id), "lifecycle.json"), initialLifecycle, 0600); err != nil {
+		return nil, fmt.Errorf("persist source lifecycle: %w", err)
+	}
 	if err := s.persist(source); err != nil {
 		return nil, err
 	}
@@ -534,7 +541,7 @@ func (s *Store) loadDeliveries(id string) error {
 		return nil
 	}
 	path := filepath.Join(s.dir(id), "deliveries.jsonl")
-	data, err := os.ReadFile(path)
+	data, err := durable.ReadJSONL(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.deliveries[id] = nil
@@ -553,9 +560,6 @@ func (s *Store) loadDeliveries(id string) error {
 		}
 		var delivery Delivery
 		if err := json.Unmarshal([]byte(line), &delivery); err != nil {
-			if i == len(lines)-1 {
-				break // torn tail: never fsynced, never acked
-			}
 			return fmt.Errorf("delivery ledger for %s is corrupt at line %d: %w", id, i+1, err)
 		}
 		records = append(records, delivery)

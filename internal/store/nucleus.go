@@ -126,6 +126,7 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 			last_date TEXT NOT NULL DEFAULT '',
 			last_duration_ms BIGINT NOT NULL DEFAULT 0
 		)`,
+		`ALTER TABLE restore_tests ADD COLUMN IF NOT EXISTS incarnation TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, q := range queries {
@@ -256,7 +257,7 @@ func (s *NucleusStore) ListRestoreTests() ([]RestoreTest, error) {
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, server, app, accessory, bucket, region, interval_hours, enabled,
-		        last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms
+		        last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms, incarnation
 		 FROM restore_tests`)
 	if err != nil {
 		return nil, err
@@ -282,7 +283,7 @@ func (s *NucleusStore) GetRestoreTest(id string) (*RestoreTest, error) {
 	defer cancel()
 	row := s.pool.QueryRow(ctx,
 		`SELECT id, server, app, accessory, bucket, region, interval_hours, enabled,
-		        last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms
+		        last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms, incarnation
 		 FROM restore_tests WHERE id = $1`, id)
 	t, err := scanRestoreTest(row.Scan)
 	if err != nil {
@@ -298,7 +299,7 @@ func scanRestoreTest(scan func(dest ...any) error) (RestoreTest, error) {
 	var lastRunMs int64
 	err := scan(&t.ID, &t.Server, &t.App, &t.Accessory, &t.Bucket, &t.Region,
 		&t.IntervalHours, &t.Enabled, &lastRunMs, &t.LastOK,
-		&t.LastDetail, &t.LastMetric, &t.LastDate, &t.LastDurationMs)
+		&t.LastDetail, &t.LastMetric, &t.LastDate, &t.LastDurationMs, &t.Incarnation)
 	if err != nil {
 		return t, err
 	}
@@ -316,15 +317,24 @@ func scanRestoreTest(scan func(dest ...any) error) (RestoreTest, error) {
 func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
+	incarnation, err := newRestoreIncarnation()
+	if err != nil {
+		return err
+	}
 	var lastRunMs int64
 	if !t.LastRunAt.IsZero() {
 		lastRunMs = t.LastRunAt.UnixMilli()
 	}
-	_, err := s.pool.Exec(ctx,
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO restore_tests (id, server, app, accessory, bucket, region, interval_hours, enabled,
-		                            last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		                            last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms, incarnation)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		 ON CONFLICT (id) DO UPDATE SET
+           incarnation = CASE WHEN restore_tests.server = EXCLUDED.server
+             AND restore_tests.app = EXCLUDED.app AND restore_tests.accessory = EXCLUDED.accessory
+             AND restore_tests.bucket = EXCLUDED.bucket AND restore_tests.region = EXCLUDED.region
+             AND restore_tests.incarnation <> ''
+             THEN restore_tests.incarnation ELSE EXCLUDED.incarnation END,
 		   server = EXCLUDED.server, app = EXCLUDED.app, accessory = EXCLUDED.accessory,
 		   bucket = EXCLUDED.bucket, region = EXCLUDED.region,
 		   interval_hours = EXCLUDED.interval_hours, enabled = EXCLUDED.enabled,
@@ -365,7 +375,7 @@ func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 		                            AND restore_tests.region = EXCLUDED.region
 		                           THEN restore_tests.last_duration_ms ELSE EXCLUDED.last_duration_ms END`,
 		t.ID, t.Server, t.App, t.Accessory, t.Bucket, t.Region, t.IntervalHours, t.Enabled,
-		lastRunMs, t.LastOK, t.LastDetail, t.LastMetric, t.LastDate, t.LastDurationMs,
+		lastRunMs, t.LastOK, t.LastDetail, t.LastMetric, t.LastDate, t.LastDurationMs, incarnation,
 	)
 	return err
 }
@@ -388,10 +398,10 @@ func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) (boo
 		`UPDATE restore_tests
 		 SET last_run_ms = $1, last_ok = $2, last_detail = $3,
 		     last_metric = $4, last_date = $5, last_duration_ms = $6
-		 WHERE id = $7 AND server = $8 AND app = $9 AND accessory = $10 AND bucket = $11 AND region = $12`,
+		 WHERE id = $7 AND server = $8 AND app = $9 AND accessory = $10 AND bucket = $11 AND region = $12 AND incarnation = $13`,
 		lastRunMs, result.LastOK, result.LastDetail, result.LastMetric,
 		result.LastDate, result.LastDurationMs, id,
-		result.Server, result.App, result.Accessory, result.Bucket, result.Region,
+		result.Server, result.App, result.Accessory, result.Bucket, result.Region, result.Incarnation,
 	)
 	if err != nil {
 		return false, err

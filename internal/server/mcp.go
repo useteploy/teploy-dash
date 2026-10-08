@@ -113,7 +113,7 @@ func (b mcpBackend) GetApp(ctx context.Context, server, app string) (string, err
 }
 
 func (b mcpBackend) AppLogs(ctx context.Context, server, app string, lines int) (string, error) {
-	if !cli.IsInstalled() {
+	if !b.s.cliInstalled() {
 		return "", fmt.Errorf("teploy CLI not installed on the dash host")
 	}
 	srv, err := b.resolveServer(server)
@@ -182,7 +182,7 @@ func (b mcpBackend) ListMonitors(ctx context.Context) (string, error) {
 }
 
 func (b mcpBackend) ListEnvKeys(ctx context.Context, server, app string) (string, error) {
-	if !cli.IsInstalled() {
+	if !b.s.cliInstalled() {
 		return "", fmt.Errorf("teploy CLI not installed on the dash host")
 	}
 	srv, err := b.resolveServer(server)
@@ -256,7 +256,7 @@ func (b mcpBackend) AppAction(ctx context.Context, server, app, action string) (
 	default:
 		// Everything else (lock, unlock, maintenance on/off) delegates to
 		// the CLI, exactly like the UI.
-		if !cli.IsInstalled() {
+		if !b.s.cliInstalled() {
 			return "", fmt.Errorf("teploy CLI not installed on the dash host")
 		}
 		if _, err := b.resolveServer(server); err != nil {
@@ -274,11 +274,14 @@ func (b mcpBackend) AppAction(ctx context.Context, server, app, action string) (
 }
 
 func (b mcpBackend) SetEnv(ctx context.Context, server, app, key, value string) (string, error) {
-	if !cli.IsInstalled() {
+	if !b.s.cliInstalled() {
 		return "", fmt.Errorf("teploy CLI not installed on the dash host")
 	}
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")
+	}
+	if owned, _ := b.s.envKeySourceOwned(server, app, key); owned {
+		return "", fmt.Errorf("environment variable %s is declared in the git-managed manifest; change it at the source", key)
 	}
 	srv, err := b.resolveServer(server)
 	if err != nil {
@@ -291,11 +294,14 @@ func (b mcpBackend) SetEnv(ctx context.Context, server, app, key, value string) 
 }
 
 func (b mcpBackend) UnsetEnv(ctx context.Context, server, app, key string) (string, error) {
-	if !cli.IsInstalled() {
+	if !b.s.cliInstalled() {
 		return "", fmt.Errorf("teploy CLI not installed on the dash host")
 	}
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")
+	}
+	if owned, _ := b.s.envKeySourceOwned(server, app, key); owned {
+		return "", fmt.Errorf("environment variable %s is declared in the git-managed manifest; change it at the source", key)
 	}
 	srv, err := b.resolveServer(server)
 	if err != nil {

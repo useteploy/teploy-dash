@@ -3,6 +3,8 @@ package store
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -240,10 +242,21 @@ func (s *FileStore) SaveRestoreTest(t RestoreTest) error {
 	// was overwritten by the stale copy — resurrecting an obsolete "verified"
 	// verdict over a newer failure. A RETARGETED test (identity changed)
 	// keeps none of the old target's verdict (F038).
+	incarnation, err := newRestoreIncarnation()
+	if err != nil {
+		return err
+	}
+	t.Incarnation = incarnation
 	path := filepath.Join(s.dir, "restore-tests", t.ID+".json")
 	if data, err := os.ReadFile(path); err == nil {
 		var stored RestoreTest
-		if json.Unmarshal(data, &stored) == nil && sameRestoreTarget(stored, t) {
+		if err := json.Unmarshal(data, &stored); err != nil {
+			return fmt.Errorf("reading stored restore test: %w", err)
+		}
+		if sameRestoreTarget(stored, t) {
+			if stored.Incarnation != "" {
+				t.Incarnation = stored.Incarnation
+			}
 			t.LastRunAt = stored.LastRunAt
 			t.LastOK = stored.LastOK
 			t.LastDetail = stored.LastDetail
@@ -260,6 +273,14 @@ func (s *FileStore) SaveRestoreTest(t RestoreTest) error {
 		return err
 	}
 	return atomicWrite(path, data, 0644)
+}
+
+func newRestoreIncarnation() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(nonce[:]), nil
 }
 
 // sameRestoreTarget compares the target identity fields that a result is
@@ -310,7 +331,7 @@ func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) (bool, 
 	// dropped rather than attributed to the new target. F037: region is
 	// part of the identity — the same bucket name in a different region is
 	// a different target.
-	if stored.Server != result.Server || stored.App != result.App || stored.Accessory != result.Accessory ||
+	if stored.Incarnation != result.Incarnation || stored.Server != result.Server || stored.App != result.App || stored.Accessory != result.Accessory ||
 		stored.Bucket != result.Bucket || stored.Region != result.Region {
 		return false, nil
 	}

@@ -111,6 +111,7 @@ func run() error {
 	// Global admission + execution bounds (R17): total live operations and
 	// simultaneous CLI executions across every target.
 	opMaxLive := envInt("TEPLOY_DASH_MAX_LIVE_OPERATIONS", 0)
+	opMaxPrincipal := envInt("TEPLOY_DASH_MAX_LIVE_PER_PRINCIPAL", 0)
 	opMaxConcurrent := envInt("TEPLOY_DASH_MAX_CONCURRENT_OPERATIONS", 0)
 	// R62: reject an unrepresentable retention age at startup instead of
 	// wrapping it negative (which disables retention).
@@ -234,27 +235,28 @@ func run() error {
 
 	// Initialize HTTP server
 	srv := server.New(server.Config{
-		Host:                       *host,
-		Port:                       *port,
-		DeploymentsDir:             *deploymentsDir,
-		DataDir:                    *dataDir,
-		Monitor:                    mon,
-		Restore:                    rst,
-		Store:                      st,
-		AuthUser:                   authUser,
-		AuthPass:                   authPass,
-		NoAuth:                     *noAuth,
-		PublicStatus:               *publicStatus,
-		Frontend:                   uiFS,
-		Version:                    version,
-		Backend:                    backend,
-		OperationMaxJournalBytes:   opJournalBytes,
-		OperationMaxHistoryAge:     opHistoryAge,
-		OperationMaxOperations:     opMaxOperations,
-		OperationMaxQueued:         opMaxQueued,
-		OperationMaxLive:           opMaxLive,
-		OperationMaxConcurrent:     opMaxConcurrent,
-		OperationIdempotencyWindow: opIdempotencyWindow,
+		Host:                         *host,
+		Port:                         *port,
+		DeploymentsDir:               *deploymentsDir,
+		DataDir:                      *dataDir,
+		Monitor:                      mon,
+		Restore:                      rst,
+		Store:                        st,
+		AuthUser:                     authUser,
+		AuthPass:                     authPass,
+		NoAuth:                       *noAuth,
+		PublicStatus:                 *publicStatus,
+		Frontend:                     uiFS,
+		Version:                      version,
+		Backend:                      backend,
+		OperationMaxJournalBytes:     opJournalBytes,
+		OperationMaxHistoryAge:       opHistoryAge,
+		OperationMaxOperations:       opMaxOperations,
+		OperationMaxQueued:           opMaxQueued,
+		OperationMaxLive:             opMaxLive,
+		OperationMaxLivePerPrincipal: opMaxPrincipal,
+		OperationMaxConcurrent:       opMaxConcurrent,
+		OperationIdempotencyWindow:   opIdempotencyWindow,
 	})
 
 	// D08: durable alert delivery. The outbox journals every monitor-alert

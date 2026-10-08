@@ -2,6 +2,7 @@ package source
 
 import (
 	"encoding/json"
+	"io"
 	"regexp"
 	"strings"
 )
@@ -33,21 +34,24 @@ func NormalizeEvent(raw string) string {
 // ParsePush extracts the branch and the authenticated commit from a push
 // payload (the payload pin). It mirrors teploy-cli's autodeploy.PushCommit
 // contract (C02): GitLab's checkout_sha is preferred, else after; tag refs
-// (whose "after" names the tag object), explicit deletions, the all-zero
-// deletion marker, and malformed hashes pin NOTHING — "" means "no commit
-// this delivery can pin", never "pin to garbage".
+// (whose "after" names the tag object), the explicit "deleted":true marker
+// (checked before commit selection, even when after/checkout_sha still name
+// a full SHA a recreated ref could match), the all-zero deletion marker,
+// and malformed hashes pin NOTHING — "" means "no commit this delivery can
+// pin", never "pin to garbage".
 func ParsePush(body []byte) (branch, commit string) {
 	var payload struct {
 		Ref         string  `json:"ref"`
 		After       *string `json:"after"`
 		CheckoutSHA *string `json:"checkout_sha"`
+		Deleted     *bool   `json:"deleted"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	if err := decoder.Decode(&payload); err != nil {
 		return "", ""
 	}
 	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err == nil {
+	if err := decoder.Decode(&extra); err != io.EOF {
 		return "", ""
 	}
 	if payload.Ref == "" {
@@ -62,6 +66,12 @@ func ParsePush(body []byte) (branch, commit string) {
 		return strings.TrimPrefix(payload.Ref, "refs/tags/"), ""
 	default:
 		return payload.Ref, ""
+	}
+	// The deletion marker is honored before commit selection: a deletion is
+	// never authenticated deploy intent, even when after/checkout_sha carry
+	// a full SHA the live ref currently matches again (branch recreation).
+	if payload.Deleted != nil && *payload.Deleted {
+		return branch, ""
 	}
 	candidate := ""
 	if payload.CheckoutSHA != nil {

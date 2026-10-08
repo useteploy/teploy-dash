@@ -46,7 +46,11 @@ func seedTest(t *testing.T, st store.Store) store.RestoreTest {
 	if err := st.SaveRestoreTest(rt); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	return rt
+	stored, err := st.GetRestoreTest(rt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return *stored
 }
 
 func TestRunNow_ParsesAndPersistsSuccess(t *testing.T) {
@@ -417,4 +421,43 @@ func TestRunNow_FailedVerificationRidesTheOutbox(t *testing.T) {
 		t.Fatalf("restore record leaked into the monitor scope: %+v", d)
 	}
 	ob.Stop(context.Background())
+}
+
+func TestStoppedRunnerRefusesLateReloadAndRun(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	rt := seedTest(t, st)
+	r := New(st)
+	r.Stop(context.Background())
+	r.Reload(rt)
+	if _, err := r.RunNow(rt); !errors.Is(err, ErrStopped) {
+		t.Fatalf("late run: %v", err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.stopChs) != 0 {
+		t.Fatal("late reload recreated schedule")
+	}
+}
+
+func TestStopCancelsRunnerOwnedTargetResolution(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	rt := seedTest(t, st)
+	r := New(st)
+	started := make(chan struct{})
+	done := make(chan struct{})
+	r.SetTargetResolverContext(func(ctx context.Context, _ string) (Target, error) {
+		close(started)
+		<-ctx.Done()
+		return Target{}, ctx.Err()
+	})
+	go func() { defer close(done); r.RunNow(rt) }()
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r.Stop(ctx)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("shutdown failed to join canceled resolution")
+	}
 }

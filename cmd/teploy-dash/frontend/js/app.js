@@ -333,6 +333,7 @@ document.addEventListener('alpine:init', () => {
     { page: 'monitor-detail', path: '/monitors/:id' },
     { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
+    { page: 'sources', path: '/sources' },
     { page: 'servers', path: '/servers' },
     { page: 'server-detail', path: '/servers/:name' },
     { page: 'operations', path: '/operations' },
@@ -550,7 +551,7 @@ document.addEventListener('alpine:init', () => {
         // Scoped memberships need envelope identities, including legacy
         // name-hash ids. Read the apps and ids from the SAME fleet snapshot
         // so a rename/name swap between requests cannot misbind a card.
-        const scoped = (groups || []).some(g => (g.server_apps || []).length > 0);
+        const scoped = (groups || []).some(g => (g.server_apps || []).length > 0 || (g.projects || []).some(p => (p.server_apps || []).length > 0));
         let apps;
         if (scoped) {
           const fleet = await api.get('/api/fleet');
@@ -594,7 +595,7 @@ document.addEventListener('alpine:init', () => {
         // metadata only — warn separately rather than swallowing it or
         // pretending the deploy failed.
         if (groupName) {
-          await api.post(`/api/groups/${encodeURIComponent(groupName)}/apps`, { app: f.app })
+          await api.post(`/api/groups/${encodeURIComponent(groupName)}/apps`, { app: f.app, server: f.server })
             .catch(e => showToast(`Deploy queued, but group assignment failed: ${e.message}`, 'error'));
         }
         this.deployingToGroup = null;
@@ -630,16 +631,16 @@ document.addEventListener('alpine:init', () => {
       const belongs = (g, a) => (g.apps || []).includes(a.name) ||
         (g.server_apps || []).some(ref => a.server_id && ref.app === a.name && ref.server_id === a.server_id);
       const groups = (this.groups || []).map(g => {
-        const projectAppNames = new Set((g.projects || []).flatMap(p => p.apps || []));
-        const directApps = this.filteredApps.filter(a => belongs(g, a) && !projectAppNames.has(a.name));
+        const inProject = a => (g.projects || []).some(p => belongs(p, a));
+        const directApps = this.filteredApps.filter(a => belongs(g, a) && !inProject(a));
         const projects = (g.projects || []).map(p => ({
           ...p,
-          resolvedApps: this.filteredApps.filter(a => (p.apps || []).includes(a.name)),
+          resolvedApps: this.filteredApps.filter(a => belongs(p, a)),
         }));
         return { ...g, directApps, projects, system: false };
       });
       const ungrouped = this.filteredApps.filter(a => !(this.groups || []).some(g =>
-        belongs(g, a) || (g.projects || []).some(p => (p.apps || []).includes(a.name))));
+        belongs(g, a) || (g.projects || []).some(p => belongs(p, a))));
       if (ungrouped.length > 0) {
         groups.push({ name: 'Ungrouped', directApps: ungrouped, projects: [], system: true });
       }
@@ -693,16 +694,11 @@ document.addEventListener('alpine:init', () => {
       const appName = app.name;
       const group = (this.groups || []).find(g => g.name === groupName);
       const refs = (group?.server_apps || []).filter(ref => ref.app === appName);
-      // The current DELETE contract resolves by name, scoped refs first.
-      // Never send it for a card that could remove another server's binding.
-      // Multiple scoped refs need a backend-specific removal route first.
-      if (refs.length && (refs.length !== 1 || refs[0].server_id !== app.server_id)) {
-        showToast('Cannot remove this app individually: server-scoped removal is not supported for these bindings', 'error');
-        return;
-      }
+      const scoped = refs.some(ref => ref.server_id === app.server_id);
+      const query = scoped ? `?server_id=${encodeURIComponent(app.server_id)}` : '?legacy=1';
       if (!confirm(`Remove "${appName}" from group "${groupName}"?`)) return;
       try {
-        await api.del(`/api/groups/${encodeURIComponent(groupName)}/apps/${encodeURIComponent(appName)}`);
+        await api.del(`/api/groups/${encodeURIComponent(groupName)}/apps/${encodeURIComponent(appName)}${query}`);
         showToast('App removed from group', 'success');
         await this.load();
       } catch (e) {
@@ -724,88 +720,128 @@ document.addEventListener('alpine:init', () => {
     deploying: false,
     deployForm: { app: '', image: '', domain: '', server: '', port: 80 },
 
+    generation: 0, destroyed: false,
+    routeIdentity() { const r = Alpine.store('router'); return r.page === 'project-detail' ? JSON.stringify([r.params.group, r.params.project]) : ''; },
+    current(generation) { return !this.destroyed && generation === this.generation && this.routeIdentity() === JSON.stringify([this.groupName, this.projectName]); },
     async init() {
-      this.groupName = Alpine.store('router').params.group;
-      this.projectName = Alpine.store('router').params.project;
-      await this.load();
+      this.boundIdentity = this.routeIdentity();
+      const initialLoad = this.bindRoute();
+      this.routeEffect = Alpine.effect(() => {
+        const identity = this.routeIdentity();
+        if (identity !== this.boundIdentity) { this.boundIdentity = identity; this.bindRoute(); }
+      });
+      await initialLoad;
     },
-
+    destroy() { this.destroyed = true; this.generation++; if (this.routeEffect) Alpine.release(this.routeEffect); this.deployForm = {}; this.projectApps = []; },
+    async bindRoute() {
+      if (this.destroyed) return;
+      this.generation++;
+      const r = Alpine.store('router');
+      this.groupName = r.params.group; this.projectName = r.params.project;
+      this.apps = []; this.groups = []; this.projectApps = []; this.serverList = [];
+      this.deploying = false; this.deployingToProject = false;
+      this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
+      this.resetPreflight();
+      if (r.page === 'project-detail') await this.load();
+    },
     async load() {
+      if (this.destroyed) return;
+      const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
       this.loading = true;
-      // Each fetch fails independently; the first failure is the page's
-      // error state (the old per-fetch .catch(() => []) painted a dead API
-      // as "No apps in this project yet" — D07).
       let failure = null;
       const [apps, groups, servers] = await Promise.all([
         api.get('/api/apps').catch(e => { failure = failure || e; return []; }),
         api.get('/api/groups').catch(e => { failure = failure || e; return []; }),
-        // /api/servers is viewer-readable; /api/config/servers is admin-only
-        // and left a 403-catch producing an empty dropdown for editors.
-        api.get('/api/servers').catch(e => { failure = failure || e; return ({}); }),
+        api.get('/api/servers').catch(e => { failure = failure || e; return {}; }),
       ]);
-      this.apps = apps || [];
-      this.groups = groups || [];
-      this.serverList = Object.keys(servers || {});
-      const group = (this.groups || []).find(g => g.name === this.groupName);
-      const proj = group ? (group.projects || []).find(p => p.name === this.projectName) : null;
-      const projAppNames = proj ? (proj.apps || []) : [];
-      this.projectApps = (this.apps || []).filter(a => projAppNames.includes(a.name));
-      if (failure) {
-        this.loadError = `Could not load the project fully: ${failure.message}`;
-      } else {
-        this.loadError = null;
-        this.loadedAt = new Date().toISOString();
+      if (!this.current(generation)) return;
+      let resolvedApps = (apps || []).map(a => ({ ...a, name: a.app ?? a.name }));
+      const group = (groups || []).find(g => g.name === groupName);
+      const proj = group ? (group.projects || []).find(p => p.name === projectName) : null;
+      if ((proj?.server_apps || []).length) {
+        try {
+          const fleet = await api.get('/api/fleet');
+          if (!this.current(generation)) return;
+          if (!Array.isArray(fleet?.servers)) throw new Error('Fleet identities unavailable');
+          if (fleet.servers.length && fleet.servers.every(s => s.error)) throw new Error('Fleet app collection failed for all servers');
+          resolvedApps = fleet.servers.filter(s => !s.error).flatMap(s => (s.apps || []).map(a => ({ ...a, name: a.app ?? a.name, server: s.server, server_id: s.id })));
+        } catch (e) { if (!this.current(generation)) return; failure = failure || e; resolvedApps = []; }
       }
+      if (!this.current(generation)) return;
+      this.apps = resolvedApps; this.groups = groups || []; this.serverList = Object.keys(servers || {});
+      this.projectApps = resolvedApps.filter(a => (proj?.apps || []).includes(a.name) ||
+        (proj?.server_apps || []).some(ref => ref.app === a.name && ref.server_id === a.server_id));
+      this.loadError = failure ? `Could not load the project fully: ${failure.message}` : null;
+      if (!failure) this.loadedAt = new Date().toISOString();
       this.loading = false;
     },
 
     openApp(app) {
+      if (!this.current(this.generation)) return;
       Alpine.store('router').navigate('app-detail', { name: app.name, server: app.server, fromProject: this.projectName, fromGroup: this.groupName });
     },
 
-    async unassignFromProject(appName) {
+    async unassignFromProject(app) {
+      const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
+      if (!this.current(generation)) return;
+      const appName = app.name;
+      const group = this.groups.find(g => g.name === this.groupName);
+      const project = (group?.projects || []).find(p => p.name === this.projectName);
+      const scoped = (project?.server_apps || []).some(ref => ref.app === appName && ref.server_id === app.server_id);
+      const query = scoped ? `?server_id=${encodeURIComponent(app.server_id)}` : '?legacy=1';
       if (!confirm(`Remove "${appName}" from project "${this.projectName}"?`)) return;
       try {
-        await api.del(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}/apps/${encodeURIComponent(appName)}`);
+        await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}/apps/${encodeURIComponent(appName)}${query}`);
+        if (!this.current(generation)) return;
         showToast('App removed from project', 'success');
         await this.load();
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.current(generation)) showToast(e.message, 'error');
       }
     },
 
     async deleteThisProject() {
+      const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
+      if (!this.current(generation)) return;
       if (!confirm(`Delete project "${this.projectName}"? Apps remain in the group.`)) return;
       try {
-        await api.del(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}`);
+        await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`);
+        if (!this.current(generation)) return;
         showToast('Project deleted', 'success');
         Alpine.store('router').navigate('projects');
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.current(generation)) showToast(e.message, 'error');
       }
     },
 
     async renameThisProject() {
+      const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
+      if (!this.current(generation)) return;
       const name = prompt('Project name:', this.projectName);
       if (!name || name === this.projectName) return;
       try {
-        await api.put(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}`, { name });
-        this.projectName = name;
-        Alpine.store('router').params.project = name;
+        await api.put(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`, { name });
+        if (!this.current(generation)) return;
+        Alpine.store('router').navigate('project-detail', {group: groupName, project: name});
+        const renamedIdentity = JSON.stringify([groupName, name]);
+        await this.bindRoute();
+        if (this.destroyed || this.routeIdentity() !== renamedIdentity) return;
         showToast('Project renamed', 'success');
-        await this.load();
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.current(generation)) showToast(e.message, 'error');
       }
     },
 
     openDeployForm() {
+      if (!this.current(this.generation)) return;
       this.deployingToProject = true;
       this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
       this.resetPreflight();
     },
 
     async doDeploy() {
+      const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
+      if (!this.current(generation)) return;
       const f = this.deployForm;
       if (!f.app || !f.image || !f.domain || !f.server) {
         showToast('All fields are required', 'error');
@@ -813,13 +849,16 @@ document.addEventListener('alpine:init', () => {
       }
       this.deploying = true;
       try {
-        const op = await api.post('/api/deploy', f);
+        const op = await api.post('/api/deploy', {...f});
+        if (!this.current(generation)) return;
         // Auto-assign to the group and project; failures are metadata-only
         // and warned separately.
-        const assign = (url) => api.post(url, { app: f.app })
-          .catch(e => showToast(`Deploy queued, but assignment failed: ${e.message}`, 'error'));
-        await assign(`/api/groups/${encodeURIComponent(this.groupName)}/apps`);
-        await assign(`/api/groups/${encodeURIComponent(this.groupName)}/projects/${encodeURIComponent(this.projectName)}/apps`);
+        const assign = (url) => api.post(url, { app: f.app, server: f.server })
+          .catch(e => { if (this.current(generation)) showToast(`Deploy queued, but assignment failed: ${e.message}`, 'error'); });
+        await assign(`/api/groups/${encodeURIComponent(groupName)}/apps`);
+        if (!this.current(generation)) return;
+        await assign(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}/apps`);
+        if (!this.current(generation)) return;
         this.deployingToProject = false;
         this.deployForm = { app: '', image: '', domain: '', server: '', port: 80 };
         if (isOperation(op)) {
@@ -829,9 +868,9 @@ document.addEventListener('alpine:init', () => {
         showToast(`Deployed ${f.app} successfully`, 'success');
         await this.load();
       } catch (e) {
-        showToast(e.message, 'error');
+        if (this.current(generation)) showToast(e.message, 'error');
       } finally {
-        this.deploying = false;
+        if (this.current(generation)) this.deploying = false;
       }
     },
   })));
@@ -1775,39 +1814,47 @@ document.addEventListener('alpine:init', () => {
     tab: 'overview',
     loading: true,
 
+    name: '', generation: 0, destroyed: false,
+    routeIdentity() { const r = Alpine.store('router'); return r.page === 'server-detail' ? r.params.name : ''; },
+    current(generation) { return !this.destroyed && generation === this.generation && this.name === this.routeIdentity(); },
     async init() {
-      const name = Alpine.store('router').params.name;
+      this.boundIdentity = this.routeIdentity();
+      const initialLoad = this.bindRoute();
+      this.routeEffect = Alpine.effect(() => {
+        const identity = this.routeIdentity();
+        if (identity !== this.boundIdentity) { this.boundIdentity = identity; this.bindRoute(); }
+      });
+      await initialLoad;
+    },
+    destroy() { this.destroyed = true; this.generation++; if (this.routeEffect) Alpine.release(this.routeEffect); this.status = null; this.proxy = null; },
+    async bindRoute() {
+      if (this.destroyed) return;
+      this.generation++; this.name = this.routeIdentity(); this.status = null; this.proxy = null; this.tab = 'overview';
+      if (this.name) await this.reload();
+    },
+    async reload() {
+      const generation = this.generation, name = this.name;
+      if (!this.current(generation)) return;
       this.loading = true;
       try {
-        this.status = await api.get(`/api/servers/${name}/status`);
-        this.loadError = null;
-        this.loadedAt = new Date().toISOString();
-      } catch (e) {
-        // D07: a failed status read is an error state with a retry — the old
-        // path left the page blank below the back link (toast only).
-        this.loadError = `Could not load server status: ${e.message}`;
-      }
-      this.loading = false;
+        const status = await api.get(`/api/servers/${encodeURIComponent(name)}/status`);
+        if (!this.current(generation)) return;
+        this.status = status; this.loadError = null; this.loadedAt = new Date().toISOString();
+      } catch (e) { if (this.current(generation)) this.loadError = `Could not load server status: ${e.message}`; }
+      finally { if (this.current(generation)) this.loading = false; }
     },
-
-    async reload() {
-      await this.init();
-    },
-
     async switchTab(t) {
+      if (!this.current(this.generation)) return;
       this.tab = t;
-      if (t === 'proxy' && !this.proxy) {
-        await this.loadProxy();
-      }
+      if (t === 'proxy' && !this.proxy) await this.loadProxy();
     },
-
     async loadProxy() {
-      const name = Alpine.store('router').params.name;
+      const generation = this.generation, name = this.name;
+      if (!this.current(generation)) return;
       try {
-        this.proxy = await api.get(`/api/servers/${name}/proxy`);
-      } catch (e) {
-        showToast(e.message, 'error');
-      }
+        const proxy = await api.get(`/api/servers/${encodeURIComponent(name)}/proxy`);
+        if (this.current(generation)) this.proxy = proxy;
+      } catch (e) { if (this.current(generation)) showToast(e.message, 'error'); }
     },
 
     parsePercent(s) {
@@ -1855,6 +1902,8 @@ document.addEventListener('alpine:init', () => {
     me: { username: '', role: 'viewer' },
     users: [],
     newUser: { username: '', password: '', role: 'editor' },
+    capabilityEditor: null,
+    capabilityTokens: ['view.metadata', 'view.logs', 'reveal.secrets', 'execute.deploy', 'execute.mutate', 'restore.data', 'administer.credentials', 'administer.users'],
     // SSO principals (admin-only endpoint; empty when auth is off, since
     // /api/sso only exists with the session gate).
     ssoPrincipals: [],
@@ -1974,6 +2023,23 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         showToast(e.message, 'error');
       }
+    },
+
+    editCapabilities(user) {
+      this.capabilityEditor = { username: user.username, capabilities: [...(user.capabilities || [])], saving: false };
+    },
+
+    async saveCapabilities() {
+      const draft = this.capabilityEditor;
+      if (!draft || draft.saving) return;
+      draft.saving = true;
+      try {
+        await api.put(`/api/users/${encodeURIComponent(draft.username)}`, { capabilities: [...draft.capabilities] });
+        this.users = await api.get('/api/users');
+        this.capabilityEditor = null;
+        showToast('Capabilities saved; active sessions use them immediately', 'success');
+      } catch (e) { showToast(e.message, 'error'); }
+      finally { draft.saving = false; }
     },
 
     async revokeSSO(p) {
@@ -2227,6 +2293,72 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // ── Templates Page ──
+  Alpine.data('sourcesPage', () => withAsyncLoad({
+    sources: [], selected: null, previews: null, previewError: '', error: '', busy: false,
+    generation: 0, listGeneration: 0, webhookSecret: '', destroyed: false,
+    form: {forge: 'github', clone_url: '', default_branch: '', credential_ref: '', display_name: ''},
+    alive(generation) { return !this.destroyed && generation === this.generation; },
+    async init() { await this.load(); },
+    destroy() { this.destroyed = true; this.generation++; this.listGeneration++; this.webhookSecret = ''; this.selected = null; this.previews = null; this.form = {}; },
+    async load() {
+      if (this.destroyed) return false;
+      const generation = ++this.listGeneration;
+      const live = () => !this.destroyed && generation === this.listGeneration;
+      this.loading = true;
+      try {
+        const sources = await api.get('/api/sources');
+        if (!live()) return false;
+        this.sources = sources; this.loadError = null; this.loadedAt = new Date().toISOString();
+        return true;
+      } catch (e) { if (live()) this.loadError = e.message; return false; }
+      finally { if (live()) this.loading = false; }
+    },
+    async select(id) {
+      if (this.destroyed) return null;
+      const generation = ++this.generation;
+      this.selected = null; this.previews = null; this.previewError = ''; this.webhookSecret = ''; this.error = '';
+      try {
+        const selected = await api.get(`/api/sources/${encodeURIComponent(id)}`);
+        if (!this.alive(generation) || selected.id !== id) return null;
+        this.selected = selected;
+        try {
+          const previews = await api.get(`/api/sources/${encodeURIComponent(id)}/previews`);
+          if (!this.alive(generation)) return null;
+          this.previews = previews;
+        } catch (e) { if (!this.alive(generation)) return null; this.previewError = e.message; }
+        return generation;
+      } catch (e) { if (this.alive(generation)) this.error = e.message; return null; }
+    },
+    async create() {
+      if (this.destroyed || this.busy) return;
+      this.busy = true; this.error = ''; const generation = this.generation;
+      try {
+        const created = await api.post('/api/sources', {...this.form});
+        if (!this.alive(generation)) return;
+        if (!await this.load() || !this.alive(generation)) return;
+        const selectedGeneration = await this.select(created.id);
+        if (selectedGeneration === null || !this.alive(selectedGeneration) || this.selected?.id !== created.id) return;
+        this.webhookSecret = created.webhook_secret || '';
+        this.form = {forge: 'github', clone_url: '', default_branch: '', credential_ref: '', display_name: ''};
+      } catch (e) { if (this.alive(generation)) this.error = e.message; }
+      finally { if (!this.destroyed) this.busy = false; }
+    },
+    async action(action) {
+      if (this.destroyed || this.busy || !this.selected) return;
+      this.busy = true; this.error = ''; this.webhookSecret = '';
+      const id = this.selected.id, generation = this.generation;
+      try {
+        const result = await api.post(`/api/sources/${encodeURIComponent(id)}/${action}`, {});
+        if (!this.alive(generation)) return;
+        if (!await this.load() || !this.alive(generation)) return;
+        const selectedGeneration = await this.select(id);
+        if (selectedGeneration === null || !this.alive(selectedGeneration) || this.selected?.id !== id) return;
+        this.webhookSecret = result.webhook_secret || '';
+      } catch (e) { if (this.alive(generation)) this.error = e.message; }
+      finally { if (!this.destroyed) this.busy = false; }
+    },
+  }));
+
   Alpine.data('templatesPage', () => withAsyncLoad({
     templates: [],
     serverList: [],
@@ -2624,7 +2756,7 @@ document.addEventListener('alpine:init', () => {
       try {
         await this.persistList(this.items);
       } catch (e) {
-        this.items = before; // deletion did not commit — undo the optimistic view
+        if (e.status !== 412 && e.status !== 428) this.items = before; // deletion did not commit — undo the optimistic view
       }
     },
 
@@ -2819,7 +2951,7 @@ document.addEventListener('alpine:init', () => {
         await this.persistCandidate(candidate);
         if (this.editingId === id) this.cancel();
       } catch (e) {
-        this.items = before;
+        if (e.status !== 412 && e.status !== 428) this.items = before;
         showToast(e.message, 'error');
       }
     },

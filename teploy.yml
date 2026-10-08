@@ -29,7 +29,7 @@ platform: linux/amd64
 # Build mode: server-side build (no image, no build_local).
 # Compiles natively on the server — no local Docker or cross-build needed.
 
-stop_timeout: 10
+stop_timeout: 180
 
 # Dash's health endpoint is exempt from auth; teploy polls it to gate
 # traffic switch. Default path /health would get 401 and loop until timeout.
@@ -38,8 +38,8 @@ health:
 
 env:
   TEPLOY_DASH_PASSWORD: "${TEPLOY_DASH_PASSWORD}"
-  # Skip SSH host-key verification inside the container (no known_hosts file).
-  TEPLOY_DASH_SSH_INSECURE: "1"
+  # Enroll trusted keys in the ssh-key volume known_hosts before connecting.
+  # Changed keys are refused; insecure mode requires an explicit operator override.
   # SSH key path inside the container. Place the key in the ssh-key volume.
   TEPLOY_SSH_KEY: "/root/.ssh/id_ed25519"
 

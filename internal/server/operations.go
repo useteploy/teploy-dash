@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/operation"
 )
@@ -153,7 +154,9 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		// The retry is re-authorized by the caller, so it is attributed to
 		// them; RetryOf on the new record preserves the lineage.
+		s.sourceActionMu.Lock()
 		op, err := s.operations.Retry(id, actorFromRequest(r))
+		s.sourceActionMu.Unlock()
 		if err != nil {
 			writeOperationError(w, err)
 			return
@@ -165,7 +168,19 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enqueueOperation(w http.ResponseWriter, r *http.Request, request operation.Request) {
+	if request.SourceID != "" {
+		s.sourceActionMu.Lock()
+		defer s.sourceActionMu.Unlock()
+	}
 	noStore(w)
+	required := caps.ExecuteDeploy
+	if request.Kind == operation.KindManifestPlan || request.Kind == operation.KindManifestValidate {
+		required = caps.ExecuteMutate
+	}
+	if actor := actorFromRequest(r); actor != nil && !caps.NewSet(actor.Capabilities...).Allow(required) {
+		writeErrorStatus(w, "missing capability: "+required, http.StatusForbidden)
+		return
+	}
 	if !s.operationsAvailableFor(w, http.MethodPost) {
 		return
 	}
@@ -197,7 +212,7 @@ func (s *Server) operationsAvailable(w http.ResponseWriter) bool {
 // or the attempted verb for the mutation gate.
 func (s *Server) operationsAvailableFor(w http.ResponseWriter, mutation string) bool {
 	if s.operations != nil {
-		if mutation != "" {
+		if mutation != "" && mutation != http.MethodGet && mutation != http.MethodHead {
 			if reason := s.operations.Health().ReadOnly; reason != "" {
 				writeErrorStatus(w, reason, http.StatusServiceUnavailable)
 				return false
@@ -217,7 +232,7 @@ func writeOperationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, operation.ErrNotFound):
 		writeErrorStatus(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, operation.ErrAdmissionBudget), errors.Is(err, operation.ErrGlobalAdmissionBudget):
+	case errors.Is(err, operation.ErrAdmissionBudget), errors.Is(err, operation.ErrGlobalAdmissionBudget), errors.Is(err, operation.ErrPrincipalAdmissionBudget):
 		writeErrorStatus(w, err.Error(), http.StatusTooManyRequests)
 	case errors.Is(err, operation.ErrShuttingDown):
 		// F022: admission closed by shutdown — a clean, retryable refusal
@@ -274,6 +289,9 @@ func (s *Server) handleOperationEvents(w http.ResponseWriter, r *http.Request, i
 	// keeps proxies from dropping a silent connection.
 	controller := http.NewResponseController(w)
 	writeRaw := func(frame []byte) bool {
+		if !s.streamAuthorized(r) {
+			return false
+		}
 		// A deadline is best-effort: test recorders (and exotic handlers)
 		// may not support instrumentation — only a WRITE failure aborts.
 		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))

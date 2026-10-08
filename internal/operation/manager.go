@@ -96,6 +96,9 @@ type Options struct {
 	// MaxLiveOperations bounds TOTAL non-terminal operations across every
 	// target (R17; 0 = package default, negative disables).
 	MaxLiveOperations int
+	// MaxLivePerPrincipal reserves fleet admission capacity across targets.
+	// Zero uses 100; negative disables. Anonymous work keeps the global bound.
+	MaxLivePerPrincipal int
 	// MaxConcurrentExecutions bounds how many operations may execute their
 	// CLI subprocess at the same time across all targets (R17; 0 = package
 	// default, negative disables).
@@ -159,9 +162,10 @@ type Manager struct {
 	// maxLive bounds total non-terminal operations (R17); executorSlots
 	// bounds simultaneous executions (R17). A nil/nil pair disables the
 	// respective bound.
-	maxLive       int
-	executorSlots chan struct{}
-	admissionSeq  uint64
+	maxLive             int
+	maxLivePerPrincipal int
+	executorSlots       chan struct{}
+	admissionSeq        uint64
 	// idempotencyWindow bounds how long a key is honored (D02); <= 0 rules:
 	// 0 was defaulted in New, negative disables expiry.
 	idempotencyWindow time.Duration
@@ -268,6 +272,9 @@ func New(dataDir string, options Options) (*Manager, error) {
 	if options.MaxLiveOperations == 0 {
 		options.MaxLiveOperations = defaultMaxLiveOperations
 	}
+	if options.MaxLivePerPrincipal == 0 {
+		options.MaxLivePerPrincipal = 100
+	}
 	if options.MaxConcurrentExecutions == 0 {
 		options.MaxConcurrentExecutions = defaultMaxConcurrentExecutes
 	}
@@ -284,35 +291,41 @@ func New(dataDir string, options Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Retention runs before the load so expired history is never parsed
-	// into memory (useteploy__teploy-dash-04: bounded startup).
-	if removed := store.sweepRetention(time.Now().UTC(), options.MaxHistoryAge, options.MaxOperations); len(removed) > 0 {
-		log.Printf("[operation] retention removed %d terminal operation(s)", len(removed))
-	}
+	// Inspect schema versions before any retention or journal repair.
 	operations, future, err := store.loadOperations()
 	if err != nil {
 		return nil, err
 	}
+	if len(future) == 0 {
+		store.sweepRetention(time.Now().UTC(), options.MaxHistoryAge, options.MaxOperations)
+		operations, _, err = store.loadOperations()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		store.readOnly = true
+	}
 	m := &Manager{
-		store:              store,
-		operations:         operations,
-		events:             make(map[string][]Event),
-		idempotency:        make(map[idemKey]string),
-		cancels:            make(map[string]context.CancelFunc),
-		targets:            make(map[string]*targetRunner),
-		subscribers:        make(map[string]map[chan struct{}]struct{}),
-		droppedEvents:      make(map[string]int),
-		resolver:           options.Resolver,
-		resolverByID:       options.ResolverByID,
-		projectResolver:    options.ProjectResolver,
-		executor:           options.Executor,
-		receiptReader:      options.ReceiptReader,
-		maxEvents:          options.MaxEvents,
-		maxHistoryAge:      options.MaxHistoryAge,
-		maxOperations:      options.MaxOperations,
-		maxQueuedPerTarget: options.MaxQueuedPerTarget,
-		maxLive:            options.MaxLiveOperations,
-		idempotencyWindow:  options.IdempotencyWindow,
+		store:               store,
+		operations:          operations,
+		events:              make(map[string][]Event),
+		idempotency:         make(map[idemKey]string),
+		cancels:             make(map[string]context.CancelFunc),
+		targets:             make(map[string]*targetRunner),
+		subscribers:         make(map[string]map[chan struct{}]struct{}),
+		droppedEvents:       make(map[string]int),
+		resolver:            options.Resolver,
+		resolverByID:        options.ResolverByID,
+		projectResolver:     options.ProjectResolver,
+		executor:            options.Executor,
+		receiptReader:       options.ReceiptReader,
+		maxEvents:           options.MaxEvents,
+		maxHistoryAge:       options.MaxHistoryAge,
+		maxOperations:       options.MaxOperations,
+		maxQueuedPerTarget:  options.MaxQueuedPerTarget,
+		maxLive:             options.MaxLiveOperations,
+		maxLivePerPrincipal: options.MaxLivePerPrincipal,
+		idempotencyWindow:   options.IdempotencyWindow,
 	}
 	if len(future) > 0 {
 		// X02 §5 row 6 refuse-downgrade: records written by a newer
@@ -366,7 +379,10 @@ func New(dataDir string, options Options) (*Manager, error) {
 			m.idempotency[idemKey{op.IdempotencyPrincipal, op.IdempotencyKey}] = id
 		}
 	}
-	pending, err := m.recover()
+	var pending []string
+	if m.readOnly == "" {
+		pending, err = m.recover()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -508,6 +524,18 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 			return nil, false, ErrGlobalAdmissionBudget
 		}
 	}
+	if scope != "" && m.maxLivePerPrincipal > 0 {
+		live := 0
+		for _, o := range m.operations {
+			if !o.Status.Terminal() && IdempotencyScope(o.Actor) == scope {
+				live++
+			}
+		}
+		if live >= m.maxLivePerPrincipal {
+			m.mu.Unlock()
+			return nil, false, ErrPrincipalAdmissionBudget
+		}
+	}
 	id, err := newID()
 	if err != nil {
 		m.mu.Unlock()
@@ -612,6 +640,7 @@ func (m *Manager) lookupReplayLocked(namespaced idemKey, hash string, now time.T
 // ErrGlobalAdmissionBudget reports that the manager-wide live-operation
 // bound is exhausted (R17) — distinct from the per-target budget, but the
 // same back-off contract for callers.
+var ErrPrincipalAdmissionBudget = errors.New("principal operation admission budget exceeded")
 var ErrGlobalAdmissionBudget = errors.New("admission budget exceeded — too many operations already queued; retry after some complete")
 
 func (m *Manager) admitToTarget(target string, j job) {
@@ -1512,6 +1541,9 @@ func (m *Manager) readReceipt(parent context.Context, reader ReceiptReader, op *
 // reads every record file, so it must not run per completion. Age retention
 // always applies at startup.
 func (m *Manager) retire() {
+	if m.readOnly != "" {
+		return
+	}
 	if !m.retireMu.TryLock() {
 		return
 	}

@@ -370,3 +370,33 @@ func splitLines(s string) []string {
 	}
 	return out
 }
+
+func TestOutboxTornTailAppendRepeatedReopen(t *testing.T) {
+	dir := t.TempDir()
+	opts := testOptions(dir, &funcSender{})
+	ob, err := New(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob.Send(testEvent("first", "down", time.Now()))
+	f, err := os.OpenFile(ob.journalPath(), os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"id":"torn`)
+	f.Close()
+	ob, err = New(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob.Send(testEvent("second", "down", time.Now()))
+	for i := 0; i < 2; i++ {
+		ob, err = New(dir, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ob.LatestForMonitor("first") == nil || ob.LatestForMonitor("second") == nil {
+			t.Fatal("committed alerts lost")
+		}
+	}
+}

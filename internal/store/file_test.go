@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +293,8 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 
 	// A run against the CURRENT configuration applies its result.
 	run := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", LastOK: true, LastDetail: "ok", LastMetric: "checksum", LastRunAt: time.Now()}
+	current, _ := s.GetRestoreTest("t1")
+	run.Incarnation = current.Incarnation
 	applied, err := s.SaveRestoreTestResult("t1", run)
 	if err != nil {
 		t.Fatal(err)
@@ -389,6 +392,8 @@ func TestFileStore_SaveRestoreTest_PreservesStoredResultInTransaction(t *testing
 	}
 	fresh := RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", Bucket: "b", Region: "r",
 		LastOK: false, LastDetail: "just failed", LastRunAt: time.Now()}
+	current, _ := s.GetRestoreTest("rt")
+	fresh.Incarnation = current.Incarnation
 	if applied, err := s.SaveRestoreTestResult("rt", fresh); err != nil || !applied {
 		t.Fatalf("SaveRestoreTestResult applied=%v err=%v", applied, err)
 	}
@@ -416,5 +421,51 @@ func TestFileStore_SaveRestoreTest_PreservesStoredResultInTransaction(t *testing
 	}
 	if got.LastOK || got.LastDetail != "" || !got.LastRunAt.IsZero() {
 		t.Fatalf("retarget must clear the previous target's verdict, got %+v", got)
+	}
+}
+
+func TestRestoreIncarnationRejectsABAAndRecreation(t *testing.T) {
+	for _, recreation := range []bool{false, true} {
+		t.Run(fmt.Sprint(recreation), func(t *testing.T) {
+			dir := t.TempDir()
+			s := NewFileStore(dir)
+			config := RestoreTest{ID: "rt", Server: "prod", App: "web", Accessory: "db", Bucket: "b", Region: "r"}
+			if err := s.SaveRestoreTest(config); err != nil {
+				t.Fatal(err)
+			}
+			original, err := s.GetRestoreTest("rt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			original.LastOK = true
+			original.LastRunAt = time.Now()
+			if recreation {
+				s.DeleteRestoreTest("rt")
+				s = NewFileStore(dir)
+			} else {
+				other := config
+				other.Bucket = "other"
+				if err := s.SaveRestoreTest(other); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.SaveRestoreTest(config); err != nil {
+				t.Fatal(err)
+			}
+			current, _ := s.GetRestoreTest("rt")
+			if current.Incarnation == "" || current.Incarnation == original.Incarnation {
+				t.Fatal("incarnation reused")
+			}
+			if applied, err := s.SaveRestoreTestResult("rt", *original); err != nil || applied {
+				t.Fatalf("stale run applied=%v err=%v", applied, err)
+			}
+			if err := s.SaveRestoreTest(config); err != nil {
+				t.Fatal(err)
+			}
+			same, _ := s.GetRestoreTest("rt")
+			if same.Incarnation != current.Incarnation {
+				t.Fatal("config-only edit retired active run")
+			}
+		})
 	}
 }

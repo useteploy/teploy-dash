@@ -341,44 +341,73 @@ const (
 	maxRegisteredRevisions = 128
 )
 
-// EnvKeys returns the environment variable names declared by a manifest's
-// root `env:` mapping (the CLI's teploy.yml schema: a flat string map at
-// the app level), sorted. Anything else — no env key, a non-mapping env
-// value, or unparseable YAML — answers nil: "nothing we can stand behind"
-// rather than a guessed set (D07 authority indicators consume this; an
-// empty answer renders every live key as local rather than mislabeling
-// source-owned settings as dash-side).
-func EnvKeys(content []byte) []string {
+// AuthorityEnvKeys follows the CLI's two flat string maps, including YAML
+// aliases and merge precedence. Invalid authority is an error, never local.
+func AuthorityEnvKeys(content []byte) ([]string, error) {
+	if len(content) > maxManifestBytes {
+		return nil, fmt.Errorf("manifest authority exceeds bounds")
+	}
 	var document yaml.Node
-	if err := yaml.NewDecoder(strings.NewReader(string(content))).Decode(&document); err != nil {
-		return nil
+	decoder := yaml.NewDecoder(strings.NewReader(string(content)))
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("manifest authority invalid")
 	}
-	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil
+	var extra yaml.Node
+	if decoder.Decode(&extra) != io.EOF || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("manifest authority invalid")
 	}
-	root := document.Content[0]
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value != "env" {
-			continue
+	count := 0
+	if err := inspectAuthorityNode(document.Content[0], map[*yaml.Node]bool{}, &count, 0); err != nil {
+		return nil, err
+	}
+	var value struct {
+		Env     map[string]string `yaml:"env"`
+		Literal map[string]string `yaml:"env_literal"`
+	}
+	if err := document.Decode(&value); err != nil {
+		return nil, fmt.Errorf("manifest environment authority invalid")
+	}
+	keys := map[string]bool{}
+	for key := range value.Env {
+		keys[key] = true
+	}
+	for key := range value.Literal {
+		keys[key] = true
+	}
+	var out []string
+	if value.Env != nil || value.Literal != nil {
+		out = []string{}
+	}
+	for key := range keys {
+		if key == "" {
+			return nil, fmt.Errorf("manifest environment key invalid")
 		}
-		envNode := root.Content[i+1]
-		if envNode.Kind == yaml.AliasNode {
-			envNode = envNode.Alias
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func inspectAuthorityNode(node *yaml.Node, active map[*yaml.Node]bool, count *int, depth int) error {
+	if node == nil || active[node] || depth > maxManifestDepth || *count >= maxManifestNodes {
+		return fmt.Errorf("manifest authority exceeds bounds")
+	}
+	*count++
+	active[node] = true
+	defer delete(active, node)
+	if node.Kind == yaml.AliasNode {
+		return inspectAuthorityNode(node.Alias, active, count, depth+1)
+	}
+	for _, child := range node.Content {
+		if err := inspectAuthorityNode(child, active, count, depth+1); err != nil {
+			return err
 		}
-		if envNode == nil || envNode.Kind != yaml.MappingNode {
-			return nil
-		}
-		keys := make([]string, 0, len(envNode.Content)/2)
-		for j := 0; j+1 < len(envNode.Content); j += 2 {
-			if envNode.Content[j].Kind == yaml.ScalarNode && envNode.Content[j].Value != "" {
-				keys = append(keys, envNode.Content[j].Value)
-			}
-		}
-		sort.Strings(keys)
-		return keys
 	}
 	return nil
 }
+
+// EnvKeys is the historical display helper; guards use the error-bearing API.
+func EnvKeys(content []byte) []string { keys, _ := AuthorityEnvKeys(content); return keys }
 
 func Validate(content []byte, app string) error {
 	if len(content) == 0 {

@@ -166,7 +166,7 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"GET", "/api/onboarding/entry", []string{caps.ViewMetadata}},
 		{"GET", "/api/operations", []string{caps.ViewMetadata}},
 		{"GET", "/api/operations/op1", []string{caps.ViewMetadata}},
-		{"GET", "/api/operations/op1/events", []string{caps.ViewMetadata}},
+		{"GET", "/api/operations/op1/events", []string{caps.ViewLogs}},
 		{"GET", "/api/monitors", []string{caps.ViewMetadata}},
 		{"GET", "/api/restore-tests", []string{caps.ViewMetadata}},
 		{"GET", "/api/groups", []string{caps.ViewMetadata}},

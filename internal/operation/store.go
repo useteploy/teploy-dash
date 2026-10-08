@@ -26,6 +26,7 @@ const (
 )
 
 type fileStore struct {
+	readOnly   bool
 	recordsDir string
 	eventsDir  string
 	maxEvents  int
@@ -262,7 +263,9 @@ func (s *fileStore) compactLocked(id string, incoming []byte) error {
 	budget := s.maxJournalBytes*3/4 - int64(len(incoming))
 	keep := retainedSuffix(events, s.maxEvents, budget)
 	var buf bytes.Buffer
-	buf.Grow(int(min64(int64(budget), s.maxJournalBytes)))
+	if budget > 0 {
+		buf.Grow(int(min64(budget, s.maxJournalBytes)))
+	}
 	for _, event := range keep {
 		line, err := json.Marshal(event)
 		if err != nil {
@@ -446,7 +449,7 @@ func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 			return nil, nil, fmt.Errorf("reading journal %s at byte %d: %w", path, offset, err)
 		}
 	}
-	if damage == "" && offset == size+1 {
+	if !s.readOnly && damage == "" && offset == size+1 {
 		// The final record parsed cleanly but had no terminating newline
 		// (F017). Append one so the next event append cannot concatenate a
 		// second JSON object onto this record — which would corrupt the
@@ -457,9 +460,11 @@ func (s *fileStore) scanLocked(id string) ([]Event, []Event, error) {
 		log.Printf("[operation] journal %s: appended missing final newline", id)
 	}
 	if damage != "" {
-		s.closeJournalLocked(id)
-		if truncErr := os.Truncate(path, offset); truncErr != nil {
-			log.Printf("[operation] journal %s: %v; truncate failed: %v", id, damage, truncErr)
+		if !s.readOnly {
+			s.closeJournalLocked(id)
+			if truncErr := os.Truncate(path, offset); truncErr != nil {
+				log.Printf("[operation] journal %s: %v; truncate failed: %v", id, damage, truncErr)
+			}
 		}
 		gaps = append(gaps, Event{
 			Sequence: lastSeq + 1, OperationID: id, Type: EventGap,

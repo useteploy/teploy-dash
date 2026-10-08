@@ -12,15 +12,18 @@ var operationIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 type Kind string
 
 const (
-	KindDeploy           Kind = "deploy"
-	KindRollback         Kind = "rollback"
-	KindRemove           Kind = "remove"
-	KindTemplateInstall  Kind = "template_install"
-	KindAppLifecycle     Kind = "app_lifecycle"
-	KindMaintenance      Kind = "maintenance"
-	KindManifestApply    Kind = "manifest_apply"
-	KindManifestPlan     Kind = "manifest_plan"
-	KindManifestValidate Kind = "manifest_validate"
+	KindDeploy               Kind = "deploy"
+	KindRollback             Kind = "rollback"
+	KindRemove               Kind = "remove"
+	KindTemplateInstall      Kind = "template_install"
+	KindAppLifecycle         Kind = "app_lifecycle"
+	KindMaintenance          Kind = "maintenance"
+	KindSourcePreview        Kind = "source_preview"
+	KindSourcePreviewExpire  Kind = "source_preview_expire"
+	KindSourcePreviewDestroy Kind = "source_preview_destroy"
+	KindManifestApply        Kind = "manifest_apply"
+	KindManifestPlan         Kind = "manifest_plan"
+	KindManifestValidate     Kind = "manifest_validate"
 )
 
 type Status string
@@ -108,8 +111,11 @@ type Request struct {
 	// delivery pin — never a mutable branch tip). They participate in the
 	// request hash, so the same delivery replays while a new commit is new
 	// work. Absent on every human/CI-submitted operation.
-	SourceID     string `json:"source_id,omitempty"`
-	SourceCommit string `json:"source_commit,omitempty"`
+	SourceID            string `json:"source_id,omitempty"`
+	SourceCommit        string `json:"source_commit,omitempty"`
+	SourceManifestPath  string `json:"source_manifest_path,omitempty"`
+	SourcePullUpdatedAt string `json:"source_pull_updated_at,omitempty"`
+	SourcePullRequest   int    `json:"source_pull_request,omitempty"`
 }
 
 type Operation struct {
@@ -216,9 +222,10 @@ const (
 )
 
 type Command struct {
-	Args    []string
-	Timeout time.Duration
-	Secrets []string
+	SourceRequest *Request // Runtime-only provenance; never carries credentials.
+	Args          []string
+	Timeout       time.Duration
+	Secrets       []string
 	// Stdin, when set, is fed to the CLI process on its standard input —
 	// how secret values travel instead of the argv (A11).
 	Stdin string

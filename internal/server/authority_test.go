@@ -6,6 +6,7 @@ package server
 // source-owned env keys (never a silent competing source of truth).
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -158,5 +159,43 @@ func TestConfigAuthority_RouteClassifiedAsMetadata(t *testing.T) {
 	required := requiredCapabilities(http.MethodGet, "/api/apps/prod/web/config-authority")
 	if len(required) != 1 || required[0] != "view.metadata" {
 		t.Fatalf("config-authority requires %v, want [view.metadata]", required)
+	}
+}
+
+func TestAuthorityLiteralEnvHTTPAndMCPGuards(t *testing.T) {
+	for _, fields := range []string{"env_literal: {RAILS_ENV: production}\n", "base: &base {RAILS_ENV: production}\nenv_literal: {<<: *base}\n", "env: {RAILS_ENV: production}\nenv_literal: {RAILS_ENV: literal}\n"} {
+		t.Run(fields, func(t *testing.T) {
+			s, cookie := newAuthorityServer(t)
+			s.cliInstalled = func() bool { return true }
+			content := "app: web\nimage: example/web:1\n" + fields
+			body, _ := json.Marshal(map[string]any{"mode": "git-managed", "git": map[string]string{"repository": "https://github.com/team/app", "revision": "0123456789abcdef0123456789abcdef01234567"}, "manifest": content})
+			putManifest(t, s, cookie, "prod", "web", string(body))
+			authority := getAuthority(t, s, cookie, "prod", "web")
+			if strings.Join(authority.DeclaredEnvKeys, ",") != "RAILS_ENV" {
+				t.Fatal(authority.DeclaredEnvKeys)
+			}
+			for _, method := range []string{http.MethodPost, http.MethodDelete} {
+				path := "/api/apps/prod/web/env"
+				payload := `{"key":"RAILS_ENV","value":"changed"}`
+				if method == http.MethodDelete {
+					path += "/RAILS_ENV"
+					payload = ""
+				}
+				w := authorityDo(t, s, cookie, method, path, payload)
+				if w.Code != 409 {
+					t.Fatalf("HTTP %s literal owned key %d %s", method, w.Code, w.Body.String())
+				}
+			}
+			backend := mcpBackend{s: s}
+			if _, err := backend.SetEnv(context.Background(), "prod", "web", "RAILS_ENV", "changed"); err == nil || !strings.Contains(err.Error(), "git-managed") {
+				t.Fatal("MCP set bypassed literal authority")
+			}
+			if _, err := backend.UnsetEnv(context.Background(), "prod", "web", "RAILS_ENV"); err == nil || !strings.Contains(err.Error(), "git-managed") {
+				t.Fatal("MCP unset bypassed literal authority")
+			}
+			if owned, _ := s.envKeySourceOwned("prod", "web", "UNDECLARED_INPUT"); owned {
+				t.Fatal("undeclared secret input refused")
+			}
+		})
 	}
 }
