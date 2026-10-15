@@ -32,3 +32,14 @@ In Tyler's own checkout, Neutron and Nucleus findings go in
 queue (both private, not part of this repository). Working from a clone without
 them, open the report in the owning repository and say in the commit message
 that you did.
+
+## Two remotes — push both
+
+- `github` (github.com/useteploy/<repo>) — authoritative: PRs, CI, releases,
+  the public history tags point at.
+- `origin` (Forgejo on infra-home, `:49152`) — the private forge: issues and
+  webhooks live here.
+- When `main` moves, push BOTH (`git push github main && git push origin
+  main`); push release tags to both too. A GitHub-only push silently leaves
+  the forge stale — an entire store migration + release once landed
+  GitHub-only and the forge sat 21 commits behind until noticed.
