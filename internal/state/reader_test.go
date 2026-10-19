@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -159,5 +160,37 @@ func TestReader_GetApp(t *testing.T) {
 	}
 	if app.CurrentHash != "v4" {
 		t.Errorf("CurrentHash = %q, want v4", app.CurrentHash)
+	}
+}
+
+func TestReaderPrefersStateJSONAndSkipsTombstones(t *testing.T) {
+	dir := t.TempDir()
+	write := func(app, name, body string) {
+		if err := os.MkdirAll(filepath.Join(dir, app), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, app, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("modern", "state.json", `{"schema_version":2,"current_hash":"v9","previous_hash":"v8","current_port":49160,"domain":"m.example.com","updated_at":"2026-10-01T10:00:00Z"}`)
+	write("modern", "state", "current_hash=stale\n")
+	write("legacy", "state", "current_hash=v1\ndomain=l.example.com\n")
+	write("gone", "state.json", `{"schema_version":3,"tombstone":true,"generation":4}`)
+	write("future", "state.json", `{"schema_version":4,"current_hash":"x"}`)
+
+	apps, err := NewReader(dir).ListApps()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 2 || apps[0].App != "legacy" || apps[1].App != "modern" {
+		t.Fatalf("apps = %+v, want legacy + modern only", apps)
+	}
+	m := apps[1]
+	if m.CurrentHash != "v9" || m.PreviousHash != "v8" || m.Port != 49160 || m.Domain != "m.example.com" || m.DeployedAt != "2026-10-01T10:00:00Z" {
+		t.Fatalf("state.json not preferred/decoded: %+v", m)
+	}
+	if _, err := NewReader(dir).GetApp("gone"); !errors.Is(err, ErrTombstone) {
+		t.Fatalf("tombstone GetApp err = %v", err)
 	}
 }
