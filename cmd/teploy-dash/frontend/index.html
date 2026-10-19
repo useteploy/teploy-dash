@@ -1683,41 +1683,47 @@
   <!-- ═══ Templates Page ═══ -->
   <template x-if="$store.router.page === 'sources'">
     <div x-data="sourcesPage">
-      <h1>Sources</h1>
-      <p>Connect a repository to its Git-managed app. Provider names select credentials configured by the operator.</p>
-      <p role="alert" x-show="loadError" x-text="loadError"></p>
-      <button @click="load()" :disabled="loading">Refresh</button>
-      <p role="alert" x-show="error" x-text="error"></p>
-      <p x-show="!loading && !loadError && sources.length === 0">No sources configured.</p>
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Sources</h1>
+          <p class="subtitle">Connect a repository to its Git-managed app. Provider names select credentials configured by the operator.</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn" @click="load()" :disabled="loading">Refresh</button>
+        </div>
+      </div>
+      <p role="alert" class="stale-banner" x-show="loadError" x-text="loadError"></p>
+      <p role="alert" class="stale-banner" x-show="error" x-text="error"></p>
+      <p class="text-muted" x-show="!loading && !loadError && sources.length === 0">No sources configured.</p>
       <template x-for="src in sources" :key="src.id">
-        <div class="card">
-          <button @click="select(src.id)" :disabled="busy" x-text="src.display_name || src.clone_url"></button>
+        <div class="card source-card">
+          <button class="btn" @click="select(src.id)" :disabled="busy" x-text="src.display_name || src.clone_url"></button>
           <span x-text="src.credential_verdict"></span><span x-text="src.degrade_reason || ''"></span>
         </div>
       </template>
-      <form @submit.prevent="create()" class="card">
-        <h2>Add repository</h2>
-        <label>Forge <select x-model="form.forge"><option>github</option><option>gitlab</option><option>forgejo</option><option>gitea</option><option>generic</option></select></label>
-        <label>Clone URL <input type="url" required x-model="form.clone_url"></label>
-        <label>Watched branch <input x-model="form.default_branch"></label>
-        <label>Provider name <input required x-model="form.credential_ref" autocomplete="off"></label>
-        <label>Display name <input x-model="form.display_name"></label>
-        <button type="submit" :disabled="busy">Add source</button>
+      <form @submit.prevent="create()" class="card source-form">
+        <h2 class="section-title">Add repository</h2>
+        <label class="field">Forge <select x-model="form.forge"><option>github</option><option>gitlab</option><option>forgejo</option><option>gitea</option><option>generic</option></select></label>
+        <label class="field">Clone URL <input type="url" required x-model="form.clone_url"></label>
+        <label class="field">Watched branch <input x-model="form.default_branch"></label>
+        <label class="field">Provider name <input required x-model="form.credential_ref" autocomplete="off"></label>
+        <label class="field">Display name <input x-model="form.display_name"></label>
+        <button type="submit" class="btn btn-primary" :disabled="busy">Add source</button>
       </form>
       <template x-if="selected">
-        <section class="card">
+        <section class="card source-detail">
           <h2 x-text="selected.display_name || selected.clone_url"></h2>
           <p>Webhook URL: <code x-text="selected.webhook_url"></code></p>
-          <button @click="action('verify')" :disabled="busy">Verify credentials</button>
-          <button @click="action('rotate-secret')" :disabled="busy">Rotate webhook secret</button>
-          <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button @click="webhookSecret = ''">Hide</button></div>
+          <button class="btn btn-sm" @click="action('verify')" :disabled="busy">Verify credentials</button>
+          <button class="btn btn-sm" @click="action('rotate-secret')" :disabled="busy">Rotate webhook secret</button>
+          <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button class="btn btn-sm" @click="webhookSecret = ''">Hide</button></div>
           <h3>Recent deliveries</h3>
           <template x-for="delivery in selected.deliveries || []" :key="delivery.id + delivery.received_at"><p><code x-text="delivery.commit"></code> <span x-text="delivery.disposition"></span> <span x-text="delivery.reason"></span></p></template>
           <h3>Pull request previews</h3>
           <p role="status" x-show="previewError" x-text="previewError"></p>
           <template x-if="previews"><div>
             <template x-for="row in previews.live" :key="row.server + row.app + row.preview.branch"><p><span x-text="row.preview.branch"></span> <span x-text="row.preview.url"></span> · expires <span x-text="row.preview.expires_at"></span></p></template>
-            <template x-for="op in previews.operations" :key="op.id"><p><a :href="previews.review_base + op.request.source_pull_request" target="_blank" rel="noopener noreferrer" x-text="'PR #' + op.request.source_pull_request"></a> <code x-text="op.request.source_commit"></code> <button @click="$store.router.navigate('operation-detail', {id: op.id})" x-text="op.status"></button><span x-text="op.error || ''"></span></p></template>
+            <template x-for="op in previews.operations" :key="op.id"><p><a :href="previews.review_base + op.request.source_pull_request" target="_blank" rel="noopener noreferrer" x-text="'PR #' + op.request.source_pull_request"></a> <code x-text="op.request.source_commit"></code> <button class="btn btn-sm" @click="$store.router.navigate('operation-detail', {id: op.id})" x-text="op.status"></button><span x-text="op.error || ''"></span></p></template>
           </div></template>
         </section>
       </template>
@@ -1948,14 +1954,9 @@
             <div class="cli-banner" style="margin: 0 0 16px; border-radius: var(--radius); text-align: left;" x-text="op.error"></div>
           </template>
 
-          <div class="log-viewer" x-ref="opLog" style="max-height: 60vh;">
-            <template x-for="(line, i) in lines" :key="i">
-              <span :class="line.cls" x-text="line.text"></span>
-            </template>
-            <template x-if="lines.length === 0">
-              <span style="color: var(--text-muted);">Waiting for output…</span>
-            </template>
-          </div>
+          <!-- No whitespace between children: .log-viewer is pre-wrap, so
+               template indentation would render as leading blank space. -->
+          <div class="log-viewer" x-ref="opLog" style="max-height: 60vh;"><template x-for="(line, i) in lines" :key="i"><span :class="line.cls" x-text="line.text"></span></template><template x-if="lines.length === 0"><span style="color: var(--text-muted);">Waiting for output…</span></template></div>
         </div>
       </template>
     </div>
