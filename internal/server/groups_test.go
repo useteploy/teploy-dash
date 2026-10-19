@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/useteploy/teploy-dash/internal/cli"
 )
@@ -348,5 +349,38 @@ func TestGroupBindingSurvivesNameSwap(t *testing.T) {
 	// And the unambiguous single match removes cleanly by name.
 	if rec := groupDelete(t, s, "/api/groups/g/apps/api"); rec.Code != http.StatusOK {
 		t.Fatalf("single-match removal: %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// A second process (modelled by a separate open of the lock file, which
+// flock treats as a distinct owner) holding groups.json.lock blocks this
+// process's transaction until it releases, so neither loses an update.
+func TestUpdateGroupsWaitsForCrossProcessLock(t *testing.T) {
+	withTempGroupsFile(t)
+	unlock, err := lockGroupsFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := updateGroups(func(d *groupData) error {
+			d.Groups = append(d.Groups, groupEntry{Name: "after"})
+			return nil
+		})
+		done <- err
+	}()
+	select {
+	case <-done:
+		t.Fatal("updateGroups ran while another holder had the lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("updateGroups never acquired the released lock")
 	}
 }

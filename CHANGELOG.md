@@ -59,6 +59,24 @@ All notable changes to teploy-dash are recorded here.
   neither, which is the combination that let a container be named after a
   commit its image did not contain.
 
+- Bundled teploy CLI v0.1.42 (secret-free release metadata, locked
+  `remove`, `setup` installs git and python3).
+- Contracts CI pin moves from corpus rev 7 to rev 9.
+
+### Fixed
+- **SSH fallback reads `state.json`.** When the CLI on PATH predates
+  `app list --json`, the fleet falls back to reading state over SSH. That
+  path read only the legacy `state` file, so every app deployed by a current
+  CLI (which writes `state.json`) was missing. It now prefers `state.json`,
+  falls back to `state`, refuses state schemas newer than it understands, and
+  skips tombstoned apps. The local (no servers configured) reader does the
+  same.
+- **Fleet decode honours the machine-interface gate.** `app list --json`
+  envelopes from a newer CLI machine interface are refused instead of
+  mapped, like every other CLI decode.
+- **`groups.json` is locked across processes.** A second dash (or a local
+  dev instance) sharing the same home can no longer lose a group edit.
+
 ## [0.1.16] - 2026-08-26
 
 ### Fixed

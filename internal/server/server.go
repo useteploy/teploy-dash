@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -2735,7 +2736,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 // ── Groups ────────────────────────────────────────────────────────────────
 // Persistent group/project organization stored in ~/.teploy/groups.json.
-// Same file format as the CLI's embedded UI for interoperability.
+// Dash is the only writer (the CLI no longer reads or writes this file);
+// several dash processes on one host share it under groups.json.lock.
 
 type groupData struct {
 	Groups []groupEntry `json:"groups"`
@@ -2817,11 +2819,11 @@ func saveGroupsFile(data groupData) error {
 }
 
 // groupsMu serializes whole read-modify-write transactions on groups.json
-// (R11). Atomic replacement prevents torn FILES, not lost UPDATES: two
-// concurrent handlers previously both read the same version and the later
-// writer erased the first writer's change. The CLI can also write this file
-// (a shared contract) — cross-process locking remains deferred with the
-// A35 store/schema work; within the dashboard the transaction is now atomic.
+// (R11) inside this process; the flock on groups.json.lock serializes them
+// across processes (a second dash, a local dev instance against the same
+// HOME). Atomic replacement prevents torn FILES, not lost UPDATES: two
+// concurrent writers previously both read the same version and the later
+// one erased the first one's change.
 var groupsMu sync.Mutex
 
 // updateGroups runs one read-modify-write transaction against groups.json.
@@ -2830,6 +2832,11 @@ var groupsMu sync.Mutex
 func updateGroups(change func(*groupData) error) (groupData, error) {
 	groupsMu.Lock()
 	defer groupsMu.Unlock()
+	unlock, err := lockGroupsFile()
+	if err != nil {
+		return groupData{}, err
+	}
+	defer unlock()
 	data, err := loadGroupsFile()
 	if err != nil {
 		return groupData{}, err
@@ -2841,6 +2848,28 @@ func updateGroups(change func(*groupData) error) (groupData, error) {
 		return data, err
 	}
 	return data, nil
+}
+
+// lockGroupsFile takes an exclusive flock on groups.json.lock beside the
+// store. The lock file is never removed, so every process locks the same
+// inode.
+func lockGroupsFile() (func(), error) {
+	path := groupsFilePath() + ".lock"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("opening groups lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("locking groups.json: %w", err)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // errGroupExists reports a create/rename colliding with an existing name.

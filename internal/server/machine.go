@@ -206,6 +206,11 @@ func (s *Server) readMachineApps(ctx context.Context, srv remote.ServerConn) ([]
 // unchanged) so the contracts corpus tests drive real CLI payloads through
 // the same decode path (X01 5.2 job 3).
 func decodeAppListEnvelope(raw, server string, list *machineAppList) error {
+	// The machine-interface gate every other CLI decode passes through:
+	// an envelope from a newer interface is refused, not mapped.
+	if _, err := cli.ParseJSON(raw); err != nil {
+		return fmt.Errorf("decoding teploy app list for %s: %w", server, err)
+	}
 	if err := json.Unmarshal([]byte(raw), list); err != nil {
 		return fmt.Errorf("decoding teploy app list for %s: %w", server, err)
 	}

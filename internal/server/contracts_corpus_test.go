@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/useteploy/teploy-dash/internal/cli"
@@ -205,4 +206,15 @@ func TestContractsCorpusPreviewStateAmbiguousRefusesAdoption(t *testing.T) {
 	}
 	// The ambiguity is real: two branches, one slug -- exactly why adoption
 	// must refuse and require explicit binding.
+}
+
+// The fleet decode refuses an app-list envelope from a newer machine
+// interface instead of mapping it (the gate every other CLI decode has).
+func TestDecodeAppListEnvelopeRefusesNewerMachineInterface(t *testing.T) {
+	raw := `{"machine_interface":99,"host":"h","apps":[],"observed_at":"2026-10-19T00:00:00Z","errors":[]}`
+	var list machineAppList
+	err := decodeAppListEnvelope(raw, "srv", &list)
+	if err == nil || !strings.Contains(err.Error(), "newer than this dash supports") {
+		t.Fatalf("want a machine-interface refusal, got %v", err)
+	}
 }

@@ -125,18 +125,18 @@ func ListApps(ctx context.Context, srv ServerConn) ([]AppState, error) {
 	return apps, nil
 }
 
-// readAppState reads the KEY=VALUE state file and docker status for one app.
+// readAppState reads the app's state (state.json, else the legacy KEY=VALUE
+// state file) and docker status for one app. Tombstoned apps are skipped.
 func readAppState(ctx context.Context, c *uissh.Client, serverName, appName string) (*AppState, error) {
-	statePath := fmt.Sprintf("%s/%s/state", deploymentsDir, appName)
-	raw, err := c.Run(ctx, fmt.Sprintf("cat %s 2>/dev/null", shellQuote(statePath)))
-	if err != nil || strings.TrimSpace(raw) == "" {
+	dir := fmt.Sprintf("%s/%s", deploymentsDir, appName)
+	raw, err := c.Run(ctx, fmt.Sprintf(
+		"if [ -f %[1]s ]; then echo json; stat -c %%Y %[1]s; cat %[1]s; elif [ -f %[2]s ]; then echo kv; stat -c %%Y %[2]s; cat %[2]s; fi 2>/dev/null",
+		shellQuote(dir+"/state.json"), shellQuote(dir+"/state")))
+	if err != nil {
 		return nil, nil
 	}
-
-	// Parse with the single canonical CLI-state parser (internal/state) so the
-	// SSH fleet path and the local-disk path can't drift on key names.
-	parsed, err := state.Parse(strings.NewReader(raw))
-	if err != nil {
+	parsed, mtime, ok := parseStateRead(raw)
+	if !ok {
 		return nil, nil
 	}
 
@@ -150,13 +150,10 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 		Domain:       parsed.Domain,
 		Containers:   []ContainerInfo{},
 	}
-
-	// Get state file mtime as deployed_at.
-	ts, err := c.Run(ctx, fmt.Sprintf("stat -c %%Y %s 2>/dev/null", shellQuote(statePath)))
-	if err == nil && ts != "" {
-		if unix, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64); err == nil {
-			st.DeployedAt = time.Unix(unix, 0).UTC()
-		}
+	if t, err := time.Parse(time.RFC3339, parsed.DeployedAt); err == nil {
+		st.DeployedAt = t.UTC()
+	} else if !mtime.IsZero() {
+		st.DeployedAt = mtime
 	}
 
 	// Read the app's web containers and operational flags in one SSH round trip.
@@ -375,4 +372,35 @@ func StreamLogs(ctx context.Context, srv ServerConn, appName, process string, li
 	}
 
 	return c.Stream(ctx, fmt.Sprintf("docker logs -f --tail=%d %s", lines, shellQuote(strings.TrimSpace(container))), w)
+}
+
+// parseStateRead splits the framed read from readAppState: a format line
+// ("json" or "kv"), the file mtime, then the content. Both formats go
+// through the canonical parsers in internal/state so the SSH and local
+// paths cannot drift. ok=false means no usable state (absent, unreadable,
+// unsupported schema, or a tombstone).
+func parseStateRead(raw string) (*state.AppState, time.Time, bool) {
+	format, rest, _ := strings.Cut(raw, "\n")
+	ts, body, _ := strings.Cut(rest, "\n")
+	var mtime time.Time
+	if unix, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64); err == nil {
+		mtime = time.Unix(unix, 0).UTC()
+	}
+	var parsed *state.AppState
+	var err error
+	switch strings.TrimSpace(format) {
+	case "json":
+		parsed, err = state.ParseJSON([]byte(body))
+	case "kv":
+		if strings.TrimSpace(body) == "" {
+			return nil, mtime, false
+		}
+		parsed, err = state.Parse(strings.NewReader(body))
+	default:
+		return nil, mtime, false
+	}
+	if err != nil || parsed == nil {
+		return nil, mtime, false
+	}
+	return parsed, mtime, true
 }

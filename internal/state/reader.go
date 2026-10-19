@@ -1,7 +1,9 @@
-// Package state reads the per-app state files that the teploy CLI writes to
-// /deployments/<app>/state on each server.
+// Package state reads the per-app state files that the teploy CLI writes on
+// each server: /deployments/<app>/state.json (schema v2+, every current CLI)
+// and, for apps last deployed by an old CLI, the legacy
+// /deployments/<app>/state. state.json wins when both exist.
 //
-// Format note: the CLI writes a plain key=value text file (NOT JSON):
+// Legacy format: a plain key=value text file:
 //
 //	current_port=49153
 //	current_hash=v4
@@ -9,19 +11,21 @@
 //	previous_hash=v3
 //	domain=app.example.com
 //
-// See useteploy/teploy-cli internal/state/state.go Write() for the canonical
-// writer. Previously this reader expected `state.json` with JSON contents,
-// which silently returned an empty app list (the file never existed).
+// See useteploy/teploy-cli internal/state/state.go for the canonical writer.
 package state
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // AppState represents the deployment state of an app (written by teploy CLI).
@@ -61,9 +65,9 @@ func (r *Reader) ListApps() ([]AppState, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		state, err := parseStateFile(filepath.Join(r.dir, entry.Name(), "state"))
+		state, err := readAppDir(filepath.Join(r.dir, entry.Name()))
 		if err != nil {
-			continue // skip apps without state files
+			continue // skip apps without (or with unreadable) state, and tombstones
 		}
 		if state.App == "" {
 			state.App = entry.Name()
@@ -77,7 +81,7 @@ func (r *Reader) ListApps() ([]AppState, error) {
 
 // GetApp returns the state for a specific app.
 func (r *Reader) GetApp(name string) (*AppState, error) {
-	state, err := parseStateFile(filepath.Join(r.dir, name, "state"))
+	state, err := readAppDir(filepath.Join(r.dir, name))
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +89,53 @@ func (r *Reader) GetApp(name string) (*AppState, error) {
 		state.App = name
 	}
 	return state, nil
+}
+
+// ErrTombstone marks a state.json the CLI keeps for a removed or never-
+// deployed app (schema v3 `tombstone: true`); readers treat the app as gone.
+var ErrTombstone = errors.New("app is tombstoned")
+
+// MaxStateSchema is the newest state.json schema this dash understands.
+const MaxStateSchema = 3
+
+// readAppDir reads state.json when present, else the legacy state file.
+func readAppDir(dir string) (*AppState, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err == nil {
+		return ParseJSON(raw)
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+	return parseStateFile(filepath.Join(dir, "state"))
+}
+
+// ParseJSON reads the CLI's state.json. A newer schema than MaxStateSchema
+// is refused rather than guessed at; a tombstone returns ErrTombstone.
+func ParseJSON(raw []byte) (*AppState, error) {
+	var doc struct {
+		SchemaVersion int       `json:"schema_version"`
+		Tombstone     bool      `json:"tombstone"`
+		CurrentHash   string    `json:"current_hash"`
+		PreviousHash  string    `json:"previous_hash"`
+		CurrentPort   int       `json:"current_port"`
+		Domain        string    `json:"domain"`
+		UpdatedAt     time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parsing state.json: %w", err)
+	}
+	if doc.SchemaVersion > MaxStateSchema {
+		return nil, fmt.Errorf("unsupported state schema version %d (this dash reads up to %d)", doc.SchemaVersion, MaxStateSchema)
+	}
+	if doc.Tombstone {
+		return nil, ErrTombstone
+	}
+	s := &AppState{CurrentHash: doc.CurrentHash, PreviousHash: doc.PreviousHash, Port: doc.CurrentPort, Domain: doc.Domain}
+	if !doc.UpdatedAt.IsZero() {
+		s.DeployedAt = doc.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	return s, nil
 }
 
 // parseStateFile reads the CLI's key=value state file from disk.
