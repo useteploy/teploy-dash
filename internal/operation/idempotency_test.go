@@ -121,9 +121,12 @@ func TestIdempotencyWindowExpiresKeys(t *testing.T) {
 	newManager := func() *Manager {
 		t.Helper()
 		manager, err := New(dir, Options{
-			Resolver:          testResolver,
-			Executor:          executor,
-			IdempotencyWindow: 50 * time.Millisecond,
+			Resolver: testResolver,
+			Executor: executor,
+			// Wide enough that two back-to-back enqueues (durable writes,
+			// -race on a loaded CI runner) always land inside it; 50ms
+			// flaked the within-window replay in CI.
+			IdempotencyWindow: 500 * time.Millisecond,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -143,7 +146,7 @@ func TestIdempotencyWindowExpiresKeys(t *testing.T) {
 		t.Fatalf("within-window replay: first=%s within=%s replayed=%v err=%v", first.ID, within.ID, replayed, err)
 	}
 	waitForStatus(t, manager, first.ID, StatusSucceeded)
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 	after, replayed, err := manager.Enqueue(req, "window-key", alice)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +159,7 @@ func TestIdempotencyWindowExpiresKeys(t *testing.T) {
 	// A restart must not resurrect a key whose operation is past the window.
 	// Wait past the window anchored at AFTER's creation too — the newest
 	// admission is the entry that would be restored.
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 	reopened := newManager()
 	fresh, replayed, err := reopened.Enqueue(req, "window-key", alice)
 	if err != nil {
