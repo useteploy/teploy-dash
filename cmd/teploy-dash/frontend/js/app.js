@@ -2442,6 +2442,14 @@ document.addEventListener('alpine:init', () => {
     testResult: null,
     editingId: null,
     _loadGeneration: 0,
+    // Detail is URL-bound (/monitors/:id): the route, not local state, says
+    // which monitor is open, so refresh, Back/Forward and shared links land
+    // on the same view. detailGeneration fences out a late response for a
+    // monitor the route has already moved away from.
+    detailId: '',
+    detailGeneration: 0,
+    detailError: null,
+    detailLoading: false,
     newMonitor: {
       name: '',
       type: 'http',
@@ -2453,19 +2461,63 @@ document.addEventListener('alpine:init', () => {
       allow_internal: false, // opt-in: allow this monitor to reach loopback/private/link-local/cloud-metadata targets
     },
 
+    routeIdentity() { const r = Alpine.store('router'); return r.page === 'monitor-detail' ? (r.params.id || '') : ''; },
+
     async init() {
       this._alive = true;
+      this.boundIdentity = this.routeIdentity();
+      const initialDetail = this.bindRoute();
+      this.routeEffect = Alpine.effect(() => {
+        const identity = this.routeIdentity();
+        if (identity !== this.boundIdentity) { this.boundIdentity = identity; this.bindRoute(); }
+      });
       await this.loadMonitors();
       await this.loadCLIStatus();
+      await initialDetail;
       if (!this._alive) return; // destroyed during load (A50)
-      this.refreshInterval = setInterval(() => this.loadMonitors(), 30000);
+      // The open monitor's stats/checks refresh with the list, so a detail
+      // view left open never paints a stale UP/DOWN as current.
+      this.refreshInterval = setInterval(() => { this.loadMonitors(); if (this.detailId) this.loadDetail(); }, 30000);
     },
 
     destroy() {
       this._alive = false;
       this._loadGeneration++; // a response still in flight is stale on destroy
+      this.detailGeneration++;
+      if (this.routeEffect) Alpine.release(this.routeEffect);
       if (this.refreshInterval) clearInterval(this.refreshInterval);
     },
+
+    async bindRoute() {
+      if (!this._alive) return;
+      this.detailGeneration++;
+      this.detailId = this.routeIdentity();
+      this.selectedMonitor = null;
+      this.detailError = null;
+      this.testResult = null; // a test flash belongs to the monitor it ran on
+      if (this.detailId) await this.loadDetail();
+    },
+
+    async loadDetail() {
+      const generation = this.detailGeneration, id = this.detailId;
+      if (!id) return;
+      this.detailLoading = true;
+      try {
+        const detail = await rawFetch.get('/api/monitors/' + encodeURIComponent(id));
+        if (!this._alive || generation !== this.detailGeneration) return;
+        this.selectedMonitor = detail;
+        this.detailError = null;
+      } catch (e) {
+        if (!this._alive || generation !== this.detailGeneration) return;
+        // Keep an already-shown detail on a failed background refresh; a
+        // failed first load is an error state, never the list.
+        if (!this.selectedMonitor) this.detailError = `Could not load monitor "${id}": ${e.message}`;
+      } finally {
+        if (this._alive && generation === this.detailGeneration) this.detailLoading = false;
+      }
+    },
+
+    openList() { Alpine.store('router').navigate('monitors'); },
 
     async loadMonitors() {
       const generation = ++this._loadGeneration;
@@ -2493,11 +2545,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     async selectMonitor(id) {
-      try {
-        this.selectedMonitor = await rawFetch.get('/api/monitors/' + id);
-      } catch (e) {
-        showToast('Failed to load monitor', 'error');
-      }
+      if (this.routeIdentity() === id) return this.loadDetail();
+      Alpine.store('router').navigate('monitor-detail', { id });
+      this.boundIdentity = this.routeIdentity();
+      await this.bindRoute();
     },
 
     async createMonitor() {
@@ -2536,7 +2587,7 @@ document.addEventListener('alpine:init', () => {
       if (!confirm('Delete this monitor?')) return;
       try {
         await rawFetch.del('/api/monitors/' + id);
-        this.selectedMonitor = null;
+        if (this.detailId === id) this.openList();
         await this.loadMonitors();
         showToast('Monitor deleted', 'success');
       } catch (e) {
