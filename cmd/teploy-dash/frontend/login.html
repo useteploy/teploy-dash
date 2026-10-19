@@ -106,6 +106,17 @@
     .error { margin-top: 12px; color: #f85149; font-size: 12px; }
     .security-note { margin-top: 18px; color: #6e7681; font-size: 10px; text-align: center; }
     @media (max-width: 440px) { .card { padding: 26px 22px; } }
+    /* Phones and touch screens: 16px inputs stop iOS zooming on focus,
+       controls grow to 44px, and a short viewport (landscape, keyboard open)
+       can scroll to the card instead of clipping it. */
+    @media (max-width: 640px), (pointer: coarse) {
+      body { overflow: auto; padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+      input, input[type="password"], input[type="text"] { min-height: 44px; font-size: 16px; }
+      button, a.sso { min-height: 44px; }
+    }
+    @media (max-width: 400px) {
+      .card { padding: 24px 20px; }
+    }
   </style>
 </head>
 <body>
