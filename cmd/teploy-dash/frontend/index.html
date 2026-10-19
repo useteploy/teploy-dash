@@ -230,11 +230,17 @@
         <div>
           <h1 class="page-title">Projects</h1>
           <p class="subtitle">Groups organize projects; projects hold the apps you deploy.</p>
+          <p class="subtitle" x-show="!loading && fleetAge()" x-text="'Server state observed ' + fleetAge()"></p>
         </div>
         <div style="display: flex; gap: 12px; align-items: center; flex: 1; max-width: 500px; margin: 0 24px;">
           <input type="text" class="search-input" placeholder="Search apps..." aria-label="Search apps" x-model="search" style="flex: 1;">
         </div>
-        <button class="btn" @click="createGroup">+ Group</button>
+        <div class="header-actions">
+          <button class="btn" @click="createGroup">+ Group</button>
+          <!-- A first deploy must not require creating a group first: this
+               deploys into Ungrouped, which can be organized later. -->
+          <button class="btn btn-primary" @click="openDeployForm('Ungrouped')">+ Deploy</button>
+        </div>
       </div>
 
       <template x-if="loading">
@@ -252,8 +258,8 @@
             <div style="margin-bottom: 32px;">
               <div class="section-header">
                 <h2 class="section-title" x-text="group.name"></h2>
-                <div style="display: flex; gap: 8px;" x-show="!group.system">
-                  <button class="btn btn-sm" @click="createProject(group.name)">+ Project</button>
+                <div style="display: flex; gap: 8px;">
+                  <button class="btn btn-sm" x-show="!group.system" @click="createProject(group.name)">+ Project</button>
                   <button class="btn btn-sm btn-primary" @click="openDeployForm(group.name)">+ Deploy</button>
                 </div>
               </div>
@@ -290,7 +296,7 @@
                       <input class="form-input" type="number" :id="'grp-deploy-port-' + group.name" placeholder="80" x-model.number="deployForm.port">
                     </div>
                     <div class="form-group" style="display: flex; gap: 8px; align-items: flex-end;">
-                      <button class="btn btn-primary" @click="doDeploy(group.name)" :disabled="deploying || !canDeploy" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
+                      <button class="btn btn-primary" @click="doDeploy(group.system ? null : group.name)" :disabled="deploying || !canDeploy" x-text="deploying ? 'Deploying...' : 'Deploy'"></button>
                       <button class="btn" @click="deployingToGroup = null">Cancel</button>
                     </div>
                   </div>
@@ -354,7 +360,7 @@
           <!-- Empty state when no groups -->
           <template x-if="groupedApps().length === 0">
             <div class="empty-state">
-              <p>No groups yet. Create a group to get started, then deploy apps into it.</p>
+              <p>No apps yet. Use + Deploy to ship one; groups and projects can organize apps later.</p>
             </div>
           </template>
         </div>
@@ -1050,11 +1056,13 @@
   </template>
 
   <!-- ═══ Monitors Page ═══ -->
-  <template x-if="$store.router.page === 'monitors'">
+  <!-- One component serves the list (/monitors) and a monitor's detail
+       (/monitors/:id), so moving between them keeps the loaded list. -->
+  <template x-if="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail'">
     <div x-data="monitorsPage">
 
-      <!-- Monitor List View (when no monitor is selected) -->
-      <template x-if="!selectedMonitor">
+      <!-- Monitor List View (when no monitor is open) -->
+      <template x-if="!detailId">
         <div>
           <div class="page-header">
             <div>
@@ -1087,7 +1095,7 @@
           <template x-if="!loading && monitors.length > 0">
             <div class="monitor-list">
               <template x-for="m in monitors" :key="m.id">
-                <div class="monitor-card" @click="selectMonitor(m.id)">
+                <a class="monitor-card" :href="'/monitors/' + encodeURIComponent(m.id)" @click.prevent="selectMonitor(m.id)">
                   <div class="monitor-header">
                 <div class="monitor-status">
                   <span class="dot" :class="getMonitorDot(m)"></span>
@@ -1109,7 +1117,7 @@
                     <span x-text="'Every ' + formatInterval(m.interval)"></span>
                     <span x-show="m.stats" x-text="m.stats ? 'Avg ' + fmtMs(m.stats.avg_response) : ''"></span>
                   </div>
-                </div>
+                </a>
               </template>
             </div>
           </template>
@@ -1130,12 +1138,25 @@
         </div>
       </template>
 
+      <!-- Monitor detail: loading / not-found states for a deep link -->
+      <template x-if="detailId && !selectedMonitor">
+        <div>
+          <a href="/monitors" class="back-link" @click.prevent="openList()">&larr; Monitors</a>
+          <template x-if="detailError">
+            <div role="alert" class="empty-state"><p x-text="detailError"></p><button class="btn btn-sm" @click="loadDetail()">Retry</button></div>
+          </template>
+          <template x-if="!detailError">
+            <div class="empty-state" role="status"><p>Loading monitor...</p></div>
+          </template>
+        </div>
+      </template>
+
       <!-- Monitor Detail View -->
-      <template x-if="selectedMonitor">
+      <template x-if="detailId && selectedMonitor">
         <div>
           <div class="page-header">
             <div>
-              <a href="#" class="back-link" @click.prevent="selectedMonitor = null">&larr; Monitors</a>
+              <a href="/monitors" class="back-link" @click.prevent="openList()">&larr; Monitors</a>
               <h1 class="page-title" x-text="selectedMonitor?.monitor?.name"></h1>
               <p class="subtitle" x-text="selectedMonitor?.monitor?.target"></p>
             </div>

@@ -533,13 +533,44 @@ document.addEventListener('alpine:init', () => {
     deployingToGroup: null,
     deploying: false,
     deployForm: { app: '', image: '', domain: '', server: '', port: 80 },
+    _alive: true,
+    _staleRetry: null,
 
     async init() {
       await this.load();
     },
 
-    async load() {
-      this.loading = true;
+    destroy() {
+      this._alive = false;
+      if (this._staleRetry) clearTimeout(this._staleRetry);
+    },
+
+    // Oldest observation behind the cards. The server answers from its last
+    // fleet snapshot while it re-sweeps (stale-while-revalidate), so a page
+    // must never present that snapshot's state as current: it shows the age
+    // and re-reads once the sweep has had time to land.
+    oldestObservedMs() {
+      let oldest = Infinity;
+      for (const a of this.apps || []) {
+        const t = a.observed_at && !String(a.observed_at).startsWith('0001') ? new Date(a.observed_at).getTime() : NaN;
+        if (!isNaN(t) && t < oldest) oldest = t;
+      }
+      return oldest === Infinity ? null : oldest;
+    },
+
+    fleetAge() {
+      const t = this.oldestObservedMs();
+      if (t === null) return '';
+      const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+      if (s < 60) return s + 's ago';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      return Math.floor(s / 86400) + 'd ago';
+    },
+
+    async load({ silent = false } = {}) {
+      if (this._staleRetry) { clearTimeout(this._staleRetry); this._staleRetry = null; }
+      if (!silent) this.loading = true;
       this.loadError = null;
       try {
         const [groups, servers] = await Promise.all([
@@ -566,10 +597,21 @@ document.addEventListener('alpine:init', () => {
           apps = (await api.get('/api/apps')) || [];
         }
         // AppState's wire key is `app`; cards and routes use `name`.
+        if (!this._alive) return;
         this.apps = apps.map(a => ({ ...a, name: a.app ?? a.name }));
         this.groups = groups || [];
         this.serverList = Object.keys(servers || {});
+        // A snapshot older than the server's 60s cache window was served
+        // while a fresh sweep runs; read again once (not a poll loop).
+        const oldest = this.oldestObservedMs();
+        if (!silent && oldest !== null && Date.now() - oldest > 60000) {
+          this._staleRetry = setTimeout(() => { if (this._alive) this.load({ silent: true }); }, 8000);
+        }
       } catch (e) {
+        if (!this._alive) return;
+        // A failed background re-read keeps the cards on screen; only a
+        // failed visible load is an error state.
+        if (silent) return;
         this.loadError = `Could not load deployments: ${e.message}`;
         showToast(this.loadError, 'error');
       }
@@ -641,7 +683,9 @@ document.addEventListener('alpine:init', () => {
       });
       const ungrouped = this.filteredApps.filter(a => !(this.groups || []).some(g =>
         belongs(g, a) || (g.projects || []).some(p => belongs(p, a))));
-      if (ungrouped.length > 0) {
+      // Also shown while deploying into it, so a first deploy has a form
+      // even before any app or group exists.
+      if (ungrouped.length > 0 || this.deployingToGroup === 'Ungrouped') {
         groups.push({ name: 'Ungrouped', directApps: ungrouped, projects: [], system: true });
       }
       return groups;
@@ -1310,7 +1354,27 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // Actions that interrupt traffic or replace the running release ask
+    // first, naming the app, server and versions involved; start, lock and
+    // ending maintenance are non-disruptive and run directly.
+    actionConfirmation(action) {
+      const app = this.app, where = `${app.name} on ${app.server}`;
+      switch (action) {
+        case 'stop': return `Stop ${where}?\n\nIt stops serving traffic until it is started again.`;
+        case 'restart': return `Restart ${where}?\n\nRequests can fail briefly while its containers restart.`;
+        case 'rollback': return `Roll back ${where}?\n\nThe running release ${this.shortHash(app.current_hash) || '(unknown)'} is replaced by ${app.previous_hash ? this.shortHash(app.previous_hash) : 'the previous release'}.`;
+        case 'maintenance/on': return `Put ${where} into maintenance?\n\nVisitors see the maintenance page until maintenance is ended.`;
+        default: return '';
+      }
+    },
+
     async doAction(action) {
+      const target = this.resource;
+      // Same stale-record fence as removeApp (A49): only act on the record
+      // the page is displaying.
+      if (!target || !this.app || this.app.name !== target.name || this.app.server !== target.server) return;
+      const question = this.actionConfirmation(action);
+      if (question && !confirm(question)) return;
       this.actionLoading = true;
       try {
         const result = await api.post(`${this.appPath()}/${action}`);
@@ -2442,6 +2506,14 @@ document.addEventListener('alpine:init', () => {
     testResult: null,
     editingId: null,
     _loadGeneration: 0,
+    // Detail is URL-bound (/monitors/:id): the route, not local state, says
+    // which monitor is open, so refresh, Back/Forward and shared links land
+    // on the same view. detailGeneration fences out a late response for a
+    // monitor the route has already moved away from.
+    detailId: '',
+    detailGeneration: 0,
+    detailError: null,
+    detailLoading: false,
     newMonitor: {
       name: '',
       type: 'http',
@@ -2453,19 +2525,63 @@ document.addEventListener('alpine:init', () => {
       allow_internal: false, // opt-in: allow this monitor to reach loopback/private/link-local/cloud-metadata targets
     },
 
+    routeIdentity() { const r = Alpine.store('router'); return r.page === 'monitor-detail' ? (r.params.id || '') : ''; },
+
     async init() {
       this._alive = true;
+      this.boundIdentity = this.routeIdentity();
+      const initialDetail = this.bindRoute();
+      this.routeEffect = Alpine.effect(() => {
+        const identity = this.routeIdentity();
+        if (identity !== this.boundIdentity) { this.boundIdentity = identity; this.bindRoute(); }
+      });
       await this.loadMonitors();
       await this.loadCLIStatus();
+      await initialDetail;
       if (!this._alive) return; // destroyed during load (A50)
-      this.refreshInterval = setInterval(() => this.loadMonitors(), 30000);
+      // The open monitor's stats/checks refresh with the list, so a detail
+      // view left open never paints a stale UP/DOWN as current.
+      this.refreshInterval = setInterval(() => { this.loadMonitors(); if (this.detailId) this.loadDetail(); }, 30000);
     },
 
     destroy() {
       this._alive = false;
       this._loadGeneration++; // a response still in flight is stale on destroy
+      this.detailGeneration++;
+      if (this.routeEffect) Alpine.release(this.routeEffect);
       if (this.refreshInterval) clearInterval(this.refreshInterval);
     },
+
+    async bindRoute() {
+      if (!this._alive) return;
+      this.detailGeneration++;
+      this.detailId = this.routeIdentity();
+      this.selectedMonitor = null;
+      this.detailError = null;
+      this.testResult = null; // a test flash belongs to the monitor it ran on
+      if (this.detailId) await this.loadDetail();
+    },
+
+    async loadDetail() {
+      const generation = this.detailGeneration, id = this.detailId;
+      if (!id) return;
+      this.detailLoading = true;
+      try {
+        const detail = await rawFetch.get('/api/monitors/' + encodeURIComponent(id));
+        if (!this._alive || generation !== this.detailGeneration) return;
+        this.selectedMonitor = detail;
+        this.detailError = null;
+      } catch (e) {
+        if (!this._alive || generation !== this.detailGeneration) return;
+        // Keep an already-shown detail on a failed background refresh; a
+        // failed first load is an error state, never the list.
+        if (!this.selectedMonitor) this.detailError = `Could not load monitor "${id}": ${e.message}`;
+      } finally {
+        if (this._alive && generation === this.detailGeneration) this.detailLoading = false;
+      }
+    },
+
+    openList() { Alpine.store('router').navigate('monitors'); },
 
     async loadMonitors() {
       const generation = ++this._loadGeneration;
@@ -2493,11 +2609,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     async selectMonitor(id) {
-      try {
-        this.selectedMonitor = await rawFetch.get('/api/monitors/' + id);
-      } catch (e) {
-        showToast('Failed to load monitor', 'error');
-      }
+      if (this.routeIdentity() === id) return this.loadDetail();
+      Alpine.store('router').navigate('monitor-detail', { id });
+      this.boundIdentity = this.routeIdentity();
+      await this.bindRoute();
     },
 
     async createMonitor() {
@@ -2536,7 +2651,7 @@ document.addEventListener('alpine:init', () => {
       if (!confirm('Delete this monitor?')) return;
       try {
         await rawFetch.del('/api/monitors/' + id);
-        this.selectedMonitor = null;
+        if (this.detailId === id) this.openList();
         await this.loadMonitors();
         showToast('Monitor deleted', 'success');
       } catch (e) {

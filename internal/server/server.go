@@ -1998,10 +1998,6 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		s.handleConfigAuthority(w, r, serverName, appName)
 
 	case action == "env" && r.Method == "POST":
-		if !cli.IsInstalled() {
-			writeError(w, "teploy CLI not installed")
-			return
-		}
 		var body struct {
 			Key   string `json:"key"`
 			Value string `json:"value"`
@@ -2019,6 +2015,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, body.Key) {
 			return
 		}
+		if !s.cliInstalled() {
+			writeError(w, "teploy CLI not installed")
+			return
+		}
 		result, err := cli.EnvSet(r.Context(), s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value)
 		if err != nil {
 			writeError(w, err.Error())
@@ -2027,10 +2027,6 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		writeData(w, result)
 
 	case strings.HasPrefix(action, "env/") && r.Method == "DELETE":
-		if !cli.IsInstalled() {
-			writeError(w, "teploy CLI not installed")
-			return
-		}
 		key := strings.TrimPrefix(action, "env/")
 		if !validEnvKey(key) {
 			writeError(w, "invalid env var name")
@@ -2038,6 +2034,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		// D07: same guard on removal.
 		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, key) {
+			return
+		}
+		if !s.cliInstalled() {
+			writeError(w, "teploy CLI not installed")
 			return
 		}
 		result, err := cli.EnvUnset(s.serverHost(serverName), s.serverUser(serverName), appName, key)
@@ -2048,7 +2048,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		writeData(w, result)
 
 	case action == "log" && r.Method == "GET":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
@@ -2063,7 +2063,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	// an operation (those are for mutations). --exit-code is deliberately not
 	// passed: detected drift is a successful answer, not a command failure.
 	case action == "drift" && r.Method == "GET":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
@@ -2077,7 +2077,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	// Per-container CPU/memory/IO. Read-only and quick, so it answers inline
 	// like drift rather than becoming an operation.
 	case action == "stats" && r.Method == "GET":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
@@ -2137,7 +2137,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		s.handleKVDelete(w, r, serverName, appName)
 
 	case action == "accessories" && r.Method == "GET":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
@@ -2174,14 +2174,14 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 		})
 
 	case "rollback":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
 		s.enqueueOperation(w, r, operation.Request{Kind: operation.KindRollback, Server: serverName, App: appName})
 
 	case "remove":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
@@ -2199,7 +2199,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 		})
 
 	case "lock":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
@@ -2212,7 +2212,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 		writeData(w, result)
 
 	case "unlock":
-		if !cli.IsInstalled() {
+		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
@@ -2236,7 +2236,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 
 	default:
 		if strings.HasPrefix(action, "accessories/") {
-			if !cli.IsInstalled() {
+			if !s.cliInstalled() {
 				writeError(w, "teploy CLI not installed")
 				return
 			}
@@ -2469,7 +2469,7 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	if !cli.IsInstalled() {
+	if !s.cliInstalled() {
 		writeData(w, []interface{}{})
 		return
 	}
@@ -2524,7 +2524,7 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	if !cli.IsInstalled() {
+	if !s.cliInstalled() {
 		writeError(w, "teploy CLI not installed")
 		return
 	}
@@ -2637,8 +2637,10 @@ func tcpReachable(host string, timeout time.Duration) bool {
 }
 
 func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
+	// An error status, not a 200 whose data is {"error": ...}: the page
+	// would otherwise render an empty status as if the server answered.
 	if !s.cliInstalled() {
-		writeData(w, map[string]interface{}{"error": "CLI not installed"})
+		writeErrorStatus(w, "teploy CLI not installed", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -2709,7 +2711,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	if !cli.IsInstalled() {
+	if !s.cliInstalled() {
 		writeError(w, "teploy CLI not installed")
 		return
 	}

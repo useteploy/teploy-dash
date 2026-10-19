@@ -27,8 +27,20 @@ jobs:
 
   go:
     runs-on: ubuntu-latest
+    # The template-consumer tests read the shipped catalog; locally they find
+    # it as the sibling ../templates checkout, here it is checked out beside.
+    env:
+      TEPLOY_TEMPLATES_DIR: ${{ github.workspace }}/templates
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout the templates catalog
+        uses: actions/checkout@v4
+        with:
+          repository: useteploy/templates
+          path: templates
+          # Only the template the consumer test reads: the catalog's own ci/
+          # Go tests have no go.mod and would otherwise join ./... here.
+          sparse-checkout: lullmail
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27.1'
