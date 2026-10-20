@@ -4,6 +4,24 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Removed
+- **Dash-side manifest store and the D04 webhook-to-deploy pipeline.**
+  App settings live on the app's server (Settings tab / `teploy config`),
+  so dash no longer keeps its own copy: `internal/manifest`, the
+  `/api/manifests` routes (which now answer 410 Gone with the reason), the
+  git/dash-managed authority UI, the lifecycle/watermark/preview-ownership
+  state, the dash-host git checkout and the `manifest_apply` /
+  `manifest_plan` / `manifest_validate` / `source_preview*` operation kinds
+  are gone. Historical operations with those kinds still load and display;
+  retrying or re-submitting them is refused cleanly. Registered git
+  sources keep their forge plumbing: credentials, webhook secrets,
+  per-forge signature checks, the durable delivery ledger and push-head
+  verification. Authenticated pushes are recorded as ignored — "no app is
+  connected to this repository yet" — until connecting an app to a
+  repository ships (server-authority P3); pull request deliveries answer
+  that previews are not supported yet. The Teploy-home env guard moved to
+  `internal/configkeys` and now also guards the MCP env tools.
+
 ## [0.1.17] - 2026-10-19
 
 ### Added

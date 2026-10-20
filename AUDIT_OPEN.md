@@ -10,6 +10,41 @@ Open items: 0 P2 improvements, deferred findings (design/architecture)
 listed per pass below, 2 upstream (teploy-cli) items (both already fixed and
 adopted), plus recorded residuals inside partially-fixed findings.
 
+## 2026-10-20 manifest store + D04 deploy pipeline removed
+
+**Removed 2026-10-20, superseded by server-authority P3** (branch
+`chore/remove-manifests`). The dash-side manifest store, the
+webhook-to-manifest deploy pipeline (D04 slices: manifest binding,
+lifecycle watermarks, dash-host checkout, path filters), PR previews and
+the git/dash-managed authority surfaces are deleted — app settings live on
+the app's server. All open or deferred audit items that assumed the
+manifest store or the D04 admission pipeline are **superseded** by this
+removal; in particular the items below are history, not work:
+
+- the 2026-09-23 "D04 first slice" section and its "Remaining D04 scope"
+  list (builds-from-git via dash checkout, PR preview lifecycle, monorepo
+  path filters, dash-webhook vs CLI-autodeploy convergence as dash-side
+  admission);
+- the 2026-10-07 "historical D04 source journeys" section (immutable
+  checkout, preview ownership registry, source-deletion fences);
+- manifest-surface findings that name the removed store/API/authority UI
+  (A17/A18/A28/R28/R29, the manifest_apply receipt-coverage rows and the
+  manifest revision-lease discussion) — nothing remains to harden.
+
+What still exists and still owns its findings: the source registry
+(identity, credentials, webhook secrets, per-forge signatures), the
+delivery ledger and push-head verification. Verified pushes are recorded
+as ignored ("no app is connected to this repository yet") until an app can
+be connected to a repository.
+
+### Deferred (redesign): PR previews
+
+Deferred 2026-10-20 with the removal. Any later preview redesign must
+carry, at minimum: a GitHub App installation check; base/head repository
+scoping (same-repository base and head); fork refusal; and `updated_at`
+ordering of lifecycle deliveries.
+
+
 ## useteploy__teploy-dash-04 - P2 - FIXED 2026-09-18 (commit bb519ce)
 
 **Bound operation retention and reduce global-lock persistence work**
