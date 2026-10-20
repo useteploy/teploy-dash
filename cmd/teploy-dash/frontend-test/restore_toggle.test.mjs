@@ -6,9 +6,11 @@ import { harness, response } from './identity_harness.mjs';
 
 test('D09: real GET-shaped restore rows toggle both directions with only configuration fields', { timeout: 2000 }, async () => {
   const h = harness('/restore-tests'), page = h.page('restoreTestsPage');
-  const allowed = ['id', 'server', 'app', 'accessory', 'bucket', 'region', 'interval_hours', 'enabled'];
+  // Plan D3: the backup destination is resolved by the CLI from the
+  // server's stored target, so the DTO carries no bucket/region.
+  const allowed = ['id', 'server', 'app', 'accessory', 'interval_hours', 'enabled'];
   // Match the strict Go DTO, but this is a frontend contract stub, not Go execution.
-  let saved = { id: 'rt1', server: 'prod', app: 'web', accessory: 'db', bucket: 'backups', region: 'us-east-1', interval_hours: 24, enabled: true };
+  let saved = { id: 'rt1', server: 'prod', app: 'web', accessory: 'db', interval_hours: 24, enabled: true };
   const result = { last_run_at: '2026-10-06T14:00:00Z', last_ok: false, last_detail: 'verification failed', last_metric: 'rows', last_date: '2026-10-06', last_duration_ms: 1200, delivery: { status: 'delivered', attempts: 1 }, future_read_only: 'must not spread' };
   h.respond((url, options) => {
     assert.equal(url, '/api/restore-tests');
