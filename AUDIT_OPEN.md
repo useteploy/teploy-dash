@@ -33,9 +33,13 @@ removal; in particular the items below are history, not work:
 
 What still exists and still owns its findings: the source registry
 (identity, credentials, webhook secrets, per-forge signatures), the
-delivery ledger and push-head verification. Verified pushes are recorded
-as ignored ("no app is connected to this repository yet") until an app can
-be connected to a repository.
+delivery ledger and push-head verification. A verified push for a
+repository an app builds from now wakes that app's server-side admitter
+(`trigger poll --now --hint`, branch `feat/d4-dash-git-sources`, D4):
+dash re-verifies its repo→app routing hints against the app's config,
+answers the forge immediately and records the poll result in the ledger;
+it never decides what deploys. Verified pushes with no connected app are
+still recorded as ignored ("no app is connected to this repository yet").
 
 ### Deferred (redesign): PR previews
 

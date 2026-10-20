@@ -528,6 +528,7 @@
                @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
             <button class="tab" :class="{ active: tab === 'general' }" role="tab" id="app-tab-general" aria-controls="app-panel-general" :aria-selected="(tab === 'general').toString()" :tabindex="tab === 'general' ? 0 : -1" @focus="switchTab('general')">General</button>
             <button class="tab" x-show="hasFeature('config_home')" :class="{ active: tab === 'settings' }" role="tab" id="app-tab-settings" aria-controls="app-panel-settings" :aria-selected="(tab === 'settings').toString()" :tabindex="tab === 'settings' ? 0 : -1" @focus="switchTab('settings')">Settings</button>
+            <button class="tab" x-show="hasFeature('git_source') && teployHome()" :class="{ active: tab === 'repository' }" role="tab" id="app-tab-repository" aria-controls="app-panel-repository" :aria-selected="(tab === 'repository').toString()" :tabindex="tab === 'repository' ? 0 : -1" @focus="switchTab('repository')">Repository</button>
             <button class="tab" :class="{ active: tab === 'env' }" role="tab" id="app-tab-env" aria-controls="app-panel-env" :aria-selected="(tab === 'env').toString()" :tabindex="tab === 'env' ? 0 : -1" @focus="switchTab('env')">Environment</button>
             <button class="tab" :class="{ active: tab === 'logs' }" role="tab" id="app-tab-logs" aria-controls="app-panel-logs" :aria-selected="(tab === 'logs').toString()" :tabindex="tab === 'logs' ? 0 : -1" @focus="switchTab('logs')">Logs</button>
             <button class="tab" :class="{ active: tab === 'deploys' }" role="tab" id="app-tab-deploys" aria-controls="app-panel-deploys" :aria-selected="(tab === 'deploys').toString()" :tabindex="tab === 'deploys' ? 0 : -1" @focus="switchTab('deploys')">Deploys</button>
@@ -1011,6 +1012,189 @@
                       <pre class="log-viewer" x-text="settingsViewing.content"></pre>
                     </div>
                   </template>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Repository Tab (server-authority D4): connect a git
+               repository to a Teploy-home app. The server's poll is the
+               only admitter; this card only connects (git: block via the
+               CAS settings write, deploy key, host-key pin, webhook) and
+               shows its state. Everything comes from the CLI; an older
+               CLI or a folder-home app shows nothing here. -->
+          <template x-if="tab === 'repository'">
+            <div role="tabpanel" id="app-panel-repository" aria-labelledby="app-tab-repository" tabindex="-1">
+              <template x-if="gitShowLoading && !gitShow">
+                <div class="loading"><div class="spinner"></div></div>
+              </template>
+              <template x-if="!gitShowLoading && !gitShow && gitShowError">
+                <div role="alert" class="empty-state"><p x-text="'Could not load the repository status: ' + gitShowError"></p><button class="btn btn-sm" @click="loadGitSource()">Retry</button></div>
+              </template>
+
+              <!-- No repository connected: the connect card -->
+              <template x-if="gitShow && !gitSourceConnected() && gitStep === ''">
+                <div class="card">
+                  <h2 class="section-title">Repository</h2>
+                  <p class="card-meta">This app is deployed from an image or a folder checkout. Connect a git repository and the server builds every admitted commit of one branch — GitHub, GitLab, Gitea, Forgejo or any git host.</p>
+                  <p class="card-meta">The connection writes a <span class="mono">git:</span> block to this app's settings, generates a read-only deploy key on the server, and pins the forge's host key. Pushes then wake the server's own poll; nothing deploys from dash.</p>
+                  <button class="btn btn-primary" x-show="canEdit()" @click="gitConnectStart()">Connect repository</button>
+                </div>
+              </template>
+
+              <!-- Connect wizard -->
+              <template x-if="gitStep !== ''">
+                <div class="card">
+                  <h2 class="section-title">Connect repository</h2>
+                  <p role="alert" class="stale-banner" x-show="gitError" x-text="gitError"></p>
+
+                  <template x-if="gitStep === 'form'">
+                    <form @submit.prevent="gitConnectSubmit()">
+                      <div class="form-row">
+                        <div class="form-group">
+                          <label class="form-label" for="git-forge">Forge</label>
+                          <select class="form-input" id="git-forge" x-model="gitForm.forge">
+                            <option value="github">GitHub</option>
+                            <option value="gitlab">GitLab</option>
+                            <option value="forgejo">Forgejo</option>
+                            <option value="gitea">Gitea</option>
+                          </select>
+                        </div>
+                        <div class="form-group">
+                          <label class="form-label" for="git-repository">Clone URL</label>
+                          <input class="form-input" id="git-repository" x-model="gitForm.repository" placeholder="git@github.com:owner/repo.git" spellcheck="false" autocapitalize="off" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                          <label class="form-label" for="git-branch">Branch</label>
+                          <input class="form-input" id="git-branch" x-model="gitForm.branch" placeholder="main" spellcheck="false" autocapitalize="off" autocomplete="off">
+                        </div>
+                      </div>
+                      <p class="card-meta">A <span class="mono">git:</span> block is added to this app's settings first (compare-and-swap, merged with any concurrent edit), then the deploy key is generated on the server.</p>
+                      <div class="btn-group">
+                        <button type="submit" class="btn btn-primary" :disabled="gitBusy" x-text="gitBusy ? 'Working…' : 'Save settings and generate key'"></button>
+                        <button type="button" class="btn" @click="gitCancelConnect()" :disabled="gitBusy">Cancel</button>
+                      </div>
+                    </form>
+                  </template>
+
+                  <template x-if="gitStep === 'hostkey'">
+                    <div>
+                      <h3 class="settings-section">Deploy key</h3>
+                      <p class="card-meta" x-show="gitKeyInfo && gitKeyInfo.fingerprint" x-text="'Generated on the server (private half never leaves it): ' + (gitKeyInfo ? gitKeyInfo.fingerprint : '')"></p>
+                      <details x-show="gitKeyInfo && gitKeyInfo.public_key">
+                        <summary class="card-meta">Public key</summary>
+                        <pre class="log-viewer" x-text="gitKeyInfo ? gitKeyInfo.public_key : ''"></pre>
+                      </details>
+
+                      <h3 class="settings-section">Forge host key</h3>
+                      <template x-if="!gitHostKeys">
+                        <div>
+                          <p class="card-meta">The server pins the forge's SSH host keys (ssh-keyscan) so fetches cannot be intercepted. Pin first, then verify the fingerprints it reports against what your forge publishes.</p>
+                          <div class="btn-group">
+                            <button class="btn btn-primary" @click="gitPinHostKey('')" :disabled="gitBusy" x-text="gitBusy ? 'Pinning…' : 'Pin host key'"></button>
+                            <button class="btn" @click="gitCancelConnect()" :disabled="gitBusy">Cancel</button>
+                          </div>
+                        </div>
+                      </template>
+                      <template x-if="gitHostKeys">
+                        <div>
+                          <p class="card-meta">Pinned host keys — confirm they match your forge's published fingerprints:</p>
+                          <pre class="log-viewer" x-text="(gitHostKeys.host_key_fingerprints || []).join('\n')"></pre>
+                          <div class="btn-group">
+                            <button class="btn btn-primary" @click="gitConfirmHostKeys()" :disabled="gitBusy" x-text="gitBusy ? 'Connecting…' : 'Confirmed — finish connection'"></button>
+                          </div>
+                          <div class="form-row" style="margin-top: 12px;">
+                            <div class="form-group">
+                              <label class="form-label" for="git-expected-fp">Mismatch? Re-pin with the verified fingerprint</label>
+                              <input class="form-input" id="git-expected-fp" x-model="gitExpectedFingerprint" placeholder="SHA256:..." spellcheck="false" autocapitalize="off" autocomplete="off">
+                            </div>
+                            <div class="form-group" style="align-self: end;">
+                              <button class="btn" @click="gitPinHostKey(gitExpectedFingerprint)" :disabled="gitBusy || !gitExpectedFingerprint" x-text="gitBusy ? 'Pinning…' : 'Re-pin'"></button>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <template x-if="gitStep === 'done'">
+                    <div>
+                      <template x-if="gitRegister && gitRegister.registered">
+                        <div>
+                          <p>Deploy key and push webhook registered on the forge. Pushes to the repository now wake this app's server poll.</p>
+                          <button class="btn btn-primary" @click="gitFinishConnect()">Done</button>
+                        </div>
+                      </template>
+                      <template x-if="gitRegister && !gitRegister.registered">
+                        <div>
+                          <p>Dash holds no credential for this forge, so add these by hand:</p>
+                          <ol style="margin: 10px 0 10px 20px;">
+                            <li>Add the deploy key below to the repository as a <strong>read-only</strong> deploy key.</li>
+                            <li x-show="gitRegister.webhook_secret">Add a push webhook to <code x-text="gitRegister.webhook_url"></code> with secret <code x-text="gitRegister.webhook_secret"></code> (shown once).</li>
+                            <li x-show="!gitRegister.webhook_secret">Add a push webhook to <code x-text="gitRegister.webhook_url"></code>; ask an administrator for its secret (or rotate it on the Sources page and update the forge).</li>
+                          </ol>
+                          <p class="card-meta" x-show="gitRegister.webhook_secret">The webhook secret is shown once, here only.</p>
+                          <details>
+                            <summary class="card-meta">Deploy key (public half)</summary>
+                            <pre class="log-viewer" x-text="gitRegister ? gitRegister.public_key : ''"></pre>
+                          </details>
+                          <button class="btn btn-primary" @click="gitFinishConnect()">Done</button>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Connected: the source status card -->
+              <template x-if="gitShow && gitSourceConnected()">
+                <div class="card">
+                  <h2 class="section-title">Repository</h2>
+                  <p role="alert" class="stale-banner" x-show="gitError" x-text="gitError"></p>
+                  <div class="table-wrap">
+                    <table>
+                      <tbody>
+                        <tr><td style="width:200px;">Repository</td><td class="mono" style="font-size: 12px;" x-text="gitShow.repository"></td></tr>
+                        <tr><td>Branch</td><td class="mono" style="font-size: 12px;" x-text="gitShow.branch"></td></tr>
+                        <tr><td>Poll</td><td x-text="gitShow.poll || '5m'"></td></tr>
+                        <tr>
+                          <td>Deploy key</td>
+                          <td>
+                            <span x-text="gitShow.credential ? gitShow.credential.type : 'none'"></span>
+                            <span class="card-meta" style="margin: 0;" x-show="gitShow.credential && gitShow.credential.fingerprint" x-text="gitShow.credential ? gitShow.credential.fingerprint : ''"></span>
+                            <div class="card-meta" style="margin: 4px 0 0;" x-show="!gitShow.credential">No credential yet — run Connect repository to generate the deploy key.</div>
+                          </td>
+                        </tr>
+                        <tr x-show="gitShow.trigger">
+                          <td>Last admitted commit</td>
+                          <td>
+                            <span class="mono" style="font-size: 12px;" :title="gitShow.trigger ? gitShow.trigger.watermark : ''" x-text="gitShow.trigger && gitShow.trigger.watermark ? shortHash(gitShow.trigger.watermark) : 'nothing yet'"></span>
+                            <span class="card-meta" style="margin: 4px 0 0;" x-show="gitShow.trigger && gitShow.trigger.last_head" x-text="'last head ' + shortHash(gitShow.trigger.last_head)"></span>
+                            <span class="card-meta" style="margin: 4px 0 0;" x-show="gitShow.trigger && gitShow.trigger.last_deployed_release" x-text="'deployed as ' + (gitShow.trigger ? gitShow.trigger.last_deployed_release : '')"></span>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Server poll timer</td>
+                          <td>
+                            <span x-show="gitTimer && gitTimer.known && gitTimer.installed">Installed (polls every minute)</span>
+                            <span x-show="!gitTimer || !gitTimer.known">Unknown</span>
+                            <div style="display:flex;align-items:center;gap:8px;" x-show="gitTimerMissing()">
+                              <span>Not installed — pushes still wake the poll, but nothing catches a missed wake</span>
+                              <button class="btn btn-sm" x-show="canEdit()" @click="gitInstallTimer()" :disabled="gitBusy" x-text="gitBusy ? 'Installing…' : 'Install'"></button>
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div role="alert" class="stale-banner" x-show="gitShow.trigger && gitShow.trigger.refused_head">
+                    <span x-text="'A force-pushed head was refused (' + shortHash(gitShow.trigger ? gitShow.trigger.refused_head : '') + '). The poll stays refused until the watermark is reset.'"></span>
+                  </div>
+                  <div class="btn-group" x-show="canEdit()">
+                    <button class="btn" @click="gitRetry()" :disabled="gitBusy">Retry failed commit</button>
+                    <button class="btn" x-show="gitShow.trigger && gitShow.trigger.refused_head" @click="gitResetWatermark()" :disabled="gitBusy">Reset watermark</button>
+                  </div>
+                  <p class="card-meta">The server's poll is the only admitter: it deduplicates commits, requires each new head to descend from the last admitted one, and deploys what passes. Edit the <span class="mono">git:</span> block in Settings to change repository, branch or poll interval.</p>
                 </div>
               </template>
             </div>
@@ -1896,7 +2080,7 @@
           <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button class="btn btn-sm" @click="webhookSecret = ''">Hide</button></div>
           <h3>Recent deliveries</h3>
           <template x-for="delivery in selected.deliveries || []" :key="delivery.id + delivery.received_at"><p><code x-text="delivery.commit"></code> <span x-text="delivery.disposition"></span> <span x-text="delivery.reason"></span></p></template>
-          <p class="card-meta">Pushes are recorded here, but nothing deploys until an app is connected to the repository (coming soon).</p>
+          <p class="card-meta">Pushes to a repository an app builds from wake that app's server-side poll (which decides what deploys); every authenticated push is recorded here.</p>
         </section>
       </template>
     </div>

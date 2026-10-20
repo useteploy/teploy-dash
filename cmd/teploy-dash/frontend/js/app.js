@@ -1015,6 +1015,25 @@ document.addEventListener('alpine:init', () => {
     // way; this only picks the metadata-first panel shape.
     caps: null,
 
+    // ── Git source / repository tab (server-authority D4) ──
+    // Everything below is a view over the CLI's answers (config source
+    // show/key/host-key, trigger reset/retry/install-timer); dash holds no
+    // app facts. The connect wizard drives the existing CAS config PUT for
+    // the git: block, then the key, host-key and registration endpoints.
+    gitShow: null,
+    gitShowLoading: false,
+    gitShowError: '',
+    gitTimer: null,
+    // Wizard step: '' (idle), 'form', 'hostkey', 'done'.
+    gitStep: '',
+    gitForm: {forge: 'github', repository: '', branch: 'main'},
+    gitKeyInfo: null,
+    gitHostKeys: null,
+    gitExpectedFingerprint: '',
+    gitRegister: null,
+    gitBusy: false,
+    gitError: '',
+
     canRevealSecrets() {
       if (this.caps === null) return true; // unknown: let the server answer
       return this.caps.includes('*') || this.caps.includes('reveal.secrets');
@@ -1048,6 +1067,7 @@ document.addEventListener('alpine:init', () => {
       this.envVars = [];
       this.configAuthority = null;
       this.resetSettings();
+      this.resetGitSource();
       this.events = [];
       this.eventsError = '';
       this.eventsLoading = false;
@@ -1620,12 +1640,262 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // ── Git source / repository tab (server-authority D4) ──
+    // The CLI is the authority for everything here: status is
+    // `config source show --json`, the connect wizard writes the git:
+    // block through the same CAS PUT the Settings editor uses, and the
+    // key/host-key/register endpoints shell out to the CLI. Nothing is
+    // stored dash-side.
+
+    resetGitSource() {
+      this.gitShow = null;
+      this.gitShowLoading = false;
+      this.gitShowError = '';
+      this.gitTimer = null;
+      this.gitStep = '';
+      this.gitForm = {forge: 'github', repository: '', branch: 'main'};
+      this.gitKeyInfo = null;
+      this.gitHostKeys = null;
+      this.gitExpectedFingerprint = '';
+      this.gitRegister = null;
+      this.gitBusy = false;
+      this.gitError = '';
+    },
+
+    gitSourceConnected() {
+      return !!(this.gitShow && this.gitShow.repository);
+    },
+
+    async loadGitSource() {
+      if (!this.hasFeature('git_source') || !this.teployHome()) return;
+      const target = this.resource;
+      this.gitShowLoading = true;
+      this.gitShowError = '';
+      try {
+        const [show, timer] = await Promise.all([
+          api.get(`${this.appPath()}/source`),
+          api.get(`${this.appPath()}/source/timer`).catch(() => null),
+        ]);
+        if (this.resource !== target) return; // F058
+        this.gitShow = show || null;
+        this.gitTimer = timer || null;
+      } catch (e) {
+        if (this.resource === target) this.gitShowError = e.message;
+      }
+      if (this.resource === target) this.gitShowLoading = false;
+    },
+
+    gitTimerMissing() {
+      return !!(this.gitTimer && this.gitTimer.known && !this.gitTimer.installed);
+    },
+
+    async gitInstallTimer() {
+      const target = this.resource;
+      this.gitBusy = true;
+      this.gitError = '';
+      try {
+        await api.post(`${this.appPath()}/source/install-timer`, {});
+        if (this.resource !== target) return;
+        showToast('Server poll timer installed', 'success');
+        this.gitTimer = await api.get(`${this.appPath()}/source/timer`).catch(() => null);
+      } catch (e) {
+        if (this.resource === target) this.gitError = e.message;
+      }
+      if (this.resource === target) this.gitBusy = false;
+    },
+
+    // setGitBlock returns the config content with the git: block set to
+    // (repository, branch): an existing top-level block (block or flow
+    // style) is replaced in place, otherwise the block is appended. The
+    // server's CAS PUT validates the result; anything unusual surfaces as
+    // a config-invalid refusal the Settings editor can finish by hand.
+    setGitBlock(content, repository, branch) {
+      const block = `git:\n  repository: ${repository}\n  branch: ${branch}\n`;
+      const lines = String(content || '').split('\n');
+      const out = [];
+      let i = 0, replaced = false;
+      while (i < lines.length) {
+        const line = lines[i];
+        if (!replaced && (/^git\s*:(\s*(#.*)?)?$/.test(line) || /^git\s*:\s*\{.*\}\s*(#.*)?$/.test(line))) {
+          out.push(block.replace(/\n$/, ''));
+          replaced = true;
+          // Consume the replaced block's indented body (block style only).
+          if (!/\{.*\}/.test(line)) {
+            i++;
+            while (i < lines.length && (lines[i].trim() === '' || /^[ \t]/.test(lines[i]))) i++;
+          } else {
+            i++;
+          }
+          continue;
+        }
+        out.push(line);
+        i++;
+      }
+      let next = out.join('\n');
+      if (!replaced) next = next.trimEnd() + (next.trimEnd() ? '\n' : '') + block;
+      if (!next.endsWith('\n')) next += '\n';
+      return next;
+    },
+
+    // gitWriteConfig PUTs the git: block through the CAS config endpoint
+    // (merge on conflict, --unprivileged for non-admins — the same path
+    // the Settings editor uses). One merge retry: a concurrent edit that
+    // the CLI merged key-by-key is saved against the merged commit.
+    async gitWriteConfig(repository, branch) {
+      let cfg = await api.get(`${this.appPath()}/config`);
+      const put = (content, expect) => api.put(`${this.appPath()}/config`, {content, expect});
+      try {
+        return await put(this.setGitBlock(cfg.content, repository, branch), cfg.commit);
+      } catch (e) {
+        const merge = e.status === 409 && e.payload && e.payload.merge;
+        if (merge && typeof merge.merged === 'string') {
+          return await put(this.setGitBlock(merge.merged, repository, branch), merge.current);
+        }
+        throw e;
+      }
+    },
+
+    gitConnectStart() {
+      this.gitError = '';
+      this.gitKeyInfo = null;
+      this.gitHostKeys = null;
+      this.gitExpectedFingerprint = '';
+      this.gitRegister = null;
+      this.gitStep = 'form';
+    },
+
+    gitCancelConnect() {
+      this.gitStep = '';
+      this.gitError = '';
+    },
+
+    // Step 1: write the git: block, then generate the deploy key on the
+    // server (its private half never leaves the server).
+    async gitConnectSubmit() {
+      const target = this.resource;
+      const {repository, branch} = this.gitForm;
+      if (!repository || !branch) {
+        this.gitError = 'Repository and branch are required';
+        return;
+      }
+      this.gitBusy = true;
+      this.gitError = '';
+      try {
+        await this.gitWriteConfig(repository.trim(), branch.trim());
+        if (this.resource !== target) return;
+        const key = await api.post(`${this.appPath()}/source/key`, {type: 'ssh'});
+        if (this.resource !== target) return;
+        this.gitKeyInfo = key || null;
+        this.gitStep = 'hostkey';
+      } catch (e) {
+        if (this.resource === target) this.gitError = e.message;
+      }
+      if (this.resource === target) this.gitBusy = false;
+    },
+
+    // Step 2: pin the forge's SSH host key. Without an expected
+    // fingerprint the pin is trust-on-first-use; the fingerprints are then
+    // shown for confirmation, and a mismatch can be re-pinned against the
+    // verified fingerprint.
+    async gitPinHostKey(expected) {
+      const target = this.resource;
+      this.gitBusy = true;
+      this.gitError = '';
+      try {
+        const body = {};
+        if (expected) body.expected_fingerprint = expected.trim();
+        const res = await api.post(`${this.appPath()}/source/host-key`, body);
+        if (this.resource !== target) return;
+        this.gitHostKeys = res || null;
+        this.gitExpectedFingerprint = '';
+      } catch (e) {
+        if (this.resource === target) this.gitError = e.message;
+      }
+      if (this.resource === target) this.gitBusy = false;
+    },
+
+    // Confirmation gate: the pinned fingerprints must match what the forge
+    // publishes before the webhook registration continues.
+    async gitConfirmHostKeys() {
+      const fingerprints = (this.gitHostKeys && this.gitHostKeys.host_key_fingerprints) || [];
+      const question = `The forge's host keys are pinned:\n\n${fingerprints.join('\n')}\n\nVerify they match the fingerprints your forge publishes, then confirm to finish the connection.`;
+      if (!confirm(question)) return;
+      const target = this.resource;
+      this.gitBusy = true;
+      this.gitError = '';
+      try {
+        const res = await api.post(`${this.appPath()}/source/register`, {
+          forge: this.gitForm.forge,
+          repository: this.gitForm.repository.trim(),
+          branch: this.gitForm.branch.trim(),
+          webhook_base: window.location.origin,
+          public_key: (this.gitKeyInfo && this.gitKeyInfo.public_key) || '',
+        });
+        if (this.resource !== target) return;
+        this.gitRegister = res || null;
+        this.gitStep = 'done';
+      } catch (e) {
+        if (this.resource === target) this.gitError = e.message;
+      }
+      if (this.resource === target) this.gitBusy = false;
+    },
+
+    async gitFinishConnect() {
+      this.gitStep = '';
+      this.gitRegister = null;
+      await this.loadGitSource();
+      await this.loadConfigAuthority();
+    },
+
+    // Retry: `trigger retry` clears a failed commit's retry budget and
+    // polls immediately.
+    async gitRetry() {
+      const target = this.resource;
+      if (!confirm(`Poll ${target.name} now? A commit that exhausted its retry budget is polled again.`)) return;
+      this.gitBusy = true;
+      this.gitError = '';
+      try {
+        const res = await api.post(`${this.appPath()}/source/retry`, {});
+        if (this.resource !== target) return;
+        showToast(res && res.admitted ? `Deployed ${this.shortHash(res.deployed_release || res.head)}` : `Poll: ${res && res.reason ? res.reason : 'done'}`, res && res.admitted ? 'success' : 'info');
+        await this.loadGitSource();
+        await this.loadStatus();
+      } catch (e) {
+        if (this.resource === target) this.gitError = e.message;
+      }
+      if (this.resource === target) this.gitBusy = false;
+    },
+
+    // Reset watermark (after a force-push): typed confirmation of the ref.
+    async gitResetWatermark() {
+      const ref = (this.gitShow && this.gitShow.trigger && this.gitShow.trigger.ref) || '';
+      if (!ref) return;
+      const typed = prompt(`Reset the watermark for ${ref}?\n\nThe next poll admits the CURRENT head even if it does not descend from the last admitted commit (needed after a force-push). Type the ref to confirm:`, '');
+      if (typed === null || typed.trim() !== ref) {
+        if (typed !== null) showToast('Type the ref exactly to confirm', 'error');
+        return;
+      }
+      const target = this.resource;
+      this.gitBusy = true;
+      this.gitError = '';
+      try {
+        await api.post(`${this.appPath()}/source/reset-watermark`, {ref, confirm: typed.trim()});
+        if (this.resource !== target) return;
+        showToast('Watermark reset — the next poll admits the current head', 'success');
+        await this.loadGitSource();
+      } catch (e) {
+        if (this.resource === target) this.gitError = e.message;
+      }
+      if (this.resource === target) this.gitBusy = false;
+    },
+
     async switchTab(t) {
       this.tab = t;
       if (t === 'env') await this.loadEnv();
       if (t === 'deploys') await this.loadLog();
       if (t === 'general') await this.loadAccessories();
       if (t === 'settings') await this.loadSettings();
+      if (t === 'repository') await this.loadGitSource();
       if (t === 'activity') await this.loadEvents();
       if (t === 'logs') this.$nextTick(() => this.$dispatch('start-logs'));
       // Lazy: an SSH round trip per open, never part of init().

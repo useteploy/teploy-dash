@@ -4,6 +4,30 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+- **Git sources: webhook relay and the Repository tab (server-authority
+  D4, dash side; needs teploy CLI v0.1.45+).** One admitter lives on the
+  app's server — `teploy trigger poll` — and webhooks only wake it. A
+  verified webhook push for a repository an app builds from runs
+  `trigger poll --app X --host S --now --hint <sha>` and records the
+  result in the delivery ledger; dash re-verifies its repo→app routing
+  hints (a persisted cache under the data dir) against the app's config
+  before relaying, answers the forge immediately (a deploying poll
+  outlives forge timeouts) and never retries a failed wake — the server's
+  own poll timer catches missed ones. The app page gains a **Repository**
+  tab (Teploy-home apps only, hidden with an older CLI): connect a
+  repository (forge + clone URL + branch; the `git:` block is written
+  through the same CAS settings editor path), generate the read-only
+  deploy key on the server, pin the forge host key with the fingerprints
+  shown for confirmation, and register deploy key + push webhook through
+  the forge API when dash holds a credential for that repository —
+  otherwise both are shown for the operator to paste (webhook secret to
+  credential-admins only). Status shows the connected repository, the
+  credential fingerprint, the last admitted commit (watermark) and the
+  last deployed release, with retry (typed-ref watermark reset is offered
+  when a force-push is refused) and the doctor-driven offer to install
+  the server poll timer.
+
 ### Removed
 - **Dash-side manifest store and the D04 webhook-to-deploy pipeline.**
   App settings live on the app's server (Settings tab / `teploy config`),
@@ -16,10 +40,11 @@ All notable changes to teploy-dash are recorded here.
   retrying or re-submitting them is refused cleanly. Registered git
   sources keep their forge plumbing: credentials, webhook secrets,
   per-forge signature checks, the durable delivery ledger and push-head
-  verification. Authenticated pushes are recorded as ignored — "no app is
-  connected to this repository yet" — until connecting an app to a
-  repository ships (server-authority P3); pull request deliveries answer
-  that previews are not supported yet. The Teploy-home env guard moved to
+  verification. Authenticated pushes are relayed to the connected app's
+  server-side poll (see the git-sources entry above) and recorded as
+  ignored — "no app is connected to this repository yet" — when no app
+  builds from the repository; pull request deliveries answer that
+  previews are not supported yet. The Teploy-home env guard moved to
   `internal/configkeys` and now also guards the MCP env tools.
 
 ## [0.1.17] - 2026-10-19
