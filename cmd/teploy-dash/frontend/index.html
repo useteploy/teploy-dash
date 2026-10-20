@@ -44,6 +44,31 @@
        task; URLs are unchanged (aliases /projects /fleet /activity also
        deep-link here). -->
   <ul class="navbar-nav" id="primary-nav" :class="{ open: menuOpen }" @click="if ($event.target.closest('a')) menuOpen = false">
+    <!-- Phones: the header has no room for pinned links, so they open from
+         the menu as named tiles (hidden on wider screens, where the header
+         shows them as icons). -->
+    <li class="nav-pins" x-data="navLinks" x-show="items.length > 0" x-cloak>
+      <div class="nav-pins-label">Pinned</div>
+      <div class="nav-pins-grid">
+        <template x-for="item in items" :key="item.id">
+          <a class="nav-pin" :href="item.url" target="_blank" rel="noopener" :title="item.description ? item.name + ' — ' + item.description : item.name">
+            <span class="nav-link" :class="{ 'dark-icon': item.dark_icon && !linkGlyph(item) }" aria-hidden="true">
+              <template x-if="linkGlyph(item)">
+                <svg class="nav-link-glyph" viewBox="0 0 24 24" fill="currentColor"><path :d="linkGlyph(item)"></path></svg>
+              </template>
+              <template x-if="!linkGlyph(item)">
+                <img class="nav-link-favicon" :src="faviconUrl(item.url)" alt=""
+                     :style="item._faviconFailed ? 'display:none' : ''"
+                     @error="faviconError(item, $el)">
+              </template>
+              <span class="nav-link-letters" :style="`background:${item.color || '#3b82f6'};${item._faviconFailed && !linkGlyph(item) ? '' : 'display:none'}`"
+                    x-text="iconLetters(item.name)"></span>
+            </span>
+            <span class="nav-pin-name" x-text="item.name"></span>
+          </a>
+        </template>
+      </div>
+    </li>
     <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" :aria-current="$store.router.page === 'homepage' ? 'page' : null" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
     <li><a href="#" title="Groups, projects, and the apps deployed to them" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" :aria-current="['projects', 'project-detail', 'app-detail'].includes($store.router.page) ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Projects</a></li>
     <li><a href="#" title="Every server this dash manages — health, host detail, routes" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" :aria-current="$store.router.page === 'servers' || $store.router.page === 'server-detail' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Fleet</a></li>
@@ -81,20 +106,6 @@
       </a>
     </template>
   </div>
-  <!-- Theme toggle: shows the theme it switches TO. -->
-  <button class="icon-btn theme-toggle" @click="$store.theme.toggle()"
-          :title="$store.theme.mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
-          :aria-label="$store.theme.mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'">
-    <svg x-show="$store.theme.mode === 'dark'" width="15" height="15" viewBox="0 0 24 24" fill="none"
-         stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="4.2"></circle>
-      <path d="M12 2.6v2.2M12 19.2v2.2M4.2 12H2M22 12h-2.2M6.4 6.4 4.9 4.9M19.1 19.1l-1.5-1.5M17.6 6.4l1.5-1.5M4.9 19.1l1.5-1.5"></path>
-    </svg>
-    <svg x-show="$store.theme.mode !== 'dark'" width="15" height="15" viewBox="0 0 24 24" fill="none"
-         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M20.5 14.4A8.6 8.6 0 0 1 9.6 3.5a8.6 8.6 0 1 0 10.9 10.9Z"></path>
-    </svg>
-  </button>
   <!-- Narrow screens: the primary nav collapses behind this toggle into a
        drop-down panel under the header. Hidden on desktop. -->
   <button class="icon-btn nav-toggle" @click="menuOpen = !menuOpen" @click.outside="menuOpen = false"
@@ -2780,6 +2791,15 @@
 
       <template x-if="!loading && tab === 'account'">
         <div style="max-width: 420px;">
+          <!-- Appearance: stored in this browser only. -->
+          <div class="card" style="padding: 24px; cursor: default; margin-bottom: 16px;">
+            <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Appearance</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">Saved in this browser.</p>
+            <div class="segmented" role="group" aria-label="Theme">
+              <button type="button" class="btn" :class="{ 'btn-primary': $store.theme.mode === 'dark' }" :aria-pressed="($store.theme.mode === 'dark').toString()" @click="$store.theme.set('dark')">Dark</button>
+              <button type="button" class="btn" :class="{ 'btn-primary': $store.theme.mode === 'light' }" :aria-pressed="($store.theme.mode === 'light').toString()" @click="$store.theme.set('light')">Light</button>
+            </div>
+          </div>
           <div class="card" style="padding: 24px; cursor: default;">
             <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">Change password</h3>
             <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">After changing your password you will be signed out.</p>

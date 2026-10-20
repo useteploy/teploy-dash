@@ -621,7 +621,7 @@ func TestExecuteRefusesRepointedTarget(t *testing.T) {
 	<-commands
 	// ...admit a second operation against the same target while the first
 	// still holds it (the second's admission snapshot records 10.0.0.1)...
-	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
+	second, _, err := manager.Enqueue(deployRequest("web", "example/web:2"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +697,7 @@ func TestExecuteFollowsRenamedServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-commands
-	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
+	second, _, err := manager.Enqueue(deployRequest("web", "example/web:2"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +745,7 @@ func TestExecuteRefusesSameNameDifferentServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-commands
-	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
+	second, _, err := manager.Enqueue(deployRequest("web", "example/web:2"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +790,7 @@ func TestExecuteRefusesVanishedID(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-commands
-	second, _, err := manager.Enqueue(deployRequest("api", "example/api:1"), "", nil)
+	second, _, err := manager.Enqueue(deployRequest("web", "example/web:2"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -100,13 +100,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .navbar-spacer { flex: 1; }
 /* Pinned service links (top-right). Icon-only: the header is chrome, so these
    read as quiet affordances, not as navigation competing with the nav items. */
-.nav-links { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-right: 10px; padding-right: 12px; border-right: 1px solid var(--border); }
+.nav-links { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 /* A long pinned list must not push the theme toggle off-screen: the strip
    shrinks and scrolls sideways once the header runs out of room. */
 .nav-links { min-width: 0; flex-shrink: 1; overflow-x: auto; scrollbar-width: none; }
 .nav-links::-webkit-scrollbar { display: none; }
 .nav-link { flex: 0 0 auto; }
-.nav-link { display: flex; width: 34px; height: 34px; align-items: center; justify-content: center; border-radius: 8px; }
+.nav-link { display: flex; width: 34px; height: 34px; align-items: center; justify-content: center; border-radius: 8px; text-decoration: none; }
+a.nav-link:hover, a.nav-pin:hover { text-decoration: none; }
 a.nav-link:hover { background: var(--bg-card); }
 .nav-link-favicon { width: 20px; height: 20px; object-fit: contain; }
 /* Monochrome glyph: inherits the text colour, so it is white on the dark theme
@@ -304,6 +305,16 @@ tbody tr:hover { background: var(--bg-card-hover); }
 .source-detail p { margin-bottom: 6px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 code { overflow-wrap: anywhere; }
 
+/* Pinned links inside the phone menu (see the 640px block). */
+.nav-pins { display: none; }
+.nav-pins-label { padding: 6px 12px 4px; color: var(--text-muted); font-size: 12px; }
+.nav-pins-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 0 4px 6px; }
+.navbar-nav a.nav-pin { display: flex; min-height: 0; padding: 8px 4px; flex-direction: column; align-items: center; gap: 6px; font-size: 12px; }
+.nav-pin .nav-link { width: 40px; height: 40px; border: 1px solid var(--border); background: var(--bg-card); }
+.nav-pin-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.segmented { display: flex; gap: 8px; }
+.segmented .btn { flex: 1; justify-content: center; }
+
 /* Nav toggle: only shown once the primary nav collapses into a panel. */
 .nav-toggle { display: none; }
 
@@ -326,7 +337,6 @@ code { overflow-wrap: anywhere; }
   .navbar-nav.open { display: flex; }
   .navbar-nav a { display: flex; min-height: 44px; padding: 0 12px; align-items: center; font-size: 14px; }
   .navbar-nav .nav-sep { align-self: stretch; width: auto; height: 1px; margin: 4px 12px; }
-  .nav-links { margin-right: 0; padding-right: 8px; }
   .content { padding-top: 22px; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .dialog { max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); overflow-y: auto; }
@@ -335,6 +345,7 @@ code { overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   /* Header links are a convenience; on phones the header needs the width. */
   .nav-links { display: none; }
+  .nav-pins { display: block; padding-bottom: 6px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
   .content {
     min-height: calc(100vh - 56px);
     padding: 18px max(14px, env(safe-area-inset-right)) max(48px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
