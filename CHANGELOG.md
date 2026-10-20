@@ -46,6 +46,10 @@ All notable changes to teploy-dash are recorded here.
   Users gains a per-account "Revoke sessions" button.
 
 ### Changed
+- The theme choice moved from the header to Settings > Account
+  (Appearance: Dark / Light, saved in this browser).
+- On phones, pinned links appear at the top of the menu as named icon
+  tiles; the header itself stays brand + menu button.
 - Bundled teploy CLI v0.1.44; contracts corpus pin rev 13.
 - The CLI capability cache follows the binary's identity: an upgraded or
   replaced `teploy` is re-probed at once instead of after the TTL.

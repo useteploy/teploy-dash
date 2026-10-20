@@ -241,12 +241,15 @@ function initTheme() {
   return saved;
 }
 
-function toggleTheme() {
-  const current = document.documentElement.getAttribute('data-theme');
-  const next = current === 'dark' ? 'light' : 'dark';
+function setTheme(mode) {
+  const next = mode === 'light' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
   try { localStorage.setItem('teploy-theme', next); } catch {}
   return next;
+}
+
+function toggleTheme() {
+  return setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
 }
 
 // formatObservedAt renders a timestamp for humans; unparseable values pass
@@ -519,6 +522,9 @@ document.addEventListener('alpine:init', () => {
     mode: initTheme(),
     toggle() {
       this.mode = toggleTheme();
+    },
+    set(mode) {
+      this.mode = setTheme(mode);
     },
   });
 
