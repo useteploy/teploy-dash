@@ -110,9 +110,6 @@ func requiredCapabilities(method, path string) []string {
 		return appActionCapabilities(method, path)
 	}
 
-	if strings.HasPrefix(path, "/api/manifests/") && strings.HasSuffix(path, "/apply") {
-		return []string{caps.ExecuteDeploy}
-	}
 	if path == "/api/deploy" || path == "/api/templates/install" {
 		return []string{caps.ExecuteDeploy}
 	}

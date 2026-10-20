@@ -184,7 +184,7 @@ func TestCampaignFutureHTTPHistoryAndSSE(t *testing.T) {
 func TestCampaignCapabilityAlternateAdmissionAndOutput(t *testing.T) {
 	s := newCapsServer(t, t.TempDir())
 	seedPresetUsers(t, s)
-	for _, route := range []string{"/api/deploy", "/api/manifests/prod/web/apply", "/api/operations"} {
+	for _, route := range []string{"/api/deploy", "/api/operations"} {
 		if !caps.NewSet(requiredCapabilities("POST", route)...).Allow(caps.ExecuteDeploy) {
 			t.Fatalf("alternate admission unguarded: %s", route)
 		}
@@ -197,9 +197,9 @@ func TestCampaignCapabilityAlternateAdmissionAndOutput(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatal("metadata history denied")
 	}
-	request := withUser(httptest.NewRequest("POST", "/api/manifests/prod/web/apply", nil), &sessionInfo{caps: caps.NewSet(caps.ViewMetadata, caps.ExecuteMutate)})
+	request := withUser(httptest.NewRequest("POST", "/api/operations", nil), &sessionInfo{caps: caps.NewSet(caps.ViewMetadata, caps.ExecuteMutate)})
 	direct := httptest.NewRecorder()
-	s.enqueueOperation(direct, request, operation.Request{Kind: operation.KindManifestApply, Server: "prod", App: "web"})
+	s.enqueueOperation(direct, request, operation.Request{Kind: operation.KindDeploy, Server: "prod", App: "web"})
 	if direct.Code != 403 {
 		t.Fatalf("central admission: %d", direct.Code)
 	}
@@ -268,20 +268,6 @@ func TestCampaignServersNormalizeBothErasAndRejectUnknown(t *testing.T) {
 		}
 		if rec.Code != 200 || len(envelope.Data) != 1 || envelope.Data["prod"]["id"] != "srv-aaaaaaaaaaaaaaaa" || envelope.Data["prod"]["host"] != "127.0.0.1:1" {
 			t.Fatalf("wrong normalized servers: %+v", envelope)
-		}
-	}
-}
-
-func TestCampaignMCPSourceOwnedEnvRefuses(t *testing.T) {
-	s, cookie := newAuthorityServer(t)
-	putManifest(t, s, cookie, "prod", "web", `{"mode":"git-managed","git":{"repository":"https://github.com/acme/web","revision":"0123456789abcdef0123456789abcdef01234567"},"manifest":"app: web\nimage: example/web:1\nenv:\n  RAILS_ENV: production\n"}`)
-	backend := mcpBackend{s: s}
-	for _, call := range []func() (string, error){func() (string, error) {
-		return backend.SetEnv(context.Background(), "prod", "web", "RAILS_ENV", "test")
-	}, func() (string, error) { return backend.UnsetEnv(context.Background(), "prod", "web", "RAILS_ENV") }} {
-		_, err := call()
-		if err == nil || !strings.Contains(err.Error(), "git-managed") {
-			t.Fatalf("source-owned MCP edit: %v", err)
 		}
 	}
 }

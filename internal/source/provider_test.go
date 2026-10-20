@@ -95,8 +95,6 @@ func TestSourceProviderProcess(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"full_name": "owner/repo"})
 		case "/repos/owner/repo/branches":
 			json.NewEncoder(w).Encode([]any{})
-		case "/repos/owner/repo/pulls/9":
-			json.NewEncoder(w).Encode(map[string]any{"state": "open", "updated_at": "2026-10-07T12:00:00Z", "head": map[string]any{"sha": strings.Repeat("a", 40), "repo": map[string]any{"full_name": "owner/repo"}}, "base": map[string]any{"repo": map[string]any{"full_name": "owner/repo"}}})
 		case "/redirect":
 			http.Redirect(w, r, "http://127.0.0.1:1/secret", 302)
 		default:
@@ -143,12 +141,14 @@ func providerFixture(t *testing.T) (*Providers, *Source, string) {
 	origin := startProviderProcess(t, keyFile)
 	p := &Providers{Path: filepath.Join(dir, "providers.json")}
 	src := &Source{Forge: ForgeGitHub, CloneURL: "https://github.com/owner/repo", CredentialRef: "app"}
-	v := Provider{Forge: ForgeGitHub, Repository: src.CloneURL, APIURL: origin, AllowPrivate: true, PrivateKeyFile: keyFile, AppID: 42, InstallationID: 7, Preview: &PreviewPolicy{}}
+	v := Provider{Forge: ForgeGitHub, Repository: src.CloneURL, APIURL: origin, AllowPrivate: true, PrivateKeyFile: keyFile, AppID: 42, InstallationID: 7}
 	b, _ := json.Marshal(map[string]Provider{"app": v})
+	// A pre-removal file carrying the old preview policy still parses.
+	b = []byte(strings.Replace(string(b), `"forge":`, `"preview":{"manifest_file":"/etc/teploy/preview.yml","base_domain":"preview.example","allow_ips":["192.0.2.1"],"ttl":"24h"},"forge":`, 1))
 	os.WriteFile(p.Path, b, 0600)
 	return p, src, origin
 }
-func TestProviderAppRemoteContractAndReplayFence(t *testing.T) {
+func TestProviderAppRemoteContractAndRotation(t *testing.T) {
 	p, src, _ := providerFixture(t)
 	ctx := context.Background()
 	if e := p.Verify(ctx, src); e != nil {
@@ -159,18 +159,8 @@ func TestProviderAppRemoteContractAndReplayFence(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer a.Close()
-	sha := strings.Repeat("a", 40)
-	stamp := "2026-10-07T12:00:00Z"
-	if e = a.Pull(ctx, src, 9, sha, stamp, false); e != nil {
-		t.Fatal(e)
-	}
-	for _, input := range []struct {
-		sha, stamp string
-		closed     bool
-	}{{strings.Repeat("b", 40), stamp, false}, {sha, "2026-10-06T12:00:00Z", false}, {sha, stamp, true}} {
-		if e = a.Pull(ctx, src, 9, input.sha, input.stamp, input.closed); e == nil {
-			t.Fatal("stale or closed delivery passed")
-		}
+	if a.Token != "fixture-install-token" {
+		t.Fatal("App installation token not minted")
 	}
 	// Rotation is read at use. No cached token can hide installation removal.
 	b, _ := os.ReadFile(p.Path)
@@ -355,5 +345,30 @@ func TestPushHeadGenericAuthorityClassifications(t *testing.T) {
 				t.Fatalf("malformed output %q classified %v, want retryable invalid observation", tc.text, e)
 			}
 		})
+	}
+}
+
+func TestProviderPolicyIgnoresLegacyPreviewKeyButNotOtherUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "providers.json")
+	src := &Source{Forge: ForgeGitHub, CloneURL: "https://github.com/owner/repo", CredentialRef: "pat"}
+	legacy := `{"pat":{"forge":"github","repository":"https://github.com/owner/repo","token_env":"FIXTURE_TOKEN","preview":{"manifest_file":"/x","base_domain":"p.example","allow_ips":["192.0.2.1"],"ttl":"1h"}}}`
+	if e := os.WriteFile(path, []byte(legacy), 0600); e != nil {
+		t.Fatal(e)
+	}
+	p := &Providers{Path: path}
+	v, e := p.Policy(src)
+	if e != nil {
+		t.Fatalf("legacy preview key refused: %v", e)
+	}
+	if v.TokenEnv != "FIXTURE_TOKEN" || v.APIURL != "https://api.github.com" {
+		t.Fatalf("policy = %+v", v)
+	}
+	unknown := `{"pat":{"forge":"github","repository":"https://github.com/owner/repo","token_env":"FIXTURE_TOKEN","surprise":true}}`
+	if e = os.WriteFile(path, []byte(unknown), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = p.Policy(src); e == nil {
+		t.Fatal("unknown provider field accepted")
 	}
 }

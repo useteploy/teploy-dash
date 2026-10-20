@@ -154,9 +154,7 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		// The retry is re-authorized by the caller, so it is attributed to
 		// them; RetryOf on the new record preserves the lineage.
-		s.sourceActionMu.Lock()
 		op, err := s.operations.Retry(id, actorFromRequest(r))
-		s.sourceActionMu.Unlock()
 		if err != nil {
 			writeOperationError(w, err)
 			return
@@ -168,15 +166,8 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enqueueOperation(w http.ResponseWriter, r *http.Request, request operation.Request) {
-	if request.SourceID != "" {
-		s.sourceActionMu.Lock()
-		defer s.sourceActionMu.Unlock()
-	}
 	noStore(w)
 	required := caps.ExecuteDeploy
-	if request.Kind == operation.KindManifestPlan || request.Kind == operation.KindManifestValidate {
-		required = caps.ExecuteMutate
-	}
 	if actor := actorFromRequest(r); actor != nil && !caps.NewSet(actor.Capabilities...).Allow(required) {
 		writeErrorStatus(w, "missing capability: "+required, http.StatusForbidden)
 		return

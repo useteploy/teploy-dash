@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,23 +32,24 @@ var ErrStaleAuthority = errors.New("source event no longer authoritative")
 func IsStaleAuthority(err error) bool { return errors.Is(err, ErrStaleAuthority) }
 
 type Provider struct {
-	Forge          Forge          `json:"forge"`
-	Repository     string         `json:"repository"`
-	APIURL         string         `json:"api_url,omitempty"`
-	TokenFile      string         `json:"token_file,omitempty"`
-	TokenEnv       string         `json:"token_env,omitempty"`
-	Username       string         `json:"username,omitempty"`
-	AppID          int64          `json:"app_id,omitempty"`
-	InstallationID int64          `json:"installation_id,omitempty"`
-	PrivateKeyFile string         `json:"private_key_file,omitempty"`
-	AllowPrivate   bool           `json:"allow_private,omitempty"`
-	Preview        *PreviewPolicy `json:"preview,omitempty"`
+	Forge          Forge  `json:"forge"`
+	Repository     string `json:"repository"`
+	APIURL         string `json:"api_url,omitempty"`
+	TokenFile      string `json:"token_file,omitempty"`
+	TokenEnv       string `json:"token_env,omitempty"`
+	Username       string `json:"username,omitempty"`
+	AppID          int64  `json:"app_id,omitempty"`
+	InstallationID int64  `json:"installation_id,omitempty"`
+	PrivateKeyFile string `json:"private_key_file,omitempty"`
+	AllowPrivate   bool   `json:"allow_private,omitempty"`
 }
-type PreviewPolicy struct {
-	ManifestFile string   `json:"manifest_file"`
-	BaseDomain   string   `json:"base_domain"`
-	AllowIPs     []string `json:"allow_ips"`
-	TTL          string   `json:"ttl"`
+
+// providerEntry is the on-disk shape. "preview" configured the removed
+// pull-request preview pipeline; existing files still parse and the key is
+// ignored.
+type providerEntry struct {
+	Provider
+	Preview json.RawMessage `json:"preview,omitempty"`
 }
 type Providers struct{ Path string }
 type Access struct {
@@ -83,16 +85,20 @@ func (p *Providers) Policy(src *Source) (Provider, error) {
 	if e != nil {
 		return Provider{}, e
 	}
-	var entries map[string]Provider
+	var entries map[string]providerEntry
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if d.Decode(&entries) != nil || d.Decode(new(any)) != io.EOF {
 		return Provider{}, fmt.Errorf("invalid source provider configuration")
 	}
-	v, ok := entries[src.CredentialRef]
+	entry, ok := entries[src.CredentialRef]
 	if !ok {
 		return Provider{}, fmt.Errorf("unknown named source provider")
 	}
+	if len(entry.Preview) > 0 {
+		log.Printf("[source] provider %q has a \"preview\" policy; pull request previews were removed and the key is ignored", src.CredentialRef)
+	}
+	v := entry.Provider
 	repo, e := CanonicalURL(v.Repository)
 	want, we := CanonicalURL(src.CloneURL)
 	if e != nil || we != nil || repo != want || v.Forge != src.Forge {
@@ -315,9 +321,6 @@ func (p *Providers) Resolve(ctx context.Context, src *Source) (*Access, error) {
 			return nil, fmt.Errorf("GitHub repository must be owner/name")
 		}
 		permissions := map[string]string{"contents": "read"}
-		if v.Preview != nil {
-			permissions["pull_requests"] = "read"
-		}
 		var token struct {
 			Token        string            `json:"token"`
 			Expires      time.Time         `json:"expires_at"`
@@ -337,9 +340,6 @@ func (p *Providers) Resolve(ctx context.Context, src *Source) (*Access, error) {
 			if (k == "metadata" && val != "read") || (k != "metadata" && permissions[k] != val) {
 				return nil, fmt.Errorf("App token permissions exceed requested scope")
 			}
-		}
-		if v.Preview != nil && token.Permissions["pull_requests"] != "read" {
-			return nil, fmt.Errorf("App token lacks pull request permission")
 		}
 		a.Token = token.Token
 	}
@@ -395,54 +395,6 @@ func (a *Access) Close() {
 		a.Client.CloseIdleConnections()
 	}
 	a.Token = ""
-}
-
-// Pull authority is queried at execution, including retries. A signed old delivery
-// cannot redeploy after close or after the review head changes.
-func (a *Access) Pull(ctx context.Context, src *Source, number int, sha string, updatedAt string, closed bool) error {
-	if a.Provider.Forge != ForgeGitHub || a.Provider.PrivateKeyFile == "" || a.Provider.Preview == nil {
-		return fmt.Errorf("previews require a configured GitHub App policy")
-	}
-	u, _ := url.Parse(src.CloneURL)
-	repo := strings.Trim(u.Path, "/")
-	var pr struct {
-		State     string    `json:"state"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Head      struct {
-			SHA  string `json:"sha"`
-			Repo *struct {
-				FullName string `json:"full_name"`
-			} `json:"repo"`
-		} `json:"head"`
-		Base struct {
-			Repo struct {
-				FullName string `json:"full_name"`
-			} `json:"repo"`
-		} `json:"base"`
-	}
-	if number <= 0 {
-		return fmt.Errorf("invalid pull request number")
-	}
-	if e := a.call(ctx, "GET", "/repos/"+repo+"/pulls/"+strconv.Itoa(number), nil, &pr); e != nil {
-		return e
-	}
-	admittedTime, timestampErr := time.Parse(time.RFC3339Nano, updatedAt)
-	if timestampErr != nil || !pr.UpdatedAt.Equal(admittedTime) {
-		return fmt.Errorf("%w: pull request lifecycle delivery is stale", ErrStaleAuthority)
-	}
-	if !strings.EqualFold(pr.Base.Repo.FullName, repo) {
-		return fmt.Errorf("%w: pull request base repository mismatch", ErrStaleAuthority)
-	}
-	if closed {
-		if pr.State != "closed" {
-			return fmt.Errorf("%w: pull request is not closed", ErrStaleAuthority)
-		}
-		return nil
-	}
-	if pr.State != "open" || pr.Head.SHA != sha || pr.Head.Repo == nil || !strings.EqualFold(pr.Head.Repo.FullName, repo) {
-		return fmt.Errorf("%w: pull request head is stale, closed, or from an untrusted fork", ErrStaleAuthority)
-	}
-	return nil
 }
 
 // PushHead binds a signed payload to the live forge ref. Commit timestamps are

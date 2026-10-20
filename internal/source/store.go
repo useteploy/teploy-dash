@@ -111,8 +111,9 @@ type Delivery struct {
 
 // Store persists sources under <dataDir>/sources/<id>/ — metadata.json and
 // webhook-secret via durable whole-file replacement, deliveries as an
-// append-only JSONL ledger. Like the manifest store, it is a data-dir
-// store in BOTH backend modes.
+// append-only JSONL ledger. It is a data-dir store in BOTH backend modes.
+// A lifecycle.json left by the removed deploy pipeline is ignored and goes
+// with the directory on Delete.
 type Store struct {
 	mu         sync.Mutex
 	root       string
@@ -204,13 +205,6 @@ func (s *Store) Create(input CreateInput) (*CreatedSource, error) {
 	}
 	if err := durable.Replace(filepath.Join(s.dir(id), "webhook-secret"), []byte(secret+"\n"), 0600); err != nil {
 		return nil, fmt.Errorf("persist webhook secret: %w", err)
-	}
-	initialLifecycle, err := json.Marshal(&Lifecycle{Version: 1, Watermarks: map[string]Watermark{}, Previews: map[string]PreviewOwnership{}})
-	if err != nil {
-		return nil, err
-	}
-	if err = durable.Replace(filepath.Join(s.dir(id), "lifecycle.json"), initialLifecycle, 0600); err != nil {
-		return nil, fmt.Errorf("persist source lifecycle: %w", err)
 	}
 	if err := s.persist(source); err != nil {
 		return nil, err
