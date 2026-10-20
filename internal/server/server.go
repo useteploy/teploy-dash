@@ -115,11 +115,13 @@ type Config struct {
 	CLIRunner func(context.Context, ...string) (*cli.Result, error)
 	// CLIStdinRunner runs the CLI with stdin (config writes); tests inject
 	// it like CLIRunner. CLIIdentity fingerprints the CLI binary for the
-	// capability cache (tests pin it).
+	// capability cache (tests pin it). EnvStdinSupport probes the CLI's
+	// `env set KEY --stdin` contract the same way KVStdinSupport does.
 	CLIStdinRunner     func(context.Context, string, ...string) (*cli.Result, error)
 	CLIIdentity        func() string
 	CLIInstalled       func() bool
 	KVStdinSupport     func() (bool, error)
+	EnvStdinSupport    func() (bool, error)
 	RemoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
 	RemoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
 	// SourceCredentialVerifier checks a source's credential reference
@@ -2005,6 +2007,19 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		// keys its config declares. Metadata: names, never values.
 		s.handleConfigAuthority(w, r, serverName, appName)
 
+	case action == "releases" && r.Method == http.MethodGet:
+		// D5: the app's releases with rollback availability (the list the
+		// rollback-to action chooses from).
+		s.handleReleasesList(w, r, serverName, appName)
+
+	case action == "backups" && r.Method == http.MethodGet:
+		// D5: the app's backups and schedules, read from the CLI.
+		s.handleBackupsList(w, r, serverName, appName)
+
+	case action == "secrets" && r.Method == http.MethodGet:
+		// D5: secret key names (values are write-only; the CLI masks them).
+		s.handleSecretsList(w, r, serverName, appName)
+
 	case action == "env" && r.Method == "POST":
 		var body struct {
 			Key   string `json:"key"`
@@ -2018,16 +2033,22 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid env var name")
 			return
 		}
-		if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, body.Key) {
-			return
+		// Env guard: with the CLI's own guard (env-config-guard-v1) dash
+		// defers — the refusal comes from the CLI and its message is
+		// surfaced below. Older CLIs keep dash's local pre-check (409 for
+		// keys a Teploy-home config declares).
+		if !s.cliEnvGuardDeferred(r) {
+			if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, body.Key) {
+				return
+			}
 		}
 		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.EnvSet(r.Context(), s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value, s.requestActorArgs(r)...)
+		result, err := s.envSet(r, serverName, appName, body.Key, body.Value)
 		if err != nil {
-			writeError(w, err.Error())
+			writeEnvActionError(w, result, err)
 			return
 		}
 		writeData(w, result)
@@ -2038,19 +2059,26 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid env var name")
 			return
 		}
-		if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, key) {
-			return
+		// Same guard split as the set path above.
+		if !s.cliEnvGuardDeferred(r) {
+			if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, key) {
+				return
+			}
 		}
 		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.EnvUnset(s.serverHost(serverName), s.serverUser(serverName), appName, key, s.requestActorArgs(r)...)
+		result, err := s.envUnset(r, serverName, appName, key)
 		if err != nil {
-			writeError(w, err.Error())
+			writeEnvActionError(w, result, err)
 			return
 		}
 		writeData(w, result)
+
+	case strings.HasPrefix(action, "secrets/") && r.Method == "DELETE":
+		// D5: secret removal (the value was never displayed; the key goes).
+		s.handleSecretsDelete(w, r, serverName, appName, strings.TrimPrefix(action, "secrets/"))
 
 	case action == "log" && r.Method == "GET":
 		if !s.cliInstalled() {
@@ -2183,7 +2211,29 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		s.enqueueOperation(w, r, operation.Request{Kind: operation.KindRollback, Server: serverName, App: appName})
+		// D5: an optional {to} body targets a chosen release
+		// (rollback-json-v1); absent, the previous release as before.
+		to, err := decodeRollbackToBody(r)
+		if err != nil {
+			writeError(w, "invalid request body")
+			return
+		}
+		if to != "" && !s.requireFeatureMin(w, r, func(f machineFeatures) bool { return f.RollbackTo }, "Rolling back to a chosen release", "v0.1.45") {
+			return
+		}
+		s.enqueueOperation(w, r, operation.Request{Kind: operation.KindRollback, Server: serverName, App: appName, To: to})
+
+	case "redeploy":
+		s.handleRedeploy(w, r, serverName, appName)
+
+	case "secrets":
+		s.handleSecretsSet(w, r, serverName, appName)
+
+	case "backups/create":
+		s.handleBackupCreate(w, r, serverName, appName)
+
+	case "backups/restore":
+		s.handleBackupRestore(w, r, serverName, appName)
 
 	case "deploy":
 		// "Deploy pending changes" (spec §2.3): a Teploy-home app deploys
