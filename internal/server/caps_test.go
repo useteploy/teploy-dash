@@ -238,6 +238,18 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"POST", "/api/sources/src-0123456789abcdef/verify", []string{caps.AdministerCredentials}},
 		{"POST", "/api/sources/src-0123456789abcdef/rotate-secret", []string{caps.AdministerCredentials}},
 
+		// D4 git-source app routes: the state read is metadata; connect
+		// steps are app mutations; watermark resets, retries and the poll
+		// timer cause or enable deploys.
+		{"GET", "/api/apps/prod/web/source", []string{caps.ViewMetadata}},
+		{"GET", "/api/apps/prod/web/source/timer", []string{caps.ViewMetadata}},
+		{"POST", "/api/apps/prod/web/source/key", []string{caps.ExecuteMutate}},
+		{"POST", "/api/apps/prod/web/source/host-key", []string{caps.ExecuteMutate}},
+		{"POST", "/api/apps/prod/web/source/register", []string{caps.ExecuteMutate}},
+		{"POST", "/api/apps/prod/web/source/reset-watermark", []string{caps.ExecuteDeploy}},
+		{"POST", "/api/apps/prod/web/source/retry", []string{caps.ExecuteDeploy}},
+		{"POST", "/api/apps/prod/web/source/install-timer", []string{caps.ExecuteDeploy}},
+
 		// Dashboard-config mutations (monitors, groups, homepage) are
 		// execute.mutate.
 		{"POST", "/api/monitors", []string{caps.ExecuteMutate}},

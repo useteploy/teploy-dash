@@ -329,7 +329,15 @@ type Server struct {
 	sourceAccessResolver func(context.Context, *source.Source) (*source.Access, error)
 	sourceActionMu       sync.Mutex
 	sourceVerifier       func(context.Context, *source.Source) error
-	runCLI               cliRunner
+	routing              *source.Routing
+	routingInitErr       error
+	// relayInFlight dedupes webhook delivery ids whose relay goroutine has
+	// not finished recording yet (the ledger record lands after the poll).
+	relayInFlight map[string]bool
+	// gitTimer caches the doctor-derived poll-timer verdict per server.
+	gitTimerMu sync.Mutex
+	gitTimer   map[string]gitTimerEntry
+	runCLI     cliRunner
 	runCLIStdin          cliStdinRunner
 	cliIdentity          func() string
 	cliInstalled         func() bool
@@ -421,6 +429,11 @@ func New(config Config) *Server {
 	if s.sourceInitErr != nil {
 		log.Printf("sources: disabled: %v", s.sourceInitErr)
 	}
+	s.routing, s.routingInitErr = source.OpenRouting(config.DataDir)
+	if s.routingInitErr != nil {
+		log.Printf("sources: routing disabled: %v", s.routingInitErr)
+	}
+	s.relayInFlight = make(map[string]bool)
 	s.sourceAccessResolver = config.SourceAccessResolver
 	s.sourceProviders = &source.Providers{Path: os.Getenv("TEPLOY_DASH_SOURCE_PROVIDERS")}
 	s.sourceVerifier = config.SourceCredentialVerifier
@@ -1947,6 +1960,9 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.handleAppConfigRoutes(w, r, serverName, appName, action) {
+		return
+	}
+	if s.handleAppSourceRoutes(w, r, serverName, appName, action) {
 		return
 	}
 

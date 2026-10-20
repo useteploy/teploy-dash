@@ -68,6 +68,8 @@ type machineFeatures struct {
 	ConfigMerge        bool `json:"config_merge"`        // config-merge-v1
 	ConfigUnprivileged bool `json:"config_unprivileged"` // config-unprivileged-v1
 	DeployHome         bool `json:"deploy_home"`         // deploy-home-v1
+	GitSource          bool `json:"git_source"`          // git-source-v1
+	TriggerPoll        bool `json:"trigger_poll"`        // trigger-poll-v1
 }
 
 type capabilityError struct {
@@ -158,6 +160,8 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				value.Features.ConfigMerge = hasToken("config-merge-v1")
 				value.Features.ConfigUnprivileged = hasToken("config-unprivileged-v1")
 				value.Features.DeployHome = hasToken("deploy-home-v1")
+				value.Features.GitSource = hasToken("git-source-v1")
+				value.Features.TriggerPoll = hasToken("trigger-poll-v1")
 			}
 		} else {
 			// Pre-MI CLI (or version --json refused): the legacy path.
