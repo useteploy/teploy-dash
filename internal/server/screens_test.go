@@ -277,7 +277,7 @@ func TestScreenRouteClassification(t *testing.T) {
 		{http.MethodDelete, "/api/apps/prod/web/secrets/KEY", "execute.mutate"},
 		{http.MethodPost, "/api/apps/prod/web/redeploy", "execute.deploy"},
 		{http.MethodPost, "/api/apps/prod/web/backups/create", "execute.deploy"},
-		{http.MethodPost, "/api/apps/prod/web/backups/restore", "execute.deploy"},
+		{http.MethodPost, "/api/apps/prod/web/backups/restore", "restore.data"},
 	} {
 		if got := requiredCapabilities(tc.method, tc.path); len(got) != 1 || got[0] != tc.want {
 			t.Errorf("%s %s requires %v, want [%s]", tc.method, tc.path, got, tc.want)

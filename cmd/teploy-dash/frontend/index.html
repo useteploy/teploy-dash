@@ -1317,7 +1317,7 @@
                             <td x-text="formatBytes(b.size_bytes)"></td>
                             <td x-text="new Date(b.created_at).toLocaleString()"></td>
                             <td>
-                              <button x-show="canEdit() && b.restorable" class="btn btn-sm btn-danger" @click="openBackupRestore(b)">Restore</button>
+                              <button x-show="canRestoreData() && b.restorable" class="btn btn-sm btn-danger" @click="openBackupRestore(b)">Restore</button>
                             </td>
                           </tr>
                         </template>

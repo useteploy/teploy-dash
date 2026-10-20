@@ -1041,6 +1041,12 @@ document.addEventListener('alpine:init', () => {
       return this.caps.includes('*') || this.caps.includes('reveal.secrets');
     },
 
+    // Backup restore overwrites live data: restore.data, not execute.deploy.
+    canRestoreData() {
+      if (this.caps === null) return true; // unknown: let the server answer
+      return this.caps.includes('*') || this.caps.includes('restore.data');
+    },
+
     async init() {
       this.activateResource(Alpine.store('router').params);
       // Same-type navigation (app A -> app B) does not remount this
