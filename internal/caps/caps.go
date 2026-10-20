@@ -22,7 +22,7 @@ const (
 	// operation cancel/retry.
 	ExecuteDeploy = "execute.deploy"
 	// ExecuteMutate writes configuration: env/KV writes and dashboard-side
-	// config mutations (monitors, groups, homepage, manifests).
+	// config mutations (monitors, groups, homepage).
 	ExecuteMutate = "execute.mutate"
 	// RestoreData runs restore verifications and cutovers — destructive
 	// operations against backup data.

@@ -154,10 +154,9 @@ func IdentityKey(forge Forge, rawCloneURL string) (string, error) {
 	return string(forge) + "\x00" + strings.ToLower(normalized), nil
 }
 
-// CanonicalURL is the URL-only join key between sources and git-managed
-// manifests: transport-normalized and case-folded, without the forge kind
-// (the manifest's repository URL is already origin-qualified; F03's defect
-// was bare owner/repo lookups, not URL lookups).
+// CanonicalURL is the transport-normalized, case-folded URL join key
+// between a source and its repository, without the forge kind (F03's
+// defect was bare owner/repo lookups, not URL lookups).
 func CanonicalURL(rawCloneURL string) (string, error) {
 	normalized, err := NormalizeCloneURL(rawCloneURL)
 	if err != nil {

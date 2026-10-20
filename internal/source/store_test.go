@@ -216,6 +216,41 @@ func TestDeleteRemovesEverything(t *testing.T) {
 	}
 }
 
+// Create no longer writes lifecycle.json; one left by the removed deploy
+// pipeline is tolerated on load and removed with the source.
+func TestLegacyLifecycleFileToleratedAndDeleted(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := New(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(CreateInput{Forge: ForgeGitHub, CloneURL: "https://github.com/team/app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(dataDir, "sources", created.ID)
+	if _, err := os.Stat(filepath.Join(dir, "lifecycle.json")); !os.IsNotExist(err) {
+		t.Fatalf("Create wrote lifecycle.json: %v", err)
+	}
+	legacy := `{"schema":1,"watermarks":{"push:main":{"updated_at":"","commit":"` + strings.Repeat("a", 40) + `","closed":false}},"previews":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "lifecycle.json"), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(dataDir)
+	if err != nil {
+		t.Fatalf("reopen with legacy lifecycle: %v", err)
+	}
+	if _, err := reopened.Get(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Delete(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("source directory survived delete: %v", err)
+	}
+}
+
 // Creation bounds: unknown forge kinds, absurd branch names, and oversized
 // display names are rejected before anything touches disk.
 func TestCreateValidation(t *testing.T) {

@@ -12,19 +12,24 @@ var operationIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 type Kind string
 
 const (
-	KindDeploy               Kind = "deploy"
-	KindRollback             Kind = "rollback"
-	KindRemove               Kind = "remove"
-	KindTemplateInstall      Kind = "template_install"
-	KindAppLifecycle         Kind = "app_lifecycle"
-	KindMaintenance          Kind = "maintenance"
-	KindSourcePreview        Kind = "source_preview"
-	KindSourcePreviewExpire  Kind = "source_preview_expire"
-	KindSourcePreviewDestroy Kind = "source_preview_destroy"
-	KindManifestApply        Kind = "manifest_apply"
-	KindManifestPlan         Kind = "manifest_plan"
-	KindManifestValidate     Kind = "manifest_validate"
+	KindDeploy          Kind = "deploy"
+	KindRollback        Kind = "rollback"
+	KindRemove          Kind = "remove"
+	KindTemplateInstall Kind = "template_install"
+	KindAppLifecycle    Kind = "app_lifecycle"
+	KindMaintenance     Kind = "maintenance"
 )
+
+// Records of the removed manifest_* and source_preview* kinds still load and
+// display; Build refuses them and Retry answers ErrNotRetryable.
+func supportedKind(kind Kind) bool {
+	switch kind {
+	case KindDeploy, KindRollback, KindRemove, KindTemplateInstall, KindAppLifecycle, KindMaintenance:
+		return true
+	default:
+		return false
+	}
+}
 
 type Status string
 
@@ -83,15 +88,14 @@ type Event struct {
 // Request is deliberately an allowlist. It cannot represent an arbitrary
 // executable or arguments.
 type Request struct {
-	Kind             Kind   `json:"kind"`
-	Server           string `json:"server"`
-	App              string `json:"app,omitempty"`
-	Mode             string `json:"mode,omitempty"`
-	ManifestRevision string `json:"manifest_revision,omitempty"`
-	Image            string `json:"image,omitempty"`
-	Domain           string `json:"domain,omitempty"`
-	Port             int    `json:"port,omitempty"`
-	Template         string `json:"template,omitempty"`
+	Kind     Kind   `json:"kind"`
+	Server   string `json:"server"`
+	App      string `json:"app,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+	Image    string `json:"image,omitempty"`
+	Domain   string `json:"domain,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Template string `json:"template,omitempty"`
 	// Home "teploy" creates a NEW app's settings on its server (spec P2):
 	// deploy runs `deploy --home teploy`, template install `--home teploy`.
 	// Empty keeps today's behavior.
@@ -109,17 +113,6 @@ type Request struct {
 	Action          string            `json:"action,omitempty"`
 	Purge           bool              `json:"purge,omitempty"`
 	Redirect        string            `json:"redirect,omitempty"`
-	// SourceID/SourceCommit pin a source-triggered operation to the forge
-	// delivery that admitted it (D04): SourceID names the registered
-	// source, SourceCommit is the AUTHENTICATED payload commit (the
-	// delivery pin — never a mutable branch tip). They participate in the
-	// request hash, so the same delivery replays while a new commit is new
-	// work. Absent on every human/CI-submitted operation.
-	SourceID            string `json:"source_id,omitempty"`
-	SourceCommit        string `json:"source_commit,omitempty"`
-	SourceManifestPath  string `json:"source_manifest_path,omitempty"`
-	SourcePullUpdatedAt string `json:"source_pull_updated_at,omitempty"`
-	SourcePullRequest   int    `json:"source_pull_request,omitempty"`
 }
 
 type Operation struct {
@@ -226,10 +219,9 @@ const (
 )
 
 type Command struct {
-	SourceRequest *Request // Runtime-only provenance; never carries credentials.
-	Args          []string
-	Timeout       time.Duration
-	Secrets       []string
+	Args    []string
+	Timeout time.Duration
+	Secrets []string
 	// Stdin, when set, is fed to the CLI process on its standard input —
 	// how secret values travel instead of the argv (A11).
 	Stdin string
@@ -253,10 +245,6 @@ type Resolver func(name string) (Server, error)
 // return is presence, not success: "no server with that id" is an expected
 // answer in the rename-reconciliation path (X02 §1.3), not an error.
 type ResolverByID func(id string) (Server, bool)
-
-// ProjectResolver returns the immutable project directory registered for a
-// manifest revision. Project paths are intentionally absent from Request.
-type ProjectResolver func(server, app, revision string) (string, error)
 
 type Executor func(ctx context.Context, command Command, emit func(Stream, string)) (int, error)
 

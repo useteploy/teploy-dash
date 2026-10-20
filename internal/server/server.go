@@ -31,7 +31,6 @@ import (
 	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/durable"
-	"github.com/useteploy/teploy-dash/internal/manifest"
 	"github.com/useteploy/teploy-dash/internal/mcp"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
@@ -88,10 +87,9 @@ type Config struct {
 	OperationResolver     operation.Resolver
 	OperationResolverByID operation.ResolverByID
 	OperationExecutor     operation.Executor
-	// Source seams preserve the production wrapper; they replace only transport.
-	SourceCLIExecutor    operation.Executor
+	// SourceAccessResolver replaces the named-provider credential resolution
+	// used for webhook push-head verification (tests).
 	SourceAccessResolver func(context.Context, *source.Source) (*source.Access, error)
-	SourceCheckout       func(context.Context, *source.Access, string) (string, func(), error)
 	OperationMaxEvents   int
 	// Operation retention knobs (useteploy__teploy-dash-04). Zero values take
 	// the operation package defaults; negative values disable a bound.
@@ -311,39 +309,33 @@ func (fc *fleetCache) getObservations() ([]ServerObservation, bool) {
 
 // Server is the teploy-dash HTTP server.
 type Server struct {
-	mux                     *http.ServeMux
-	config                  Config
-	gate                    *authGate
-	state                   *state.Reader
-	monitor                 *monitor.Runner
-	restore                 *restoretest.Runner
-	store                   store.Store
-	fleet                   *fleetCache
-	frontend                fs.FS
-	mcpTokens               *mcp.TokenStore
-	outbox                  *outbox.Outbox
-	operations              *operation.Manager
-	operationInitErr        error
-	manifests               *manifest.Store
-	manifestInitErr         error
-	sources                 *source.Store
-	sourceInitErr           error
-	sourcePushAuthority     func(context.Context, *source.Source, string, string) error
-	sourceProviders         *source.Providers
-	sourceAccessResolver    func(context.Context, *source.Source) (*source.Access, error)
-	sourceCheckout          func(context.Context, *source.Access, string) (string, func(), error)
-	sourceActionMu          sync.Mutex
-	sourceMaintenanceOnce   sync.Once
-	sourceMaintenanceCancel context.CancelFunc
-	sourceMaintenanceDone   chan struct{}
-	sourceVerifier          func(context.Context, *source.Source) error
-	runCLI                  cliRunner
-	runCLIStdin             cliStdinRunner
-	cliIdentity             func() string
-	cliInstalled            func() bool
-	remoteListApps          func(context.Context, remote.ServerConn) ([]remote.AppState, error)
-	remoteServerStatus      func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
-	capabilitiesCache       capabilityCache
+	mux                  *http.ServeMux
+	config               Config
+	gate                 *authGate
+	state                *state.Reader
+	monitor              *monitor.Runner
+	restore              *restoretest.Runner
+	store                store.Store
+	fleet                *fleetCache
+	frontend             fs.FS
+	mcpTokens            *mcp.TokenStore
+	outbox               *outbox.Outbox
+	operations           *operation.Manager
+	operationInitErr     error
+	sources              *source.Store
+	sourceInitErr        error
+	sourcePushAuthority  func(context.Context, *source.Source, string, string) error
+	sourceProviders      *source.Providers
+	sourceAccessResolver func(context.Context, *source.Source) (*source.Access, error)
+	sourceActionMu       sync.Mutex
+	sourceVerifier       func(context.Context, *source.Source) error
+	runCLI               cliRunner
+	runCLIStdin          cliStdinRunner
+	cliIdentity          func() string
+	cliInstalled         func() bool
+	remoteListApps       func(context.Context, remote.ServerConn) ([]remote.AppState, error)
+	remoteServerStatus   func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
+	capabilitiesCache    capabilityCache
 
 	httpSrvMu sync.Mutex
 	httpSrv   *http.Server
@@ -425,16 +417,11 @@ func New(config Config) *Server {
 			return restoretest.Target{Host: srv.Host, User: srv.User}, nil
 		})
 	}
-	s.manifests, s.manifestInitErr = manifest.New(config.DataDir)
-	if s.manifestInitErr != nil {
-		log.Printf("manifests: disabled: %v", s.manifestInitErr)
-	}
 	s.sources, s.sourceInitErr = source.New(config.DataDir)
 	if s.sourceInitErr != nil {
 		log.Printf("sources: disabled: %v", s.sourceInitErr)
 	}
 	s.sourceAccessResolver = config.SourceAccessResolver
-	s.sourceCheckout = config.SourceCheckout
 	s.sourceProviders = &source.Providers{Path: os.Getenv("TEPLOY_DASH_SOURCE_PROVIDERS")}
 	s.sourceVerifier = config.SourceCredentialVerifier
 	if s.sourceVerifier == nil {
@@ -452,13 +439,6 @@ func New(config Config) *Server {
 	if executor == nil {
 		executor = func(ctx context.Context, command operation.Command, emit func(operation.Stream, string)) (int, error) {
 			defer s.fleet.invalidate()
-			if command.SourceRequest != nil {
-				underlying := config.SourceCLIExecutor
-				if underlying == nil {
-					underlying = executeOperation
-				}
-				return s.executeSourceOperation(ctx, command, emit, underlying)
-			}
 			return executeOperation(ctx, command, emit)
 		}
 	}
@@ -483,13 +463,7 @@ func New(config Config) *Server {
 		IdempotencyWindow:       config.OperationIdempotencyWindow,
 		Resolver:                resolver,
 		ResolverByID:            resolverByID,
-		ProjectResolver: func(server, app, revision string) (string, error) {
-			if s.manifests == nil {
-				return "", fmt.Errorf("manifest service unavailable")
-			}
-			return s.manifests.ProjectDir(server, app, revision)
-		},
-		Executor: executor,
+		Executor:                executor,
 		// D02: reconciliation and honest cancellation outcomes read the
 		// target's receipts through the same machine interface the fleet
 		// uses. The method value resolves s.runCLI at call time.
@@ -514,7 +488,6 @@ func New(config Config) *Server {
 // matching the http.Server convention that callers shouldn't treat that as a
 // real error.
 func (s *Server) ListenAndServe(addr string) error {
-	s.startSourceMaintenance()
 	s.warmFleet()
 	srv := s.httpServer(addr)
 	s.httpSrvMu.Lock()
@@ -530,7 +503,6 @@ func (s *Server) ListenAndServe(addr string) error {
 // before starting background services, so a failed bind cannot leave
 // monitors, restore schedules, and cleanup goroutines racing an early exit.
 func (s *Server) Serve(ln net.Listener) error {
-	s.startSourceMaintenance()
 	s.warmFleet()
 	srv := s.httpServer(ln.Addr().String())
 	s.httpSrvMu.Lock()
@@ -546,7 +518,6 @@ func (s *Server) Serve(ln net.Listener) error {
 // (bounded by ctx) for in-flight requests to finish. Safe to call before
 // ListenAndServe has run (e.g. in tests) — it's then a no-op.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.stopSourceMaintenance(ctx)
 	s.httpSrvMu.Lock()
 	srv := s.httpSrv
 	s.httpSrvMu.Unlock()
@@ -574,7 +545,6 @@ func (s *Server) CloseHTTP() {
 // grace so terminal states persist. Call after Shutdown so no new operations
 // are admitted while draining, and before closing the store.
 func (s *Server) DrainOperations(ctx context.Context) {
-	s.stopSourceMaintenance(ctx)
 	if s.operations == nil {
 		return
 	}
@@ -1641,8 +1611,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/onboarding/entry", s.handleOnboardingEntry)
 	s.mux.HandleFunc("/api/operations", s.handleOperations)
 	s.mux.HandleFunc("/api/operations/", s.handleOperation)
-	s.mux.HandleFunc("/api/manifests", s.handleManifests)
-	s.mux.HandleFunc("/api/manifests/", s.handleManifest)
+	// The manifests API was removed; answer 410 so old clients get a reason.
+	s.mux.HandleFunc("/api/manifests", s.handleManifestsGone)
+	s.mux.HandleFunc("/api/manifests/", s.handleManifestsGone)
 	// D04: registered git sources + the inbound forge delivery endpoint.
 	// The hook path enforces its own HMAC/token authentication, like /api/mcp.
 	s.mux.HandleFunc("/api/sources", s.handleSources)
@@ -2030,9 +2001,8 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		writeData(w, map[string][]string{"keys": envKeysOnly(raw)})
 
 	case action == "config-authority" && r.Method == http.MethodGet:
-		// D07: which side owns this app's configuration (git-managed
-		// manifest vs dash-managed vs unregistered) + the manifest-declared
-		// env keys. Metadata: names and repo references, never values.
+		// Where this app's settings are edited (CLI config home) + the env
+		// keys its config declares. Metadata: names, never values.
 		s.handleConfigAuthority(w, r, serverName, appName)
 
 	case action == "env" && r.Method == "POST":
@@ -2046,11 +2016,6 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		}
 		if !validEnvKey(body.Key) {
 			writeError(w, "invalid env var name")
-			return
-		}
-		// D07: a key declared by a git-managed manifest belongs to the
-		// repository — refuse the competing edit with the remedy.
-		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, body.Key) {
 			return
 		}
 		if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, body.Key) {
@@ -2071,10 +2036,6 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(action, "env/")
 		if !validEnvKey(key) {
 			writeError(w, "invalid env var name")
-			return
-		}
-		// D07: same guard on removal.
-		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, key) {
 			return
 		}
 		if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, key) {

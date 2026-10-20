@@ -171,7 +171,6 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"GET", "/api/restore-tests", []string{caps.ViewMetadata}},
 		{"GET", "/api/groups", []string{caps.ViewMetadata}},
 		{"GET", "/api/templates", []string{caps.ViewMetadata}},
-		{"GET", "/api/manifests", []string{caps.ViewMetadata}},
 		{"GET", "/api/nav", []string{caps.ViewMetadata}},
 
 		// Secret VALUE reads are the load-bearing split: metadata variants
@@ -239,8 +238,8 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"POST", "/api/sources/src-0123456789abcdef/verify", []string{caps.AdministerCredentials}},
 		{"POST", "/api/sources/src-0123456789abcdef/rotate-secret", []string{caps.AdministerCredentials}},
 
-		// Dashboard-config mutations (monitors, groups, homepage,
-		// manifests) are execute.mutate.
+		// Dashboard-config mutations (monitors, groups, homepage) are
+		// execute.mutate.
 		{"POST", "/api/monitors", []string{caps.ExecuteMutate}},
 		{"PUT", "/api/monitors/m1", []string{caps.ExecuteMutate}},
 		{"DELETE", "/api/monitors/m1", []string{caps.ExecuteMutate}},
@@ -248,8 +247,6 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"POST", "/api/groups", []string{caps.ExecuteMutate}},
 		{"DELETE", "/api/groups/g1/projects/p1/apps/a1", []string{caps.ExecuteMutate}},
 		{"PUT", "/api/homepage", []string{caps.ExecuteMutate}},
-		{"PUT", "/api/manifests/prod/web", []string{caps.ExecuteMutate}},
-		{"DELETE", "/api/manifests/prod/web", []string{caps.ExecuteMutate}},
 
 		// Self-service identity is available to every authenticated
 		// principal — no capability gates knowing who you are or changing

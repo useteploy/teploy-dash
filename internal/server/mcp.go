@@ -280,8 +280,8 @@ func (b mcpBackend) SetEnv(ctx context.Context, server, app, key, value string) 
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")
 	}
-	if owned, _ := b.s.envKeySourceOwned(server, app, key); owned {
-		return "", fmt.Errorf("environment variable %s is declared in the git-managed manifest; change it at the source", key)
+	if err := b.s.configOwnedEnvKeyError(ctx, server, app, key); err != nil {
+		return "", err
 	}
 	srv, err := b.resolveServer(server)
 	if err != nil {
@@ -300,8 +300,8 @@ func (b mcpBackend) UnsetEnv(ctx context.Context, server, app, key string) (stri
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")
 	}
-	if owned, _ := b.s.envKeySourceOwned(server, app, key); owned {
-		return "", fmt.Errorf("environment variable %s is declared in the git-managed manifest; change it at the source", key)
+	if err := b.s.configOwnedEnvKeyError(ctx, server, app, key); err != nil {
+		return "", err
 	}
 	srv, err := b.resolveServer(server)
 	if err != nil {

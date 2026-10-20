@@ -90,31 +90,10 @@ func TestDeployAndTemplateHome(t *testing.T) {
 	}
 }
 
-func TestManifestCommandConstructionUsesInternalProjectResolver(t *testing.T) {
-	projectDir := "/var/teploy-dash/manifests/prod/web/revisions/" + strings.Repeat("a", 64)
-	resolver := func(server, app, revision string) (string, error) {
-		if server != "prod" || app != "web" || revision != strings.Repeat("a", 64) {
-			t.Fatalf("unexpected project lookup: %s/%s@%s", server, app, revision)
-		}
-		return projectDir, nil
-	}
-	tests := []struct {
-		kind Kind
-		want []string
-	}{
-		{KindManifestApply, []string{"--project-dir", projectDir, "deploy", "--host", "prod.example", "--user", "deploy"}},
-		{KindManifestPlan, []string{"--project-dir", projectDir, "plan", "--host", "prod.example", "--user", "deploy", "--json"}},
-		{KindManifestValidate, []string{"--project-dir", projectDir, "validate", "--host", "prod.example", "--user", "deploy", "--json"}},
-	}
-	for _, test := range tests {
-		command, _, target, err := Build(Request{
-			Kind: test.kind, Server: "prod", App: "web", Mode: "dash-managed", ManifestRevision: strings.Repeat("a", 64),
-		}, testResolver, resolver)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !slices.Equal(command.Args, test.want) || target != "server:prod/app:web" {
-			t.Fatalf("%s command=%v target=%q", test.kind, command.Args, target)
+func TestRemovedKindsAreRefused(t *testing.T) {
+	for _, kind := range []Kind{"manifest_apply", "manifest_plan", "manifest_validate", "source_preview", "source_preview_destroy", "source_preview_expire"} {
+		if _, _, _, err := Build(Request{Kind: kind, Server: "prod", App: "web", Mode: "git-managed"}, testResolver); err == nil || !strings.Contains(err.Error(), "unsupported operation kind") {
+			t.Fatalf("%s: Build err = %v, want unsupported", kind, err)
 		}
 	}
 }

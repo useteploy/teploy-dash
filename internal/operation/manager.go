@@ -113,9 +113,8 @@ type Options struct {
 	// ResolverByID resolves a server by stable id for the rename
 	// reconciliation in checkTarget (X02 §1.3). Nil disables that path:
 	// a vanished name stays a hard refusal, exactly as before.
-	ResolverByID    ResolverByID
-	ProjectResolver ProjectResolver
-	Executor        Executor
+	ResolverByID ResolverByID
+	Executor     Executor
 	// ReceiptReader answers whether an admitted operation's effect reached
 	// its target (D02). Reconciliation after a restart, and the honest
 	// resolution of a mid-flight cancellation, both consult it. Nil means
@@ -147,21 +146,20 @@ type targetRunner struct {
 }
 
 type Manager struct {
-	mu              sync.Mutex
-	store           *fileStore
-	operations      map[string]*Operation
-	events          map[string][]Event
-	idempotency     map[idemKey]string
-	cancels         map[string]context.CancelFunc
-	targets         map[string]*targetRunner
-	subscribers     map[string]map[chan struct{}]struct{}
-	resolver        Resolver
-	resolverByID    ResolverByID
-	projectResolver ProjectResolver
-	executor        Executor
-	maxEvents       int
-	maxHistoryAge   time.Duration
-	maxOperations   int
+	mu            sync.Mutex
+	store         *fileStore
+	operations    map[string]*Operation
+	events        map[string][]Event
+	idempotency   map[idemKey]string
+	cancels       map[string]context.CancelFunc
+	targets       map[string]*targetRunner
+	subscribers   map[string]map[chan struct{}]struct{}
+	resolver      Resolver
+	resolverByID  ResolverByID
+	executor      Executor
+	maxEvents     int
+	maxHistoryAge time.Duration
+	maxOperations int
 	// maxQueuedPerTarget is the per-target admission budget (A12/A27).
 	maxQueuedPerTarget int
 	// maxLive bounds total non-terminal operations (R17); executorSlots
@@ -322,7 +320,6 @@ func New(dataDir string, options Options) (*Manager, error) {
 		droppedEvents:       make(map[string]int),
 		resolver:            options.Resolver,
 		resolverByID:        options.ResolverByID,
-		projectResolver:     options.ProjectResolver,
 		executor:            options.Executor,
 		receiptReader:       options.ReceiptReader,
 		actorArgs:           options.ActorArgs,
@@ -465,7 +462,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 
 	// R21: the idempotency lookup runs BEFORE Build. A replay of an already
 	// admitted request must succeed even when the dependencies Build would
-	// consult (server discovery, manifest resolution, capability probes)
+	// consult (server discovery, capability probes)
 	// are currently failing — recovery after a lost HTTP response was the
 	// point of the key. Build still runs (unlocked, potentially slow) for
 	// genuinely new work, and the replay check runs AGAIN inside the
@@ -482,7 +479,7 @@ func (m *Manager) enqueue(req Request, idempotencyKey, retryOf string, attempt i
 	}
 	m.mu.Unlock()
 
-	command, admitted, target, err := Build(req, m.resolver, m.projectResolver)
+	command, admitted, target, err := Build(req, m.resolver)
 	if err != nil {
 		return nil, false, err
 	}
@@ -727,7 +724,7 @@ func (m *Manager) execute(j job) {
 		}
 		return
 	}
-	if m.actorArgs != nil && j.command.SourceRequest == nil {
+	if m.actorArgs != nil {
 		if extra := m.actorArgs(op); len(extra) > 0 {
 			j.command.Args = append(append([]string(nil), j.command.Args...), extra...)
 		}
@@ -1360,7 +1357,7 @@ func (m *Manager) Retry(id string, actor *Actor) (*Operation, error) {
 		m.mu.Unlock()
 		return nil, ErrNotFound
 	}
-	if !op.Status.Terminal() || op.Status == StatusSucceeded || op.Status == StatusAlreadyCommitted || op.HasSecrets {
+	if !op.Status.Terminal() || op.Status == StatusSucceeded || op.Status == StatusAlreadyCommitted || op.HasSecrets || !supportedKind(op.Request.Kind) {
 		m.mu.Unlock()
 		return nil, ErrNotRetryable
 	}

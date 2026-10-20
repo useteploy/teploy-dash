@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -20,10 +22,8 @@ import (
 	"github.com/useteploy/teploy-dash/internal/source"
 )
 
-// sourceTestServer exercises admission and queue capture only. Its executor
-// bypasses executeSourceOperation and its push authority is a fixture. The
-// separate SourceCLIExecutor seam in source_wrapper_test exercises the actual
-// production wrapper and immutable checkout without this bypass.
+// sourceTestServer builds a no-auth server whose push-head authority is a
+// fixture that always confirms the delivered commit.
 func sourceTestServer(t *testing.T, verifier func(context.Context, *source.Source) error) (*Server, *commandCapture) {
 	t.Helper()
 	capture := &commandCapture{}
@@ -51,45 +51,6 @@ func sourceTestServer(t *testing.T, verifier func(context.Context, *source.Sourc
 	return server, capture
 }
 
-// gatedTestServer holds every CLI execution until release is closed, so a
-// target can be kept BUSY (running operation) while later deliveries queue
-// behind it — the deterministic shape of the reorder-convergence scenario.
-func gatedTestServer(t *testing.T, verifier func(context.Context, *source.Source) error, principalLimit ...int) (*Server, *commandCapture, chan struct{}) {
-	t.Helper()
-	capture := &commandCapture{}
-	release := make(chan struct{})
-	config := Config{
-		DataDir: t.TempDir(), NoAuth: true,
-		OperationResolver: func(name string) (operation.Server, error) {
-			return operation.Server{Name: name, ID: "srv-0123456789abcdef", Host: name + ".example", User: "deploy"}, nil
-		},
-		OperationExecutor: func(ctx context.Context, command operation.Command, _ func(operation.Stream, string)) (int, error) {
-			select {
-			case <-release:
-				capture.record(command)
-				return 0, nil
-			case <-ctx.Done():
-				return -1, ctx.Err()
-			}
-		},
-		SourceCredentialVerifier: verifier,
-	}
-	if len(principalLimit) > 0 {
-		config.OperationMaxLivePerPrincipal = principalLimit[0]
-	}
-	server := New(config)
-	server.sourcePushAuthority = func(context.Context, *source.Source, string, string) error { return nil }
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		server.DrainOperations(ctx)
-	})
-	if server.sourceInitErr != nil {
-		t.Fatalf("source init: %v", server.sourceInitErr)
-	}
-	return server, capture, release
-}
-
 type commandCapture struct {
 	mu       sync.Mutex
 	commands []operation.Command
@@ -113,11 +74,11 @@ func signGitHub(secret string, body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-// createBoundSource registers a source for the repository and a git-managed
-// manifest bound to it, returning the source ID + webhook secret.
-func createBoundSource(t *testing.T, s *Server, repoURL, defaultBranch string) (id, secret string) {
+// createSource registers a source through the API and returns its ID and
+// the once-only webhook secret.
+func createSource(t *testing.T, s *Server, forge, repoURL, defaultBranch string) (id, secret string) {
 	t.Helper()
-	body := fmt.Sprintf(`{"forge":"github","clone_url":%q,"default_branch":%q,"display_name":"app repo"}`, repoURL, defaultBranch)
+	body := fmt.Sprintf(`{"forge":%q,"clone_url":%q,"default_branch":%q,"display_name":"app repo"}`, forge, repoURL, defaultBranch)
 	response := httptest.NewRecorder()
 	s.handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/sources", strings.NewReader(body)))
 	if response.Code != http.StatusCreated {
@@ -129,21 +90,7 @@ func createBoundSource(t *testing.T, s *Server, repoURL, defaultBranch string) (
 	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	id = created.Data.ID
-	secret = created.Data.WebhookSecret
-
-	manifestBody := `{"mode":"git-managed","git":{"repository":` + jsonQuote(repoURL) + `,"revision":"0123456789abcdef0123456789abcdef01234567"},"manifest":"app: web\nimage: example/web:1\ndomain: web.example.com\n"}`
-	manifestResponse := httptest.NewRecorder()
-	s.handler().ServeHTTP(manifestResponse, httptest.NewRequest(http.MethodPut, "/api/manifests/prod/web", strings.NewReader(manifestBody)))
-	if manifestResponse.Code != http.StatusCreated {
-		t.Fatalf("create manifest status=%d body=%s", manifestResponse.Code, manifestResponse.Body.String())
-	}
-	return id, secret
-}
-
-func jsonQuote(s string) string {
-	data, _ := json.Marshal(s)
-	return string(data)
+	return created.Data.ID, created.Data.WebhookSecret
 }
 
 func pushDelivery(t *testing.T, s *Server, id, secret, deliveryID, commit string) *httptest.ResponseRecorder {
@@ -159,22 +106,17 @@ func pushDelivery(t *testing.T, s *Server, id, secret, deliveryID, commit string
 	return response
 }
 
-func waitTerminal(t *testing.T, s *Server, opID string) *operation.Operation {
+func sourceDetail(t *testing.T, s *Server, id string) string {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		op, err := s.operations.Get(opID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if op.Status.Terminal() {
-			return op
-		}
-		time.Sleep(5 * time.Millisecond)
+	detail := httptest.NewRecorder()
+	s.handler().ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
+	if detail.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
 	}
-	t.Fatal("operation did not finish")
-	return nil
+	return detail.Body.String()
 }
+
+const noAppConnected = "no app is connected to this repository yet"
 
 func TestSourceAPIRequiresAuthentication(t *testing.T) {
 	s, _ := sourceTestServer(t, nil)
@@ -249,7 +191,7 @@ func TestSourceCreateNormalizesAndCollides(t *testing.T) {
 
 func TestSourceWebhookAuthentication(t *testing.T) {
 	s, _ := sourceTestServer(t, nil)
-	id, secret := createBoundSource(t, s, "https://github.com/team/app", "main")
+	id, secret := createSource(t, s, "github", "https://github.com/team/app", "main")
 	body := []byte(`{"ref":"refs/heads/main","after":"0123456789abcdef0123456789abcdef01234567"}`)
 
 	bad := httptest.NewRequest(http.MethodPost, "/hooks/sources/"+id, bytes.NewReader(body))
@@ -283,342 +225,104 @@ func TestSourceWebhookAuthentication(t *testing.T) {
 	}
 }
 
-// The load-bearing D04 convergence assertions: duplicate deliveries are
-// deduped by delivery id, and while a delivery's operation is still QUEUED
-// (the target is busy with a running deploy) a newer delivery supersedes
-// it — C02's newest-wins riding the D02 queue, never a second queue and
-// never an interruption of the RUNNING operation.
-func TestSourceWebhookDedupeAndReorderConverge(t *testing.T) {
-	s, capture, release := gatedTestServer(t, nil)
-	id, secret := createBoundSource(t, s, "https://github.com/team/app", "main")
-
-	// Hold the target busy with a manual deploy (blocked in the executor).
-	manual := httptest.NewRecorder()
-	s.handler().ServeHTTP(manual, httptest.NewRequest(http.MethodPost, "/api/operations", strings.NewReader(`{"kind":"deploy","server":"prod","app":"web","image":"example/web:0"}`)))
-	if manual.Code != http.StatusAccepted {
-		t.Fatalf("manual deploy status=%d body=%s", manual.Code, manual.Body.String())
+// An authenticated, verified push is durably recorded and ignored: nothing
+// is enqueued until an app is connected to the repository. A replay of the
+// same delivery id answers duplicate.
+func TestSourceWebhookRecordsPushAsIgnoredAndDedupes(t *testing.T) {
+	s, capture := sourceTestServer(t, nil)
+	id, secret := createSource(t, s, "github", "https://github.com/team/app", "main")
+	var probes []string
+	s.sourcePushAuthority = func(_ context.Context, _ *source.Source, branch, commit string) error {
+		probes = append(probes, branch+"@"+commit)
+		return nil
 	}
-	var manualEnvelope struct {
-		Data operation.Operation `json:"data"`
-	}
-	if err := json.Unmarshal(manual.Body.Bytes(), &manualEnvelope); err != nil {
-		t.Fatal(err)
-	}
-
-	first := pushDelivery(t, s, id, secret, "d-1", strings.Repeat("a", 40))
-	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"status":"admitted"`) {
+	commit := strings.Repeat("a", 40)
+	first := pushDelivery(t, s, id, secret, "d-1", commit)
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"disposition":"ignored"`) || !strings.Contains(first.Body.String(), noAppConnected) {
 		t.Fatalf("first delivery status=%d body=%s", first.Code, first.Body.String())
 	}
-	var admitted struct {
-		OperationIDs []string `json:"operation_ids"`
+	if len(probes) != 1 || probes[0] != "main@"+commit {
+		t.Fatalf("push head not verified before recording: %v", probes)
 	}
-	if err := json.Unmarshal(first.Body.Bytes(), &admitted); err != nil {
-		t.Fatal(err)
-	}
-	if len(admitted.OperationIDs) != 1 {
-		t.Fatalf("one bound manifest must admit one operation: %s", first.Body.String())
-	}
-
-	// Duplicate delivery id: no second operation, explicit duplicate ack.
-	duplicate := pushDelivery(t, s, id, secret, "d-1", strings.Repeat("a", 40))
+	duplicate := pushDelivery(t, s, id, secret, "d-1", commit)
 	if duplicate.Code != http.StatusOK || !strings.Contains(duplicate.Body.String(), `"status":"duplicate"`) {
 		t.Fatalf("duplicate delivery status=%d body=%s", duplicate.Code, duplicate.Body.String())
 	}
+	if len(probes) != 1 {
+		t.Fatalf("duplicate re-ran verification: %v", probes)
+	}
+	if capture.len() != 0 || len(s.operations.List("", "", 0)) != 0 {
+		t.Fatal("a delivery must not enqueue operations")
+	}
+	detail := sourceDetail(t, s, id)
+	if !strings.Contains(detail, `"id":"d-1"`) || !strings.Contains(detail, commit) || !strings.Contains(detail, noAppConnected) {
+		t.Fatalf("delivery not recorded: %s", detail)
+	}
 
-	// A newer delivery (different id, different commit) supersedes the
-	// still-QUEUED operation from d-1 and admits its own. The RUNNING
-	// manual deploy is never touched.
-	newer := pushDelivery(t, s, id, secret, "d-2", strings.Repeat("b", 40))
-	if newer.Code != http.StatusOK || !strings.Contains(newer.Body.String(), `"status":"admitted"`) {
-		t.Fatalf("newer delivery status=%d body=%s", newer.Code, newer.Body.String())
-	}
-	var newerAdmitted struct {
-		OperationIDs []string `json:"operation_ids"`
-	}
-	if err := json.Unmarshal(newer.Body.Bytes(), &newerAdmitted); err != nil {
+	// The record survives a store restart: the same id is still a duplicate.
+	restarted, err := source.New(s.config.DataDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Release the executor: the manual deploy completes first (FIFO), then
-	// the newest delivery's operation runs.
-	close(release)
-
-	superseded := waitTerminal(t, s, admitted.OperationIDs[0])
-	if superseded.Status != operation.StatusCanceled {
-		t.Fatalf("superseded queued operation status=%s, want canceled", superseded.Status)
-	}
-	if manualOp := waitTerminal(t, s, manualEnvelope.Data.ID); manualOp.Status != operation.StatusSucceeded {
-		t.Fatalf("running manual deploy status=%s, want succeeded (never interrupted)", manualOp.Status)
-	}
-	final := waitTerminal(t, s, newerAdmitted.OperationIDs[0])
-	if final.Status != operation.StatusSucceeded {
-		t.Fatalf("newest operation status=%s, want succeeded", final.Status)
-	}
-	if final.Request.SourceCommit != strings.Repeat("b", 40) {
-		t.Fatalf("newest operation pinned commit %q", final.Request.SourceCommit)
-	}
-
-	// Convergence: the manual deploy + the NEWEST delivery's command —
-	// d-1's superseded operation never executed.
-	if got := capture.len(); got != 2 {
-		t.Fatalf("executed commands = %d, want 2 (manual + newest)", got)
-	}
-
-	// The delivery ledger shows both deliveries with honest dispositions.
-	detail := httptest.NewRecorder()
-	s.handler().ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
-	if detail.Code != http.StatusOK {
-		t.Fatalf("detail status=%d", detail.Code)
-	}
-	for _, want := range []string{`"disposition":"admitted"`, `"disposition":"superseded"`} {
-		if !strings.Contains(detail.Body.String(), want) {
-			t.Fatalf("delivery ledger missing %s: %s", want, detail.Body.String())
-		}
+	s.sources = restarted
+	if again := pushDelivery(t, s, id, secret, "d-1", commit); !strings.Contains(again.Body.String(), `"status":"duplicate"`) {
+		t.Fatalf("duplicate after restart: %s", again.Body.String())
 	}
 }
 
-// The forwarded operation carries the source identity and the payload pin
-// (D04: "builds against the exact commit"), attributed to the webhook
-// principal namespace.
-func TestSourceWebhookOperationCarriesSourceAndCommit(t *testing.T) {
-	s, _ := sourceTestServer(t, nil)
-	id, secret := createBoundSource(t, s, "https://github.com/team/app", "main")
-	commit := strings.Repeat("c", 40)
-	response := pushDelivery(t, s, id, secret, "d-pin", commit)
-	if response.Code != http.StatusOK {
-		t.Fatalf("delivery status=%d body=%s", response.Code, response.Body.String())
-	}
-	var admitted struct {
-		OperationIDs []string `json:"operation_ids"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &admitted); err != nil {
-		t.Fatal(err)
-	}
-	op := waitTerminal(t, s, admitted.OperationIDs[0])
-	if op.Request.SourceID != id {
-		t.Fatalf("operation source id = %q, want %q", op.Request.SourceID, id)
-	}
-	if op.Request.SourceCommit != commit {
-		t.Fatalf("operation commit = %q", op.Request.SourceCommit)
-	}
-	if op.Request.Kind != operation.KindManifestApply || op.Request.Mode != "git-managed" {
-		t.Fatalf("operation = %s/%s", op.Request.Kind, op.Request.Mode)
-	}
-	if op.Actor == nil || op.Actor.Kind != "webhook" || op.Actor.Subject != "source/"+id {
-		t.Fatalf("operation actor = %#v", op.Actor)
-	}
-}
-
-// Pings, tags/deletions (no commit pin), and pushes to unwatched branches
-// are recorded-and-ignored, never silently dropped and never admitted.
+// Pings, tags/deletions (no commit pin), pushes to unwatched branches and
+// pull request events are recorded-and-ignored, never silently dropped.
 func TestSourceWebhookIgnoresNonDeployableDeliveries(t *testing.T) {
-	s, capture := sourceTestServer(t, nil)
-	id, secret := createBoundSource(t, s, "https://github.com/team/app", "main")
-
-	ping := []byte(`{}`)
-	request := httptest.NewRequest(http.MethodPost, "/hooks/sources/"+id, bytes.NewReader(ping))
-	request.Header.Set("X-GitHub-Event", "ping")
-	request.Header.Set("X-GitHub-Delivery", "d-ping")
-	request.Header.Set("X-Hub-Signature-256", signGitHub(secret, ping))
-	pingResponse := httptest.NewRecorder()
-	s.handler().ServeHTTP(pingResponse, request)
-	if pingResponse.Code != http.StatusOK || !strings.Contains(pingResponse.Body.String(), `"status":"ignored"`) {
-		t.Fatalf("ping status=%d body=%s", pingResponse.Code, pingResponse.Body.String())
-	}
-
-	otherBranch := []byte(`{"ref":"refs/heads/feature","after":"` + strings.Repeat("a", 40) + `"}`)
-	request = httptest.NewRequest(http.MethodPost, "/hooks/sources/"+id, bytes.NewReader(otherBranch))
-	request.Header.Set("X-GitHub-Event", "push")
-	request.Header.Set("X-GitHub-Delivery", "d-branch")
-	request.Header.Set("X-Hub-Signature-256", signGitHub(secret, otherBranch))
-	branchResponse := httptest.NewRecorder()
-	s.handler().ServeHTTP(branchResponse, request)
-	if branchResponse.Code != http.StatusOK || !strings.Contains(branchResponse.Body.String(), "does not match") {
-		t.Fatalf("branch filter status=%d body=%s", branchResponse.Code, branchResponse.Body.String())
-	}
-
-	if capture.len() != 0 {
-		t.Fatalf("non-deployable deliveries must not execute anything, got %d", capture.len())
-	}
-	// Both deliveries are visible in the ledger.
-	detail := httptest.NewRecorder()
-	s.handler().ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
-	if !strings.Contains(detail.Body.String(), "d-ping") || !strings.Contains(detail.Body.String(), "d-branch") {
-		t.Fatalf("ignored deliveries must be recorded: %s", detail.Body.String())
-	}
-}
-
-// R5-01: a signed explicit deletion marker never becomes deploy intent, even
-// when after still names a full SHA the live authority would confirm for the
-// (recreated) ref. The deletion is refused by payload classification before
-// authority is consulted, honestly ignored and durably recorded, admits
-// nothing, and leaves queued work and the push watermark untouched — across
-// a store restart too.
-func TestSourceWebhookDeletionMarkerNeverAdmitsDeployIntent(t *testing.T) {
-	s, capture, release := gatedTestServer(t, nil)
-	id, secret := createBoundSource(t, s, "https://github.com/team/app", "main")
-
-	// Hold the target busy so the admitted delivery below holds QUEUED work
-	// a wrongly-admitted deletion would supersede.
-	manual := httptest.NewRecorder()
-	s.handler().ServeHTTP(manual, httptest.NewRequest(http.MethodPost, "/api/operations", strings.NewReader(`{"kind":"deploy","server":"prod","app":"web","image":"example/web:0"}`)))
-	if manual.Code != http.StatusAccepted {
-		t.Fatalf("manual deploy status=%d body=%s", manual.Code, manual.Body.String())
-	}
-	var manualEnvelope struct {
-		Data operation.Operation `json:"data"`
-	}
-	if err := json.Unmarshal(manual.Body.Bytes(), &manualEnvelope); err != nil {
-		t.Fatal(err)
-	}
-
-	var authorityProbes []string
-	// Live authority deliberately reports whatever full SHA the payload
-	// names as the ref's current head (branch recreation).
-	s.sourcePushAuthority = func(_ context.Context, _ *source.Source, branch, commit string) error {
-		authorityProbes = append(authorityProbes, branch+"@"+commit)
-		return nil
-	}
-	deliver := func(deliveryID string, body []byte) *httptest.ResponseRecorder {
+	s, _ := sourceTestServer(t, nil)
+	id, secret := createSource(t, s, "github", "https://github.com/team/app", "main")
+	probes := 0
+	s.sourcePushAuthority = func(context.Context, *source.Source, string, string) error { probes++; return nil }
+	deliver := func(event, deliveryID string, body []byte) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest(http.MethodPost, "/hooks/sources/"+id, bytes.NewReader(body))
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("X-GitHub-Event", "push")
+		request.Header.Set("X-GitHub-Event", event)
 		request.Header.Set("X-GitHub-Delivery", deliveryID)
 		request.Header.Set("X-Hub-Signature-256", signGitHub(secret, body))
 		response := httptest.NewRecorder()
 		s.handler().ServeHTTP(response, request)
 		return response
 	}
-
-	live := strings.Repeat("a", 40)
-	first := deliver("d-live", []byte(`{"ref":"refs/heads/main","after":"`+live+`"}`))
-	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"status":"admitted"`) {
-		t.Fatalf("live delivery status=%d body=%s", first.Code, first.Body.String())
+	for _, tc := range []struct {
+		event, id, body, reason string
+	}{
+		{"ping", "d-ping", `{}`, "is not a push"},
+		{"push", "d-branch", `{"ref":"refs/heads/feature","after":"` + strings.Repeat("a", 40) + `"}`, "does not match"},
+		{"push", "d-tag", `{"ref":"refs/tags/v1","after":"` + strings.Repeat("a", 40) + `"}`, "no pinnable commit"},
+		{"push", "d-del", `{"ref":"refs/heads/main","deleted":true,"after":"` + strings.Repeat("d", 40) + `"}`, "deletion"},
+		{"pull_request", "d-pr", `{"action":"opened","number":1}`, "pull request previews are not supported yet"},
+	} {
+		response := deliver(tc.event, tc.id, []byte(tc.body))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"disposition":"ignored"`) || !strings.Contains(response.Body.String(), tc.reason) {
+			t.Fatalf("%s status=%d body=%s", tc.id, response.Code, response.Body.String())
+		}
 	}
-	var admitted struct {
-		OperationIDs []string `json:"operation_ids"`
+	if probes != 0 {
+		t.Fatalf("non-push deliveries consulted push authority %d times", probes)
 	}
-	if err := json.Unmarshal(first.Body.Bytes(), &admitted); err != nil {
-		t.Fatal(err)
-	}
-	if len(admitted.OperationIDs) != 1 {
-		t.Fatalf("one bound manifest must admit one operation: %s", first.Body.String())
-	}
-	if op, _ := s.operations.Get(admitted.OperationIDs[0]); op == nil || op.Status != operation.StatusQueued {
-		t.Fatalf("live delivery must hold queued work")
-	}
-	state, err := s.sources.Lifecycle(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	watermark := state.Watermarks["push:main"]
-	if watermark.Commit != live {
-		t.Fatalf("watermark = %#v, want commit %q", watermark, live)
-	}
-
-	// The deletion marker over a SHA the live authority WOULD report: still
-	// no deploy intent. Classification refuses before authority runs.
-	recreated := strings.Repeat("d", 40)
-	deletion := []byte(`{"ref":"refs/heads/main","deleted":true,"after":"` + recreated + `"}`)
-	response := deliver("d-del", deletion)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"ignored"`) || !strings.Contains(response.Body.String(), "deletion") {
-		t.Fatalf("deletion status=%d body=%s", response.Code, response.Body.String())
-	}
-	if len(authorityProbes) != 1 {
-		t.Fatalf("a deletion must be refused by payload classification, not validated against live authority: %v", authorityProbes)
-	}
-	if op, _ := s.operations.Get(admitted.OperationIDs[0]); op.Status != operation.StatusQueued {
-		t.Fatalf("queued work disturbed by deletion: %s", op.Status)
-	}
-	if after, _ := s.sources.Lifecycle(id); after.Watermarks["push:main"] != watermark {
-		t.Fatalf("watermark changed under deletion: %#v", after.Watermarks["push:main"])
-	}
-	detail := httptest.NewRecorder()
-	s.handler().ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
-	if !strings.Contains(detail.Body.String(), "d-del") || !strings.Contains(detail.Body.String(), `"disposition":"ignored"`) {
-		t.Fatalf("deletion must be honestly recorded as ignored: %s", detail.Body.String())
-	}
-
-	// Durable across restart: the same delivery id is now a duplicate, a NEW
-	// deletion is ignored again, and still nothing was admitted.
-	restarted, err := source.New(s.config.DataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.sources = restarted
-	if again := deliver("d-del", deletion); again.Code != http.StatusOK || !strings.Contains(again.Body.String(), `"status":"duplicate"`) {
-		t.Fatalf("retried deletion status=%d body=%s", again.Code, again.Body.String())
-	}
-	if fresh := deliver("d-del-2", deletion); fresh.Code != http.StatusOK || !strings.Contains(fresh.Body.String(), `"status":"ignored"`) {
-		t.Fatalf("new deletion after restart status=%d body=%s", fresh.Code, fresh.Body.String())
-	}
-	if len(authorityProbes) != 1 || capture.len() != 0 {
-		t.Fatalf("deletions admitted work across restart: probes=%v executed=%d", authorityProbes, capture.len())
-	}
-	if op, _ := s.operations.Get(admitted.OperationIDs[0]); op.Status != operation.StatusQueued {
-		t.Fatalf("queued work disturbed across restart: %s", op.Status)
-	}
-
-	close(release)
-	if manualOp := waitTerminal(t, s, manualEnvelope.Data.ID); manualOp.Status != operation.StatusSucceeded {
-		t.Fatalf("manual deploy status=%s, want succeeded", manualOp.Status)
-	}
-	if final := waitTerminal(t, s, admitted.OperationIDs[0]); final.Status != operation.StatusSucceeded {
-		t.Fatalf("surviving delivery status=%s, want succeeded", final.Status)
-	}
-	if capture.len() != 2 {
-		t.Fatalf("executed commands = %d, want 2 (manual + live delivery)", capture.len())
+	detail := sourceDetail(t, s, id)
+	for _, want := range []string{"d-ping", "d-branch", "d-tag", "d-del", "d-pr"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("ignored delivery %s not recorded: %s", want, detail)
+		}
 	}
 }
 
-// R5-02: a push-authority transport failure is unavailable, not stale. No
-// ignored delivery is durably recorded for it, so the forge's retry with the
-// SAME delivery id re-runs admission instead of answering duplicate; queued
-// work and the lifecycle watermark stay untouched; a proven mismatch stays
-// an honest ignore; and the healed authority admits the same delivery id.
-// The authority here is the PRODUCTION fallback (resolveSourceAccess ->
-// Access.PushHead) against a real generic-forge git transport, not a stub.
+// A push-head verification failure is unavailable, not stale: it is not
+// recorded, so the forge's retry with the same delivery id re-runs it. A
+// proven mismatch is an honest durable ignore. The authority here is the
+// production path (resolveSourceAccess -> Access.PushHead) against a real
+// generic-forge git transport.
 func TestSourceWebhookPushAuthorityFailureStaysRetryable(t *testing.T) {
 	if _, e := exec.LookPath("git"); e != nil {
 		t.Skip("git required")
 	}
-	s, capture, release := gatedTestServer(t, nil)
-
-	// A generic-forge source: its webhook authenticates with the shared
-	// HMAC scheme and its push authority is the real generic ls-remote.
-	created := httptest.NewRecorder()
-	s.handler().ServeHTTP(created, httptest.NewRequest(http.MethodPost, "/api/sources", strings.NewReader(`{"forge":"generic","clone_url":"https://git.example/team/app","default_branch":"main","display_name":"app repo"}`)))
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create source status=%d body=%s", created.Code, created.Body.String())
-	}
-	var createdEnvelope struct {
-		Data source.CreatedSource `json:"data"`
-	}
-	if err := json.Unmarshal(created.Body.Bytes(), &createdEnvelope); err != nil {
-		t.Fatal(err)
-	}
-	id, secret := createdEnvelope.Data.ID, createdEnvelope.Data.WebhookSecret
-	manifestBody := `{"mode":"git-managed","git":{"repository":"https://git.example/team/app","revision":"0123456789abcdef0123456789abcdef01234567"},"manifest":"app: web\nimage: example/web:1\ndomain: web.example.com\n"}`
-	manifestResponse := httptest.NewRecorder()
-	s.handler().ServeHTTP(manifestResponse, httptest.NewRequest(http.MethodPut, "/api/manifests/prod/web", strings.NewReader(manifestBody)))
-	if manifestResponse.Code != http.StatusCreated {
-		t.Fatalf("create manifest status=%d body=%s", manifestResponse.Code, manifestResponse.Body.String())
-	}
-
-	manual := httptest.NewRecorder()
-	s.handler().ServeHTTP(manual, httptest.NewRequest(http.MethodPost, "/api/operations", strings.NewReader(`{"kind":"deploy","server":"prod","app":"web","image":"example/web:0"}`)))
-	if manual.Code != http.StatusAccepted {
-		t.Fatalf("manual deploy status=%d body=%s", manual.Code, manual.Body.String())
-	}
-	var manualEnvelope struct {
-		Data operation.Operation `json:"data"`
-	}
-	if err := json.Unmarshal(manual.Body.Bytes(), &manualEnvelope); err != nil {
-		t.Fatal(err)
-	}
-
-	// Route the production push-authority fallback at a generic transport.
+	s, _ := sourceTestServer(t, nil)
+	id, secret := createSource(t, s, "generic", "https://git.example/team/app", "main")
 	s.sourcePushAuthority = nil
 	pointAccessAt := func(repository string) {
 		s.sourceAccessResolver = func(context.Context, *source.Source) (*source.Access, error) {
@@ -641,94 +345,179 @@ func TestSourceWebhookPushAuthorityFailureStaysRetryable(t *testing.T) {
 		}))
 	}
 
-	// The watched head is live at a*40: the first delivery admits through
-	// the real generic transport.
-	live := advertise(strings.Repeat("a", 40), "refs/heads/main")
-	defer live.Close()
-	pointAccessAt(live.URL + "/repo.git")
-	first := pushDelivery(t, s, id, secret, "d-keep", strings.Repeat("a", 40))
-	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"status":"admitted"`) {
-		t.Fatalf("first delivery status=%d body=%s", first.Code, first.Body.String())
-	}
-	var admitted struct {
-		OperationIDs []string `json:"operation_ids"`
-	}
-	if err := json.Unmarshal(first.Body.Bytes(), &admitted); err != nil {
-		t.Fatal(err)
-	}
-	state, err := s.sources.Lifecycle(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	watermark := state.Watermarks["push:main"]
-
-	// ls-remote against an unreachable repository: the real gitRun
-	// transport-failure class must answer retryable-unavailable.
 	pointAccessAt("http://127.0.0.1:1/repo.git")
 	failed := pushDelivery(t, s, id, secret, "d-transport", strings.Repeat("b", 40))
 	if failed.Code != http.StatusServiceUnavailable || !strings.Contains(failed.Body.String(), "push authority unavailable") {
 		t.Fatalf("transport failure status=%d body=%s", failed.Code, failed.Body.String())
 	}
-	// Not durably recorded as ignored: the same delivery id must re-run
-	// admission rather than be swallowed as a duplicate.
 	retry := pushDelivery(t, s, id, secret, "d-transport", strings.Repeat("b", 40))
 	if retry.Code != http.StatusServiceUnavailable || strings.Contains(retry.Body.String(), "duplicate") {
 		t.Fatalf("retry swallowed as duplicate: status=%d body=%s", retry.Code, retry.Body.String())
 	}
-	detail := httptest.NewRecorder()
-	s.handler().ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
-	if strings.Contains(detail.Body.String(), "d-transport") {
-		t.Fatalf("unavailable authority must not durably record the delivery: %s", detail.Body.String())
-	}
-	if op, _ := s.operations.Get(admitted.OperationIDs[0]); op.Status != operation.StatusQueued {
-		t.Fatalf("queued work disturbed by authority failure: %s", op.Status)
-	}
-	if after, _ := s.sources.Lifecycle(id); after.Watermarks["push:main"] != watermark {
-		t.Fatalf("watermark changed under authority failure: %#v", after.Watermarks["push:main"])
+	if strings.Contains(sourceDetail(t, s, id), "d-transport") {
+		t.Fatal("unavailable authority must not durably record the delivery")
 	}
 
-	// A real completed ls-remote that advertises the watched ref at a newer
-	// valid commit than the delivery's pin is a proven mismatch: an honest
-	// durable ignore.
 	mismatch := advertise(strings.Repeat("c", 40), "refs/heads/main")
 	defer mismatch.Close()
 	pointAccessAt(mismatch.URL + "/repo.git")
 	stale := pushDelivery(t, s, id, secret, "d-stale", strings.Repeat("a", 40))
-	if stale.Code != http.StatusOK || !strings.Contains(stale.Body.String(), `"status":"ignored"`) || !strings.Contains(stale.Body.String(), "no longer authoritative") {
+	if stale.Code != http.StatusOK || !strings.Contains(stale.Body.String(), `"disposition":"ignored"`) || !strings.Contains(stale.Body.String(), "no longer authoritative") {
 		t.Fatalf("proven mismatch status=%d body=%s", stale.Code, stale.Body.String())
 	}
 
-	// Recovery: the SAME delivery id admits once the transport heals and
-	// advertises the delivered head.
 	healed := advertise(strings.Repeat("b", 40), "refs/heads/main")
 	defer healed.Close()
 	pointAccessAt(healed.URL + "/repo.git")
 	recovered := pushDelivery(t, s, id, secret, "d-transport", strings.Repeat("b", 40))
-	if recovered.Code != http.StatusOK || !strings.Contains(recovered.Body.String(), `"status":"admitted"`) {
+	if recovered.Code != http.StatusOK || !strings.Contains(recovered.Body.String(), noAppConnected) {
 		t.Fatalf("same-id recovery status=%d body=%s", recovered.Code, recovered.Body.String())
 	}
-	var recoveredEnvelope struct {
-		OperationIDs []string `json:"operation_ids"`
+	if len(s.operations.List("", "", 0)) != 0 {
+		t.Fatal("a delivery must not enqueue operations")
 	}
-	if err := json.Unmarshal(recovered.Body.Bytes(), &recoveredEnvelope); err != nil {
-		t.Fatal(err)
+}
+
+// Native headers and signatures per forge, verified against real provider
+// HTTP branch authority: current head is recorded, a stale head is ignored.
+func TestSourceNativePushAuthorityPerForge(t *testing.T) {
+	for _, forge := range []source.Forge{source.ForgeGitHub, source.ForgeGitLab, source.ForgeGitea, source.ForgeForgejo} {
+		t.Run(string(forge), func(t *testing.T) {
+			s, _ := sourceTestServer(t, nil)
+			s.sourcePushAuthority = nil
+			created, err := s.sources.Create(source.CreateInput{Forge: forge, CloneURL: "https://forge.test/team/app", DefaultBranch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, secret := created.ID, created.WebhookSecret
+			sha := strings.Repeat("b", 40)
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"commit":{"sha":%q,"id":%q}}`, sha, sha)
+			}))
+			defer api.Close()
+			s.sourceAccessResolver = func(context.Context, *source.Source) (*source.Access, error) {
+				return &source.Access{Provider: source.Provider{Forge: forge, Repository: "https://forge.test/team/app", APIURL: api.URL}, Client: api.Client()}, nil
+			}
+			send := func(delivery, commit string, corrupt bool) *httptest.ResponseRecorder {
+				body := []byte(fmt.Sprintf(`{"ref":"refs/heads/main","after":%q,"checkout_sha":%q}`, commit, commit))
+				r := httptest.NewRequest("POST", "/hooks/sources/"+id, strings.NewReader(string(body)))
+				eventHeader, idHeader, sigHeader := "X-GitHub-Event", "X-GitHub-Delivery", "X-Hub-Signature-256"
+				signature := signGitHub(secret, body)
+				switch forge {
+				case source.ForgeGitLab:
+					eventHeader, idHeader, sigHeader = "X-Gitlab-Event", "X-Gitlab-Event-UUID", "X-Gitlab-Signature"
+				case source.ForgeGitea:
+					eventHeader, idHeader, sigHeader = "X-Gitea-Event", "X-Gitea-Delivery", "X-Gitea-Signature"
+					signature = strings.TrimPrefix(signature, "sha256=")
+				case source.ForgeForgejo:
+					eventHeader, idHeader, sigHeader = "X-Forgejo-Event", "X-Forgejo-Delivery", "X-Forgejo-Signature"
+					signature = strings.TrimPrefix(signature, "sha256=")
+				}
+				if corrupt {
+					signature = strings.Repeat("0", len(signature))
+				}
+				r.Header.Set(eventHeader, "push")
+				r.Header.Set(idHeader, delivery)
+				r.Header.Set(sigHeader, signature)
+				result := httptest.NewRecorder()
+				s.handler().ServeHTTP(result, r)
+				return result
+			}
+			if bad := send("native-bad", sha, true); bad.Code != http.StatusUnauthorized {
+				t.Fatalf("bad signature %d %s", bad.Code, bad.Body.String())
+			}
+			current := send("native-B", sha, false)
+			if current.Code != 200 || !strings.Contains(current.Body.String(), noAppConnected) {
+				t.Fatalf("native delivery %d %s", current.Code, current.Body.String())
+			}
+			old := send("native-A", strings.Repeat("a", 40), false)
+			if old.Code != 200 || !strings.Contains(old.Body.String(), "no longer authoritative") {
+				t.Fatalf("stale delivery %d %s", old.Code, old.Body.String())
+			}
+			if strings.Contains(sourceDetail(t, s, id), "native-bad") {
+				t.Fatal("unauthenticated delivery recorded")
+			}
+		})
 	}
-	close(release)
-	if manualOp := waitTerminal(t, s, manualEnvelope.Data.ID); manualOp.Status != operation.StatusSucceeded {
-		t.Fatalf("manual deploy status=%s, want succeeded", manualOp.Status)
+}
+
+func TestSourceWebhookAuthenticationIsForgeScoped(t *testing.T) {
+	body := []byte(`{"after":"fixture"}`)
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("X-Gitlab-Token", "fixture-secret")
+	if deliveryAuthenticatedFor(source.ForgeGitHub, r, "fixture-secret", body) {
+		t.Fatal("GitLab token header authenticated a GitHub source")
 	}
-	if superseded := waitTerminal(t, s, admitted.OperationIDs[0]); superseded.Status != operation.StatusCanceled {
-		t.Fatalf("older queued op status=%s, want canceled by newest-wins", superseded.Status)
+	if !deliveryAuthenticatedFor(source.ForgeGitLab, r, "fixture-secret", body) {
+		t.Fatal("GitLab token rejected")
 	}
-	final := waitTerminal(t, s, recoveredEnvelope.OperationIDs[0])
-	if final.Status != operation.StatusSucceeded {
-		t.Fatalf("recovered op status=%s, want succeeded", final.Status)
+	r.Header.Del("X-Gitlab-Token")
+	r.Header.Set("X-Hub-Signature-256", signGitHub("fixture-secret", body))
+	if !deliveryAuthenticatedFor(source.ForgeGitHub, r, "fixture-secret", body) {
+		t.Fatal("GitHub signature rejected")
 	}
-	if final.Request.SourceCommit != strings.Repeat("b", 40) {
-		t.Fatalf("recovered op pinned commit %q", final.Request.SourceCommit)
+	if deliveryAuthenticatedFor(source.ForgeGitLab, r, "fixture-secret", body) {
+		t.Fatal("GitHub signature authenticated a GitLab source")
 	}
-	if capture.len() != 2 {
-		t.Fatalf("executed commands = %d, want 2 (manual + recovered)", capture.len())
+}
+
+func TestGitLabSHA256AndTokenAuthentication(t *testing.T) {
+	body := []byte(`{"ref":"refs/heads/main","after":"1111111111111111111111111111111111111111"}`)
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("X-Gitlab-Signature", signGitHub("fixture", body))
+	if !deliveryAuthenticatedFor(source.ForgeGitLab, r, "fixture", body) {
+		t.Fatal("GitLab SHA256 variant refused")
+	}
+	if deliveryAuthenticatedFor(source.ForgeGitHub, r, "fixture", body) {
+		t.Fatal("GitLab variant crossed forge boundary")
+	}
+	if deliveryAuthenticatedFor(source.ForgeGitLab, r, "fixture", append(body, ' ')) {
+		t.Fatal("signature accepted altered body")
+	}
+	r.Header.Set("X-Gitlab-Token", "wrong")
+	if deliveryAuthenticatedFor(source.ForgeGitLab, r, "fixture", body) {
+		t.Fatal("bad explicit token fell back to signature")
+	}
+}
+
+func TestProductionSourceVerifierFailsClosedWithoutConfiguration(t *testing.T) {
+	t.Setenv("TEPLOY_DASH_SOURCE_PROVIDERS", "")
+	s, _ := sourceTestServer(t, nil)
+	if s.sourceVerifier == nil {
+		t.Fatal("production verifier remains nil")
+	}
+	e := s.sourceVerifier(context.Background(), &source.Source{CredentialRef: "absent"})
+	if e == nil || !strings.Contains(e.Error(), "not configured") {
+		t.Fatalf("missing configuration passed: %v", e)
+	}
+}
+
+// Rotation returns the new secret once; deliveries signed with the old
+// secret are refused afterwards.
+func TestSourceRotateSecret(t *testing.T) {
+	s, _ := sourceTestServer(t, nil)
+	id, oldSecret := createSource(t, s, "github", "https://github.com/team/app", "main")
+	rotate := httptest.NewRecorder()
+	s.handler().ServeHTTP(rotate, httptest.NewRequest(http.MethodPost, "/api/sources/"+id+"/rotate-secret", nil))
+	if rotate.Code != http.StatusOK {
+		t.Fatalf("rotate status=%d body=%s", rotate.Code, rotate.Body.String())
+	}
+	var rotated struct {
+		Data struct {
+			WebhookSecret string `json:"webhook_secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rotate.Body.Bytes(), &rotated); err != nil || rotated.Data.WebhookSecret == "" || rotated.Data.WebhookSecret == oldSecret {
+		t.Fatalf("rotate body invalid: %v", err)
+	}
+	if strings.Contains(sourceDetail(t, s, id), rotated.Data.WebhookSecret) {
+		t.Fatal("rotated secret appeared in a later read")
+	}
+	if stale := pushDelivery(t, s, id, oldSecret, "d-old", strings.Repeat("a", 40)); stale.Code != http.StatusUnauthorized {
+		t.Fatalf("old secret status=%d", stale.Code)
+	}
+	if fresh := pushDelivery(t, s, id, rotated.Data.WebhookSecret, "d-new", strings.Repeat("a", 40)); fresh.Code != http.StatusOK {
+		t.Fatalf("new secret status=%d body=%s", fresh.Code, fresh.Body.String())
 	}
 }
 
@@ -743,7 +532,7 @@ func TestSourceRevokedCredentialDegradesVisibly(t *testing.T) {
 		}
 		return fmt.Errorf("forge 403: token revoked (ref %q)", src.CredentialRef)
 	})
-	id, secret := createBoundSource(t, s, "https://github.com/team/app", "main")
+	id, secret := createSource(t, s, "github", "https://github.com/team/app", "main")
 
 	// No credential reference: nothing to verify.
 	noRef := httptest.NewRecorder()
@@ -775,7 +564,7 @@ func TestSourceRevokedCredentialDegradesVisibly(t *testing.T) {
 		t.Fatalf("delivery on degraded source status=%d body=%s", delivery.Code, delivery.Body.String())
 	}
 	if capture.len() != 0 {
-		t.Fatal("a degraded source must not admit operations")
+		t.Fatal("a degraded source must not execute anything")
 	}
 	detail := httptest.NewRecorder()
 	s.handler().ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
@@ -784,7 +573,7 @@ func TestSourceRevokedCredentialDegradesVisibly(t *testing.T) {
 	}
 
 	// Recovery: a good credential clears the degraded state and deliveries
-	// admit again.
+	// pass verification again.
 	fix := httptest.NewRecorder()
 	s.handler().ServeHTTP(fix, httptest.NewRequest(http.MethodPatch, "/api/sources/"+id, strings.NewReader(`{"credential_ref":"good-token"}`)))
 	if fix.Code != http.StatusOK {
@@ -796,7 +585,7 @@ func TestSourceRevokedCredentialDegradesVisibly(t *testing.T) {
 		t.Fatalf("recovery verify status=%d body=%s", recovered.Code, recovered.Body.String())
 	}
 	ok := pushDelivery(t, s, id, secret, "d-recovered", strings.Repeat("d", 40))
-	if ok.Code != http.StatusOK || !strings.Contains(ok.Body.String(), `"status":"admitted"`) {
+	if ok.Code != http.StatusOK || !strings.Contains(ok.Body.String(), noAppConnected) {
 		t.Fatalf("recovered delivery status=%d body=%s", ok.Code, ok.Body.String())
 	}
 }
@@ -812,26 +601,32 @@ func TestSourceWebhookUnknownSource(t *testing.T) {
 
 func TestSourceDelete(t *testing.T) {
 	s, _ := sourceTestServer(t, nil)
-	id, _ := createBoundSource(t, s, "https://github.com/team/app", "main")
-	// Legacy-census fence: a source predating durable preview ownership is
-	// refused deletion with the documented error until the former-target
-	// census is durably recorded.
-	refused := httptest.NewRecorder()
-	s.handler().ServeHTTP(refused, httptest.NewRequest(http.MethodDelete, "/api/sources/"+id, nil))
-	if refused.Code != http.StatusConflict || !strings.Contains(refused.Body.String(), "source predates durable preview ownership; former-target audit and fenced reconciliation required before deletion") {
-		t.Fatalf("pre-census delete status=%d body=%s", refused.Code, refused.Body.String())
+	id, secret := createSource(t, s, "github", "https://github.com/team/app", "main")
+	if response := pushDelivery(t, s, id, secret, "d-1", strings.Repeat("a", 40)); response.Code != http.StatusOK {
+		t.Fatalf("delivery status=%d", response.Code)
 	}
-	// The refusal leaves the source fully present: the API read stays 200
-	// and the webhook endpoint stays live (an unsigned delivery answers
-	// 401, not the 404 a deleted source's hook would).
-	present := httptest.NewRecorder()
-	s.handler().ServeHTTP(present, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
-	if present.Code != http.StatusOK {
-		t.Fatalf("get after refused delete status=%d", present.Code)
+	// A lifecycle.json left by the removed pipeline does not block deletion.
+	legacy := filepath.Join(s.config.DataDir, "sources", id, "lifecycle.json")
+	if err := os.WriteFile(legacy, []byte(`{"schema":1,"legacy_audit_required":true,"watermarks":{},"previews":{}}`), 0600); err != nil {
+		t.Fatal(err)
 	}
-	hook := httptest.NewRecorder()
-	s.handler().ServeHTTP(hook, httptest.NewRequest(http.MethodPost, "/hooks/sources/"+id, strings.NewReader(`{}`)))
-	if hook.Code != http.StatusUnauthorized {
-		t.Fatalf("hook after refused delete status=%d", hook.Code)
+	deleted := httptest.NewRecorder()
+	s.handler().ServeHTTP(deleted, httptest.NewRequest(http.MethodDelete, "/api/sources/"+id, nil))
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	gone := httptest.NewRecorder()
+	s.handler().ServeHTTP(gone, httptest.NewRequest(http.MethodGet, "/api/sources/"+id, nil))
+	if gone.Code != http.StatusNotFound {
+		t.Fatalf("get after delete status=%d", gone.Code)
+	}
+	if hook := pushDelivery(t, s, id, secret, "d-2", strings.Repeat("a", 40)); hook.Code != http.StatusNotFound {
+		t.Fatalf("hook after delete status=%d", hook.Code)
+	}
+	if previews := httptest.NewRecorder(); true {
+		s.handler().ServeHTTP(previews, httptest.NewRequest(http.MethodGet, "/api/sources/"+id+"/previews", nil))
+		if previews.Code != http.StatusNotFound {
+			t.Fatalf("previews route status=%d, want 404", previews.Code)
+		}
 	}
 }

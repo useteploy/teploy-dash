@@ -132,10 +132,9 @@ drives.
    `POST /api/deploy {server, app, image, domain?, port?}` — an ad-hoc
    image deploy **requires a domain** (Caddy routing); omitting it is
    refused before any effect and the operation journal shows the CLI's
-   exact stderr (`'domain' is required`). Projects can also deploy from
-   registered git sources (webhook-driven) or dash-managed manifests.
-   Deploying an app that already exists on the server (deployed via the
-   CLI) needs no form at all — its page has the action buttons.
+   exact stderr (`'domain' is required`). Deploying an app that already
+   exists on the server (deployed via the CLI) needs no form at all — its
+   page has the action buttons.
 5. **Watch the operation.** Every action is an operation:
    `queued → running → succeeded | failed | canceled | ...` (the full
    state list is below). The Activity view and the operation's event
@@ -413,7 +412,7 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / PATCH / DELETE | `/api/sources/{id}` | Detail (with recent webhook deliveries and their dispositions) / update display name, default branch, credential reference / delete. Identity fields are immutable. |
 | POST | `/api/sources/{id}/verify` | Run the credential verifier; a failure marks the source degraded with the exact reason (visible everywhere, deliveries are then recorded-and-refused, never silently dropped). Answers 501 when no verifier is configured. |
 | POST | `/api/sources/{id}/rotate-secret` | Replace the webhook secret; returns the new value exactly once. |
-| POST | `/hooks/sources/{id}` | Inbound forge webhook (no session — the signature IS the auth: `X-Hub-Signature-256` HMAC-SHA256, or GitLab `X-Gitlab-Token` / `X-Gitlab-Signature` HMAC-SHA256). Authenticated pushes to the watched default branch that carry a pinnable commit are recorded in a durable per-source ledger (dedupe by delivery id) and admitted onto the operation queue as `git-managed` manifest applies carrying the source id and the authenticated commit; live forge authority and durable lifecycle intent must validate before admitted work supersedes still-queued work from the same source. Duplicate deliveries answer `{"status":"duplicate"}`; pings/tags/deletions/unwatched branches are recorded-and-ignored. |
+| POST | `/hooks/sources/{id}` | Inbound forge webhook (no session — the signature IS the auth: `X-Hub-Signature-256` HMAC-SHA256, or GitLab `X-Gitlab-Token` / `X-Gitlab-Signature` HMAC-SHA256; Gitea/Forgejo native signature headers are accepted too). Authenticated pushes to the watched default branch that carry a pinnable commit are verified against the live branch head and recorded in a durable per-source ledger (dedupe by delivery id). **Nothing deploys from a delivery yet** — until an app is connected to the repository (coming soon), verified pushes are recorded as ignored with reason "no app is connected to this repository yet". Duplicate deliveries answer `{"status":"duplicate"}`; pings/tags/deletions/unwatched branches and pull request events (previews are not supported yet) are recorded-and-ignored. |
 | GET | `/api/sso` | List SSO principals (admin). |
 | POST | `/api/sso/revoke` | Revoke all sessions of one SSO principal `{subject}` (admin). |
 | POST | `/api/users/{username}/revoke-sessions` | Revoke all sessions of one local account (admin). |
@@ -437,7 +436,7 @@ reveal.secrets capability"}`).
 | `view.metadata` | Non-secret reads: fleet/status/drift/stats/health, env and KV key listings, operations, monitors. |
 | `reveal.secrets` | Reading env and KV **values**. The one deliberately-not-viewer read. |
 | `execute.deploy` | Deploy, rollback, container lifecycle, maintenance, remove, lock/unlock, template install, operation cancel/retry. |
-| `execute.mutate` | env/KV writes and dashboard config mutations (monitors, groups, homepage, manifests). |
+| `execute.mutate` | env/KV writes and dashboard config mutations (monitors, groups, homepage). |
 | `restore.data` | Restore-test create/edit/delete/run (destructive against backup data). |
 | `administer.credentials` | MCP tokens, server config, image registries, notification channels, git sources. |
 | `administer.users` | Accounts and SSO principals. |
@@ -489,12 +488,11 @@ offering a competing product, and each version automatically becomes MIT two
 years after its release. See `LICENSE`. The embedded `frontend/js/alpine.js`
 is Alpine.js, MIT-licensed and used unmodified.
 
-### Git source credentials and review previews
+### Git source credentials and webhooks
 
-The Sources page registers a forge repository and shows credential verdicts,
-webhook deliveries, immutable heads, and preview operations. Source APIs require
-`administer.credentials`; deployment admission retains `execute.deploy`.
-`POST /api/sources/{id}/verify` now uses a production verifier. An absent or
+The Sources page registers a forge repository and shows credential verdicts
+and webhook deliveries. Source APIs require `administer.credentials`.
+`POST /api/sources/{id}/verify` uses a production verifier. An absent or
 invalid provider configuration fails closed and records a visible degraded
 verdict. It does not return a successful verification without contacting the
 repository provider.
@@ -518,24 +516,18 @@ belong in clone URLs, request bodies, command arguments or audit records.
     "repository": "https://github.com/team/app",
     "app_id": 123,
     "installation_id": 456,
-    "private_key_file": "/run/secrets/team-app.pem",
-    "preview": {
-      "manifest_file": "/etc/teploy-dash/team-app-preview.yml",
-      "base_domain": "previews.example.com",
-      "allow_ips": ["100.64.0.0/10"],
-      "ttl": "24h"
-    }
+    "private_key_file": "/run/secrets/team-app.pem"
   }
 }
 ```
 
 These identifiers and paths are examples; provision your own installation and
 credentials. App access tokens are freshly signed/exchanged for one repository
-with `contents:read` and, for previews, `pull_requests:read`. The installation,
-returned repository scope, permissions and expiry are checked. Files are read
-on each use, so key/token rotation requires no restart. Tokens are not persisted
-or cached. GitHub/GitLab/Gitea/Forgejo verification checks repository identity
-and content-read access through the provider API; `generic` uses authenticated
+with `contents:read`. The installation, returned repository scope, permissions
+and expiry are checked. Files are read on each use, so key/token rotation
+requires no restart. Tokens are not persisted or cached.
+GitHub/GitLab/Gitea/Forgejo verification checks repository identity and
+content-read access through the provider API; `generic` uses authenticated
 Git `ls-remote`. GitLab requires API read and repository read permissions.
 
 `api_url` can explicitly select an enterprise/self-hosted API origin. HTTPS,
@@ -545,75 +537,18 @@ Only an operator configuration with `allow_private:true` permits private network
 addresses or plain HTTP for a trusted self-hosted provider. Git also pins its
 admitted DNS addresses and disables redirects, system/global Git configuration,
 credential helpers and interactive prompts. Authentication uses a temporary
-private askpass file; it is destroyed before checked-out content is consumed.
-Remote error bodies and transport diagnostics never become credential verdicts.
+private askpass file. Remote error bodies and transport diagnostics never
+become credential verdicts.
 
-A source webhook now fetches its authenticated full commit hash into an isolated
-checkout, checks the fetched commit exactly, and runs the existing CLI from that
-checkout. Moving a branch cannot change admitted work. A Git-managed manifest
-binds the repository and target app; its `manifest_path` may select a monorepo
-`teploy.yml`. Escaping paths/symlinks and mismatched app names are refused.
-Registered `autodeploy.paths` rules select monorepo apps using the CLI glob
-grammar. Truncated or absent file lists deploy conservatively; only complete
-authenticated push file lists can skip an app. Production applies use the checked-out manifest rather than the registered
-manifest copy. Existing CLI plan, literal environment and volume ownership
-contracts are unchanged.
-
-GitHub App previews accept signed `opened`, `reopened`, `synchronize` and `closed`
-pull request deliveries for that installation and repository. Fork heads are
-refused. Before execution and again after build, the App API must confirm the
-same current head and lifecycle timestamp; a delayed old event cannot resurrect
-a closed or superseded review. Build image/version receipts must match the
-checked-out commit. Preview build/deploy/close/expiry operations share the app's
-existing FIFO. Close queues cleanup for `dash-<source-id>-pr-<number>`. Cleanup currently refuses execution until the bundled CLI implements and passes the atomic preview generation compare-and-destroy contract.
-
-The preview policy manifest is a separate private operator file, with the bound
-`app` and a Dockerfile/context inside the checkout. Allowed fields are `app`,
-`port`, `dockerfile`, `context`, `domain`, `healthcheck`, `health_check`,
-`resources` and `ingress`. Environment, secret references, hooks, accessories,
-images and volumes are refused. The current CLI preview contract uses container
-port 80; other ports are refused here pending an upstream CLI contract change.
-An explicit base domain and IP/CIDR allowlist are required; TTL is 1 minute to
-7 days. For example:
-
-```yaml
-app: web
-port: 80
-dockerfile: Dockerfile
-```
-
-`GET /api/sources/{id}/previews` reads live CLI access/expiry state and includes
-operation history with full immutable heads and review links. While Dash serves,
-a bounded minute maintenance loop admits cleanup for expired Dash-owned previews.
-Durable preview ownership retains the admitted stable server ID, app, branch and
-private policy bytes independently of current manifest bindings. Rename resolves
-that stable ID; reusing a name cannot authorize cleanup. Failed cleanup retains
-its operation and ownership for retry. Source DELETE refuses retained ownership
-until atomic remote cleanup and fenced absence reconciliation are available.
-Sources predating the ownership registry require a former-target census even
-when their bounded operation history has expired. Maintenance cancels and joins
-at shutdown.
-
-Both runtime Dockerfiles supply Git, rsync and OpenSSH clients. Remote source,
-Dockerfile and static builds use these tools and a separately provisioned target;
-remote Nixpacks requirements belong to that target. The stock Dash image supplies
-no Docker engine/socket or local Nixpacks. A source manifest selecting local
-builds needs an explicitly provisioned local build environment; it is outside the
-stock image contract. No host Docker socket is mounted automatically.
-
-Signed push admission checks the forge's current branch SHA (GitHub, GitLab,
-Gitea and Forgejo native branch APIs; generic HTTPS uses authenticated Git).
-Commit timestamps are not delivery freshness clocks. Durable source intent
-records retain commit plus current configuration/target identity beyond delivery
-ledger retention. Gitea/Forgejo native event, delivery and hex SHA256-signature headers are
-accepted alongside GitHub-compatible headers. GitLab accepts its token header or `X-Gitlab-Signature`
-HMAC-SHA256 variant. PR admission compares durable lifecycle chronology and live
-state/head authority before canceling older queued work. Equal timestamps use
-live state and SHA, and replacement admission must persist before superseding.
-These are Dash-local guarantees. Convergence with manual, scheduled, CI and the
-separate CLI listener still requires target-resident shared receipts and an
-accepted CLI artifact; local FIFO or MI2 is insufficient evidence.
-
-Local provider/Git fixtures do not establish real installation permissions,
-Docker build isolation, external ingress, credential rotation on a live target,
-or rendered-browser acceptance. Those remain deployment acceptance gates.
+**Nothing deploys from a webhook yet.** The former dash-side deploy pipeline
+(manifest store, webhook-triggered applies, PR previews) was removed: app
+settings live on the app's server (Settings tab / `teploy config`), and
+authenticated pushes are recorded in the delivery ledger only, ignored with
+reason "no app is connected to this repository yet", until connecting an app
+to a repository ships. Push verification still checks the forge's current
+branch SHA (GitHub, GitLab, Gitea and Forgejo native branch APIs; generic
+HTTPS uses authenticated Git `ls-remote`); commit timestamps are not delivery
+freshness clocks. Gitea/Forgejo native event, delivery and hex SHA256-signature
+headers are accepted alongside GitHub-compatible headers. GitLab accepts its
+token header or `X-Gitlab-Signature` HMAC-SHA256 variant. Pull request
+deliveries are recorded-and-ignored (previews are not supported yet).

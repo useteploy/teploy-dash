@@ -11,21 +11,14 @@ import (
 )
 
 var (
-	identifierPattern       = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	varNamePattern          = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	sourceIDPattern         = regexp.MustCompile(`^src-[a-f0-9]{16}$`)
-	sourceCommitPattern     = regexp.MustCompile(`^[a-f0-9]{40}$|^[a-f0-9]{64}$`)
-	manifestRevisionPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	varNamePattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
 // Build validates a request and renders its CLI command. Alongside the
 // command it returns the resolved server snapshot used to build it, so
 // admission can persist the target identity it acted on (A14).
-func Build(req Request, resolve Resolver, projectResolvers ...ProjectResolver) (Command, Server, string, error) {
-	var resolveProject ProjectResolver
-	if len(projectResolvers) > 0 {
-		resolveProject = projectResolvers[0]
-	}
+func Build(req Request, resolve Resolver) (Command, Server, string, error) {
 	switch req.Kind {
 	case KindDeploy:
 		return BuildDeploy(req, resolve)
@@ -49,8 +42,6 @@ func Build(req Request, resolve Resolver, projectResolvers ...ProjectResolver) (
 		return BuildAppLifecycle(req, resolve)
 	case KindMaintenance:
 		return BuildMaintenance(req, resolve)
-	case KindManifestApply, KindManifestPlan, KindManifestValidate, KindSourcePreview, KindSourcePreviewDestroy, KindSourcePreviewExpire:
-		return BuildManifest(req, resolve, resolveProject)
 	default:
 		return Command{}, Server{}, "", fmt.Errorf("unsupported operation kind %q", req.Kind)
 	}
@@ -122,72 +113,6 @@ func BuildDeploy(req Request, resolve Resolver) (Command, Server, string, error)
 		return Command{}, Server{}, "", fmt.Errorf("home must be teploy or empty")
 	}
 	return Command{Args: args, Timeout: 30 * time.Minute}, srv, appTarget(req), nil
-}
-
-func BuildManifest(req Request, resolve Resolver, resolveProject ProjectResolver) (Command, Server, string, error) {
-	if req.SourceID != "" || req.SourceCommit != "" {
-		if !sourceIDPattern.MatchString(req.SourceID) || (req.Kind != KindSourcePreviewExpire && (!sourceCommitPattern.MatchString(req.SourceCommit) || strings.Trim(req.SourceCommit, "0") == "")) || req.Mode != "git-managed" {
-			return Command{}, Server{}, "", fmt.Errorf("invalid immutable source provenance")
-		}
-	}
-	if req.Kind == KindSourcePreview || req.Kind == KindSourcePreviewDestroy || req.Kind == KindSourcePreviewExpire {
-		if req.SourceID == "" || req.SourcePullRequest <= 0 {
-			return Command{}, Server{}, "", fmt.Errorf("preview requires source and pull request authority")
-		}
-		if req.Kind != KindSourcePreviewExpire {
-			if _, err := time.Parse(time.RFC3339, req.SourcePullUpdatedAt); err != nil {
-				return Command{}, Server{}, "", fmt.Errorf("preview requires a valid lifecycle timestamp")
-			}
-		}
-	}
-	srv, err := resolveRequest(req, resolve, true)
-	if err != nil {
-		return Command{}, Server{}, "", err
-	}
-	if req.Mode != "dash-managed" && req.Mode != "git-managed" {
-		return Command{}, Server{}, "", fmt.Errorf("manifest mode must be dash-managed or git-managed")
-	}
-	projectDir := "." // wrapper supplies the retained policy workspace for cleanup
-	if req.Kind != KindSourcePreviewDestroy && req.Kind != KindSourcePreviewExpire {
-		if !manifestRevisionPattern.MatchString(req.ManifestRevision) {
-			return Command{}, Server{}, "", fmt.Errorf("invalid manifest revision")
-		}
-		if resolveProject == nil {
-			return Command{}, Server{}, "", fmt.Errorf("manifest project resolver is unavailable")
-		}
-		projectDir, err = resolveProject(req.Server, req.App, req.ManifestRevision)
-		if err != nil {
-			return Command{}, Server{}, "", err
-		}
-		if projectDir == "" {
-			return Command{}, Server{}, "", fmt.Errorf("manifest project directory is unavailable")
-		}
-	}
-	var action string
-	var timeout time.Duration
-	switch req.Kind {
-	case KindSourcePreview, KindSourcePreviewDestroy, KindSourcePreviewExpire:
-		action, timeout = "build", 30*time.Minute
-	case KindManifestApply:
-		action, timeout = "deploy", 30*time.Minute
-	case KindManifestPlan:
-		action, timeout = "plan", 10*time.Minute
-	case KindManifestValidate:
-		action, timeout = "validate", 10*time.Minute
-	}
-	args := []string{"--project-dir", projectDir, action, "--host", srv.Host}
-	args = addUser(args, srv.User)
-	if req.Kind != KindManifestApply {
-		args = append(args, "--json")
-	}
-	command := Command{Args: args, Timeout: timeout}
-	if req.SourceID != "" {
-		copy := req
-		command.SourceRequest = &copy
-	}
-	// Preview and production mutations share the target FIFO: close cleanup
-	// cannot race a build/deploy that was already admitted for this app.
-	return command, srv, appTarget(req), nil
 }
 
 func BuildRollback(req Request, resolve Resolver) (Command, Server, string, error) {
