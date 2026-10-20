@@ -598,18 +598,19 @@ func EnvUnset(server, user, app, key string, extra ...string) (*Result, error) {
 }
 
 // AccessoryVerifyBackup runs `teploy accessory verify-backup` against a
-// server's accessory. Uses plain Run (NOT RunChecked): the CLI exits non-zero
-// when verification fails but still prints the structured JSON result on
-// stdout — the caller parses that and treats ok=false as a result, not an
-// operational error.
-func AccessoryVerifyBackup(server, user, app, accessory, bucket, region string) (*Result, error) {
-	return AccessoryVerifyBackupContext(context.Background(), server, user, app, accessory, bucket, region)
+// server's accessory. No bucket/region is passed (plan D3): the CLI resolves
+// the server's stored backup target at run time. Uses plain Run (NOT
+// RunChecked): the CLI exits non-zero when verification fails but still
+// prints the structured JSON result on stdout — the caller parses that and
+// treats ok=false as a result, not an operational error.
+func AccessoryVerifyBackup(server, user, app, accessory string) (*Result, error) {
+	return AccessoryVerifyBackupContext(context.Background(), server, user, app, accessory)
 }
 
 // AccessoryVerifyBackupContext uses the runner lifetime, independent of a
 // browser request, so shutdown can cancel the subprocess before closing stores.
-func AccessoryVerifyBackupContext(ctx context.Context, server, user, app, accessory, bucket, region string) (*Result, error) {
-	args := []string{"accessory", "verify-backup", accessory, "--app", app, "--host", server, "--bucket", bucket, "--region", region, "--json"}
+func AccessoryVerifyBackupContext(ctx context.Context, server, user, app, accessory string) (*Result, error) {
+	args := []string{"accessory", "verify-backup", accessory, "--app", app, "--host", server, "--json"}
 	args = append(args, userArgs(user)...)
 	return RunContext(ctx, args...)
 }

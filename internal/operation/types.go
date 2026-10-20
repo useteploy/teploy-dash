@@ -18,13 +18,23 @@ const (
 	KindTemplateInstall Kind = "template_install"
 	KindAppLifecycle    Kind = "app_lifecycle"
 	KindMaintenance     Kind = "maintenance"
+	// KindRedeploy redeploys the current release with env re-resolved
+	// (server-authority plan D2, CLI token redeploy-v1) — the operation
+	// that makes a secret or env edit reach a folder app's containers.
+	KindRedeploy Kind = "redeploy"
+	// KindBackupCreate / KindBackupRestore run the CLI's backup actions
+	// (plan D3, token backup-json-v1) as durable operations: both can stop
+	// or hold the app under its fenced lock for minutes.
+	KindBackupCreate  Kind = "backup_create"
+	KindBackupRestore Kind = "backup_restore"
 )
 
 // Records of the removed manifest_* and source_preview* kinds still load and
 // display; Build refuses them and Retry answers ErrNotRetryable.
 func supportedKind(kind Kind) bool {
 	switch kind {
-	case KindDeploy, KindRollback, KindRemove, KindTemplateInstall, KindAppLifecycle, KindMaintenance:
+	case KindDeploy, KindRollback, KindRemove, KindTemplateInstall, KindAppLifecycle, KindMaintenance,
+		KindRedeploy, KindBackupCreate, KindBackupRestore:
 		return true
 	default:
 		return false
@@ -113,6 +123,14 @@ type Request struct {
 	Action          string            `json:"action,omitempty"`
 	Purge           bool              `json:"purge,omitempty"`
 	Redirect        string            `json:"redirect,omitempty"`
+	// To names the release a rollback targets (`rollback --to X`, CLI token
+	// rollback-json-v1). Empty rolls back to the previous release, as before.
+	To string `json:"to,omitempty"`
+	// Accessory scopes a backup create/restore to one accessory instead of
+	// the app's volumes.
+	Accessory string `json:"accessory,omitempty"`
+	// BackupID is the backup a restore promotes (`backup restore <id>`).
+	BackupID string `json:"backup_id,omitempty"`
 }
 
 type Operation struct {

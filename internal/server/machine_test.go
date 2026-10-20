@@ -209,6 +209,15 @@ func TestLegacyLifecycleActionEnqueuesOperation(t *testing.T) {
 	s := New(Config{
 		DataDir: t.TempDir(), NoAuth: true,
 		CLIInstalled: func() bool { return true },
+		// The operation's actor-args gate probes the CLI's tokens; pin the
+		// probe to a pre-actor-flag answer so the expected argv below is
+		// deterministic regardless of the teploy installed on this machine.
+		CLIRunner: func(_ context.Context, args ...string) (*cli.Result, error) {
+			if strings.Join(args, " ") == "version --json" {
+				return &cli.Result{Stdout: `{"version":"teploy v0.1.40","machine_interface":2,"capabilities":[]}`}, nil
+			}
+			return &cli.Result{}, nil
+		},
 		OperationResolver: func(name string) (operation.Server, error) {
 			return operation.Server{Name: name, Host: "192.0.2.10", User: "deploy"}, nil
 		},

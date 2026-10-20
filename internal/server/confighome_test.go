@@ -77,12 +77,13 @@ var allConfigTokens = []string{"app-list-machine", "server-status-machine", "eve
 func newConfigServer(t *testing.T, c *configRunner) *Server {
 	t.Helper()
 	return New(Config{
-		DataDir:        t.TempDir(),
-		NoAuth:         true,
-		CLIInstalled:   func() bool { return true },
-		CLIRunner:      c.run,
-		CLIStdinRunner: c.runStdin,
-		CLIIdentity:    func() string { return "test-cli" },
+		DataDir:         t.TempDir(),
+		NoAuth:          true,
+		CLIInstalled:    func() bool { return true },
+		CLIRunner:       c.run,
+		CLIStdinRunner:  c.runStdin,
+		CLIIdentity:     func() string { return "test-cli" },
+		EnvStdinSupport: func() (bool, error) { return true, nil },
 	})
 }
 

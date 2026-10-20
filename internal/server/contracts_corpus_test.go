@@ -218,3 +218,31 @@ func TestDecodeAppListEnvelopeRefusesNewerMachineInterface(t *testing.T) {
 		t.Fatalf("want a machine-interface refusal, got %v", err)
 	}
 }
+
+// Plan D5 artifacts (corpus revs 14-15, schema-validated by the node leg):
+// every envelope the new screens forward must also decode through dash's
+// shared CLI JSON gate — one JSON value, number fidelity, and the
+// newer-machine-interface refusal. The releases fixture additionally pins
+// the row fields the Releases tab renders (current / rollback_available).
+func TestContractsCorpusScreensEnvelopesDecode(t *testing.T) {
+	fixtures := map[string]string{
+		"releases-envelope":       "releases-envelope/valid/container-app.json",
+		"releases-static":         "releases-envelope/valid/static-app.json",
+		"rollback-result":         "rollback-result/valid/success.json",
+		"redeploy-result":         "redeploy-result/valid/teploy-home.json",
+		"redeploy-folder":         "redeploy-result/valid/folder-home.json",
+		"backup-target-envelope":  "backup-target-envelope/valid/configured.json",
+		"backup-list-envelope":    "backup-list-envelope/valid/app.json",
+		"backup-list-legacy":      "backup-list-envelope/valid/legacy-schedule.json",
+		"backup-create-envelope":  "backup-create-envelope/valid/volumes.json",
+		"backup-restore-envelope": "backup-restore-envelope/valid/ok.json",
+	}
+	for name, path := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			raw := readCorpusFixture(t, path)
+			if _, err := cli.ParseJSON(raw); err != nil {
+				t.Fatalf("%s fixture must decode through dash's CLI JSON gate: %v", name, err)
+			}
+		})
+	}
+}

@@ -13,6 +13,10 @@ import (
 var (
 	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	varNamePattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// backupIDPattern is the CLI's backup identity grammar (plan D3):
+	// 20060102-150405, optionally suffixed -0123456789abcdef. Mirrored
+	// here so a crafted id never reaches the CLI's argv.
+	backupIDPattern = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(-[0-9a-f]{1,16})?$`)
 )
 
 // Build validates a request and renders its CLI command. Alongside the
@@ -42,6 +46,12 @@ func Build(req Request, resolve Resolver) (Command, Server, string, error) {
 		return BuildAppLifecycle(req, resolve)
 	case KindMaintenance:
 		return BuildMaintenance(req, resolve)
+	case KindRedeploy:
+		return BuildRedeploy(req, resolve)
+	case KindBackupCreate:
+		return BuildBackupCreate(req, resolve)
+	case KindBackupRestore:
+		return BuildBackupRestore(req, resolve)
 	default:
 		return Command{}, Server{}, "", fmt.Errorf("unsupported operation kind %q", req.Kind)
 	}
@@ -120,7 +130,16 @@ func BuildRollback(req Request, resolve Resolver) (Command, Server, string, erro
 	if err != nil {
 		return Command{}, Server{}, "", err
 	}
+	// rollback --to X (token rollback-json-v1): dash only ever passes ids
+	// the releases list handed it, but the grammar check keeps a crafted
+	// request from smuggling extra argv onto the CLI call.
+	if req.To != "" && (len(req.To) > 128 || !validIdentifier(req.To)) {
+		return Command{}, Server{}, "", fmt.Errorf("invalid rollback target")
+	}
 	args := []string{"rollback", "--host", srv.Host, "--app", req.App}
+	if req.To != "" {
+		args = append(args, "--to", req.To)
+	}
 	return Command{Args: addUser(args, srv.User), Timeout: 10 * time.Minute}, srv, appTarget(req), nil
 }
 
@@ -236,6 +255,58 @@ func BuildMaintenance(req Request, resolve Resolver) (Command, Server, string, e
 	}
 	args := []string{"maintenance", req.Action, "--host", srv.Host, "--app", req.App}
 	return Command{Args: addUser(args, srv.User), Timeout: 5 * time.Minute}, srv, appTarget(req), nil
+}
+
+// BuildRedeploy renders `teploy redeploy --app X --host S --json` (plan D2,
+// token redeploy-v1): a fresh deploy of the current release's recorded image
+// with env re-resolved. Same ceiling as a deploy — it IS one, engine-wise.
+func BuildRedeploy(req Request, resolve Resolver) (Command, Server, string, error) {
+	srv, err := resolveRequest(req, resolve, true)
+	if err != nil {
+		return Command{}, Server{}, "", err
+	}
+	args := []string{"redeploy", "--json", "--host", srv.Host, "--app", req.App}
+	return Command{Args: addUser(args, srv.User), Timeout: 30 * time.Minute}, srv, appTarget(req), nil
+}
+
+// BuildBackupCreate renders `teploy backup create --json` (plan D3, token
+// backup-json-v1). The server's stored backup target supplies the bucket,
+// region and credentials — dash never passes them.
+func BuildBackupCreate(req Request, resolve Resolver) (Command, Server, string, error) {
+	srv, err := resolveRequest(req, resolve, true)
+	if err != nil {
+		return Command{}, Server{}, "", err
+	}
+	args := []string{"backup", "create", "--json", "--host", srv.Host, "--app", req.App}
+	if req.Accessory != "" && !validIdentifier(req.Accessory) {
+		return Command{}, Server{}, "", fmt.Errorf("invalid accessory")
+	}
+	if req.Accessory != "" {
+		args = append(args, "--accessory", req.Accessory)
+	}
+	return Command{Args: addUser(args, srv.User), Timeout: 30 * time.Minute}, srv, appTarget(req), nil
+}
+
+// BuildBackupRestore renders `teploy backup restore <id> --yes --json`: the
+// quiesced restore under the app's fenced lock. --yes because the operation
+// runs non-interactively; the typed confirmation lives in the UI that admits
+// it.
+func BuildBackupRestore(req Request, resolve Resolver) (Command, Server, string, error) {
+	srv, err := resolveRequest(req, resolve, true)
+	if err != nil {
+		return Command{}, Server{}, "", err
+	}
+	if !backupIDPattern.MatchString(req.BackupID) {
+		return Command{}, Server{}, "", fmt.Errorf("invalid backup id")
+	}
+	if req.Accessory != "" && !validIdentifier(req.Accessory) {
+		return Command{}, Server{}, "", fmt.Errorf("invalid accessory")
+	}
+	args := []string{"backup", "restore", req.BackupID, "--yes", "--json", "--host", srv.Host, "--app", req.App}
+	if req.Accessory != "" {
+		args = append(args, "--accessory", req.Accessory)
+	}
+	return Command{Args: addUser(args, srv.User), Timeout: 60 * time.Minute}, srv, appTarget(req), nil
 }
 
 func resolveRequest(req Request, resolve Resolver, appRequired bool) (Server, error) {

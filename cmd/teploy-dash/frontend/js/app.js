@@ -969,6 +969,27 @@ document.addEventListener('alpine:init', () => {
     events: [],
     eventsLoading: false,
     eventsError: '',
+    // D5 screens state: the releases list with rollback-to, write-only
+    // secrets, and the app's backups. All CLI-backed; empty until their
+    // tab opens. backupRestore holds the row whose typed confirmation is
+    // open ({id, accessory}); backupRestoreConfirm is the typed app name.
+    releases: [],
+    releasesLoading: false,
+    releasesError: '',
+    secrets: [],
+    secretsLoading: false,
+    newSecretKey: '',
+    newSecretValue: '',
+    backups: null,
+    backupsLoading: false,
+    backupsError: '',
+    backupSaving: false,
+    backupRestore: null,
+    backupRestoreConfirm: '',
+    // Drafts for the two structured Settings fields (Web instances /
+    // Domain). They patch the YAML draft on Update; the save itself is the
+    // existing compare-and-swap PUT.
+    settingsFields: { replicas: '', domain: '' },
     deployLog: [],
     accessories: [],
     // D05 database-action inventory state: dbActions holds the server's
@@ -1020,6 +1041,12 @@ document.addEventListener('alpine:init', () => {
       return this.caps.includes('*') || this.caps.includes('reveal.secrets');
     },
 
+    // Backup restore overwrites live data: restore.data, not execute.deploy.
+    canRestoreData() {
+      if (this.caps === null) return true; // unknown: let the server answer
+      return this.caps.includes('*') || this.caps.includes('restore.data');
+    },
+
     async init() {
       this.activateResource(Alpine.store('router').params);
       // Same-type navigation (app A -> app B) does not remount this
@@ -1051,6 +1078,20 @@ document.addEventListener('alpine:init', () => {
       this.events = [];
       this.eventsError = '';
       this.eventsLoading = false;
+      this.releases = [];
+      this.releasesLoading = false;
+      this.releasesError = '';
+      this.secrets = [];
+      this.secretsLoading = false;
+      this.newSecretKey = '';
+      this.newSecretValue = '';
+      this.backups = null;
+      this.backupsLoading = false;
+      this.backupsError = '';
+      this.backupSaving = false;
+      this.backupRestore = null;
+      this.backupRestoreConfirm = '';
+      this.settingsFields = { replicas: '', domain: '' };
       this.deployLog = [];
       this.accessories = [];
       this.drift = null;
@@ -1080,6 +1121,7 @@ document.addEventListener('alpine:init', () => {
       this.kvValues = {};
       this.newEnvValue = '';
       this.newKvValue = '';
+      this.newSecretValue = '';
     },
 
     async reload() {
@@ -1120,12 +1162,14 @@ document.addEventListener('alpine:init', () => {
     },
     hasFeature(name) { return !!(this.features && this.features[name]); },
 
-    // "Settings edited in": folder, Teploy or unknown ('' with an older CLI).
+    // "Settings edited in": folder, its repository, Teploy or unknown (''
+    // with an older CLI).
     configHome() { return (this.configAuthority && this.configAuthority.home) || ''; },
     configHomeLabel() {
       switch (this.configHome()) {
         case 'teploy': return 'Teploy';
         case 'folder': return 'Its folder (teploy.yml)';
+        case 'repo': return 'Its repository';
         default: return '';
       }
     },
@@ -1168,6 +1212,7 @@ document.addEventListener('alpine:init', () => {
         this.settingsMerge = null;
         this.settingsViewing = null;
         this.settingsHistory = (history && history.commits) || [];
+        this.resetSettingsFields();
       } catch (e) {
         if (this.resource === target) this.settingsError = e.message;
       }
@@ -1214,6 +1259,7 @@ document.addEventListener('alpine:init', () => {
       this.settingsBase = this.settings.commit || '';
       this.settingsMerge = null;
       this.settingsError = '';
+      this.resetSettingsFields();
     },
 
     mergeValue(v, removed) {
@@ -1345,6 +1391,192 @@ document.addEventListener('alpine:init', () => {
         case 'failed': case 'refused': return 'stopped';
         default: return '';
       }
+    },
+
+    // ── D5 screens: releases, secrets, backups ──
+    // Every method is a fresh CLI invocation against the app's server; dash
+    // keeps none of it. Mutations that change deploy state go through the
+    // durable operation path and hand off to the operation page.
+
+    async loadReleases() {
+      const target = this.resource;
+      this.releasesLoading = true;
+      this.releasesError = '';
+      try {
+        const res = await api.get(`${this.appPath()}/releases`);
+        if (this.resource !== target) return;
+        this.releases = (res && res.releases) || [];
+      } catch (e) {
+        if (this.resource === target) this.releasesError = e.message;
+      }
+      if (this.resource === target) this.releasesLoading = false;
+    },
+
+    async rollbackTo(rel) {
+      const target = this.resource;
+      if (!confirm(`Roll ${target.name} on ${target.server} back to ${this.shortHash(rel.release)}?\n\nIt was deployed ${rel.deployed_at ? new Date(rel.deployed_at).toLocaleString() : '(date unknown)'}${rel.image ? ' from ' + rel.image : ''}. The running release is replaced by it.`)) return;
+      this.actionLoading = true;
+      try {
+        const op = await api.post(`${this.appPath()}/rollback`, { to: rel.release });
+        if (isOperation(op)) Alpine.store('router').navigate('operation-detail', { id: op.id });
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.actionLoading = false;
+    },
+
+    async loadSecrets() {
+      const target = this.resource;
+      this.secretsLoading = true;
+      try {
+        const res = await api.get(`${this.appPath()}/secrets`);
+        if (this.resource !== target) return;
+        this.secrets = Array.isArray(res) ? res : [];
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+      if (this.resource === target) this.secretsLoading = false;
+    },
+
+    async addSecret() {
+      const target = this.resource;
+      if (!this.newSecretKey || !this.newSecretValue) return;
+      try {
+        await api.post(`${this.appPath()}/secrets`, { key: this.newSecretKey, value: this.newSecretValue });
+        if (this.resource !== target) return;
+        showToast('Secret set. Redeploy to apply it.', 'success');
+        this.newSecretKey = '';
+        this.newSecretValue = '';
+        await this.loadSecrets();
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+    },
+
+    async deleteSecret(key) {
+      const target = this.resource;
+      if (!confirm(`Remove secret ${key}?\n\nContainers keep the old value in their environment until the app is redeployed.`)) return;
+      try {
+        await api.del(`${this.appPath()}/secrets/${encodeURIComponent(key)}`);
+        if (this.resource !== target) return;
+        showToast('Secret removed. Redeploy to drop it from the environment.', 'success');
+        await this.loadSecrets();
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+    },
+
+    async loadBackups() {
+      const target = this.resource;
+      this.backupsLoading = true;
+      this.backupsError = '';
+      try {
+        const res = await api.get(`${this.appPath()}/backups`);
+        if (this.resource !== target) return;
+        this.backups = res || null;
+      } catch (e) {
+        if (this.resource === target) this.backupsError = e.message;
+      }
+      if (this.resource === target) this.backupsLoading = false;
+    },
+
+    async runBackupNow() {
+      const target = this.resource;
+      this.backupSaving = true;
+      try {
+        const op = await api.post(`${this.appPath()}/backups/create`, {});
+        if (this.resource !== target) return;
+        if (isOperation(op)) Alpine.store('router').navigate('operation-detail', { id: op.id });
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+      if (this.resource === target) this.backupSaving = false;
+    },
+
+    openBackupRestore(row) {
+      this.backupRestore = { id: row.id, accessory: row.accessory || '' };
+      this.backupRestoreConfirm = '';
+    },
+
+    // Restore replaces the app's live data: the confirmation is TYPING the
+    // app name, not a generic OK.
+    async confirmBackupRestore() {
+      const target = this.resource;
+      if (!this.backupRestore) return;
+      if (this.backupRestoreConfirm !== target.name) {
+        showToast(`Type ${target.name} to confirm the restore`, 'error');
+        return;
+      }
+      this.backupSaving = true;
+      try {
+        const body = { id: this.backupRestore.id };
+        if (this.backupRestore.accessory) body.accessory = this.backupRestore.accessory;
+        const op = await api.post(`${this.appPath()}/backups/restore`, body);
+        if (this.resource !== target) return;
+        this.backupRestore = null;
+        this.backupRestoreConfirm = '';
+        if (isOperation(op)) Alpine.store('router').navigate('operation-detail', { id: op.id });
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+      if (this.resource === target) this.backupSaving = false;
+    },
+
+    backupKindLabel(row) {
+      return row.kind === 'accessory' ? `accessory ${row.accessory}` : row.kind;
+    },
+
+    formatBytes(n) {
+      if (!Number.isFinite(n) || n <= 0) return '0 B';
+      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      let value = n, i = 0;
+      while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+      return `${value >= 10 || i === 0 ? Math.round(value) : value.toFixed(1)} ${units[i]}`;
+    },
+
+    // ── Settings fields (Web instances / Domain) ──
+    // Both are top-level keys of the app's teploy.yml. The inputs patch the
+    // YAML draft (so the operator reviews the diff); the commit is the
+    // existing compare-and-swap Save. The CLI's own validation is the
+    // authority — e.g. replicas cannot apply to static apps or apps with a
+    // published/host ingress, and its refusal reason is surfaced on save.
+
+    // topLevelYAML reads one top-level `key: value` scalar from a teploy.yml
+    // body. Deliberately tiny: dash renders two known scalar keys, it does
+    // not parse the config (the CLI does, at save and at deploy).
+    topLevelYAML(body, key) {
+      for (const line of String(body || '').split('\n')) {
+        const m = line.match(new RegExp(`^${key}:\\s*(.*)$`));
+        if (m) return m[1].trim().replace(/^['"]|['"]$/g, '');
+      }
+      return '';
+    },
+
+    resetSettingsFields() {
+      this.settingsFields = {
+        replicas: this.topLevelYAML(this.settingsDraft, 'replicas'),
+        domain: this.topLevelYAML(this.settingsDraft, 'domain'),
+      };
+    },
+
+    // applySettingsFields rewrites (or appends) the two top-level keys in
+    // the draft. Empty input removes nothing — an emptied field keeps the
+    // drafted key untouched; deleting a key stays a YAML edit.
+    applySettingsFields() {
+      if (!this.settings) return;
+      let draft = String(this.settingsDraft || '');
+      for (const [key, raw] of [['replicas', this.settingsFields.replicas], ['domain', this.settingsFields.domain]]) {
+        const value = String(raw || '').trim();
+        if (!value) continue;
+        const re = new RegExp(`^${key}:.*$`, 'm');
+        if (re.test(draft)) {
+          draft = draft.replace(re, `${key}: ${value}`);
+        } else {
+          draft = draft.replace(/\n*$/, '\n') + `${key}: ${value}\n`;
+        }
+      }
+      this.settingsDraft = draft;
+      showToast('Draft updated. Review the YAML and Save.', 'success');
     },
 
     // Env keys this app's Teploy settings declare.
@@ -1627,6 +1859,9 @@ document.addEventListener('alpine:init', () => {
       if (t === 'general') await this.loadAccessories();
       if (t === 'settings') await this.loadSettings();
       if (t === 'activity') await this.loadEvents();
+      if (t === 'releases') await this.loadReleases();
+      if (t === 'backups') await this.loadBackups();
+      if (t === 'env' && this.hasFeature('secrets')) await this.loadSecrets();
       if (t === 'logs') this.$nextTick(() => this.$dispatch('start-logs'));
       // Lazy: an SSH round trip per open, never part of init().
       if (t === 'kv') {
@@ -1644,6 +1879,7 @@ document.addEventListener('alpine:init', () => {
         case 'stop': return `Stop ${where}?\n\nIt stops serving traffic until it is started again.`;
         case 'restart': return `Restart ${where}?\n\nRequests can fail briefly while its containers restart.`;
         case 'rollback': return `Roll back ${where}?\n\nThe running release ${this.shortHash(app.current_hash) || '(unknown)'} is replaced by ${app.previous_hash ? this.shortHash(app.previous_hash) : 'the previous release'}.`;
+        case 'redeploy': return `Redeploy ${where}?\n\nA fresh deploy of the current release's image, with environment and secrets resolved again. This is how a secret or env edit reaches containers; requests can fail briefly while containers restart.`;
         case 'maintenance/on': return `Put ${where} into maintenance?\n\nVisitors see the maintenance page until maintenance is ended.`;
         default: return '';
       }
@@ -1908,8 +2144,6 @@ document.addEventListener('alpine:init', () => {
       server: '',
       app: '',
       accessory: '',
-      bucket: '',
-      region: 'us-east-1',
       interval_hours: '24',
     },
 
@@ -1962,8 +2196,6 @@ document.addEventListener('alpine:init', () => {
           server: this.newTest.server,
           app: this.newTest.app.trim(),
           accessory: this.newTest.accessory.trim(),
-          bucket: this.newTest.bucket.trim(),
-          region: this.newTest.region.trim() || 'us-east-1',
           interval_hours: parseInt(this.newTest.interval_hours) || 24,
           enabled: true,
         };
@@ -2002,7 +2234,7 @@ document.addEventListener('alpine:init', () => {
         // and delivery metadata, which strict POST decoding must reject.
         const config = {
           id: t.id, server: t.server, app: t.app, accessory: t.accessory,
-          bucket: t.bucket, region: t.region, interval_hours: t.interval_hours,
+          interval_hours: t.interval_hours,
           enabled: !t.enabled,
         };
         await rawFetch.post('/api/restore-tests', config);
@@ -2049,7 +2281,7 @@ document.addEventListener('alpine:init', () => {
     resetForm() {
       this.newTest = {
         server: '', app: '', accessory: '',
-        bucket: '', region: 'us-east-1', interval_hours: '24',
+        interval_hours: '24',
       };
     },
 
