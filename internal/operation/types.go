@@ -92,6 +92,10 @@ type Request struct {
 	Domain           string `json:"domain,omitempty"`
 	Port             int    `json:"port,omitempty"`
 	Template         string `json:"template,omitempty"`
+	// Home "teploy" creates a NEW app's settings on its server (spec P2):
+	// deploy runs `deploy --home teploy`, template install `--home teploy`.
+	// Empty keeps today's behavior.
+	Home string `json:"home,omitempty"`
 	// TemplateVersion pins a template install to the catalog version the
 	// operator saw and approved (D05 reviewed versioned packages). It is
 	// dash-side admission state, NOT a CLI flag: `teploy template install`

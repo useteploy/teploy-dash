@@ -60,6 +60,12 @@ const artifacts = {
   "plan-record": { schema: "plan-record.schema.json", classes: { valid: "validate", invalid: "decode-only" } },
   "observation-envelope": { schema: "observation-envelope.schema.json", classes: { valid: "validate" } },
   "operation-record": { schema: "operation-record.schema.json", classes: {} },
+  // Server-authority artifacts (corpus revs 10-13): the server event
+  // history, the config home envelopes and the read-only config merge.
+  "events-envelope": { schema: "events-envelope.schema.json", classes: { valid: "validate" } },
+  "config-envelope": { schema: "config-envelope.schema.json", classes: { valid: "validate" } },
+  "config-history-envelope": { schema: "config-history-envelope.schema.json", classes: { valid: "validate" } },
+  "config-merge-envelope": { schema: "config-merge-envelope.schema.json", classes: { valid: "validate" } },
 };
 
 const failures = [];

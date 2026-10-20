@@ -364,6 +364,8 @@ code { overflow-wrap: anywhere; }
   .check-msg { max-width: 100%; flex-basis: 100%; }
   .log-controls { flex-wrap: wrap; }
   .log-viewer { max-height: 60vh; padding: 12px; }
+  .config-editor { min-height: 50vh; }
+  .pending-banner .btn { width: 100%; }
   /* Tables scroll sideways inside their own container rather than crushing
      every column to a word per line. Rows stay one line; the first column
      (the row's name) is pinned so it stays readable while scrolling. */
@@ -405,6 +407,19 @@ code { overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* App settings (server config) and activity */
+.mono { font-family: var(--mono); }
+.pending-banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+.settings-home { max-width: 680px; }
+.settings-home h3 { margin-bottom: 8px; font-size: 15px; }
+.settings-home p { margin-bottom: 10px; }
+.settings-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 12px; color: var(--text-muted); font-size: 12px; }
+.settings-error { margin-bottom: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.config-editor { display: block; min-height: 360px; padding: 12px; font-family: var(--mono); font-size: 12px; line-height: 1.55; tab-size: 2; white-space: pre; overflow: auto; resize: vertical; }
+.settings-hint { margin: 8px 0 14px; }
+.settings-section { margin: 22px 0 10px; font-size: 15px; }
+.event-detail { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 
 /* Operation center */
 .op-line-err { color: var(--red); }

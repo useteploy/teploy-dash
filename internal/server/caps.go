@@ -183,7 +183,7 @@ func appActionCapabilities(method, path string) []string {
 		switch {
 		case action == "env", action == "kv":
 			return []string{caps.ExecuteMutate}
-		case action == "", action == "stop", action == "start", action == "restart",
+		case action == "", action == "stop", action == "start", action == "restart", action == "deploy",
 			action == "rollback", action == "remove", action == "lock", action == "unlock",
 			action == "maintenance/on", action == "maintenance/off":
 			// Deploy-state changes: lifecycle, rollback, remove, lock,

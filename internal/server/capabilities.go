@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/useteploy/teploy-dash/internal/cli"
@@ -18,6 +19,20 @@ type capabilityCache struct {
 	mu      sync.Mutex
 	value   capabilities
 	builtAt time.Time
+	// identity is the resolved CLI binary (path, size, mtime) the value was
+	// probed from (spec §3.1): replacing or upgrading the teploy on PATH
+	// re-probes on the next read instead of serving the old answer for the
+	// rest of the TTL.
+	identity string
+	// stale is set by invalidate without taking mu: the probe itself runs
+	// the CLI under mu, and a failed probe exec invalidates.
+	stale atomic.Bool
+}
+
+// invalidate drops the cached answer (an exec failure may mean the binary
+// changed or vanished).
+func (c *capabilityCache) invalidate() {
+	c.stale.Store(true)
 }
 
 type capabilities struct {
@@ -43,6 +58,16 @@ type machineFeatures struct {
 	AppListJSON      bool `json:"app_list_json"`
 	ServerStatusJSON bool `json:"server_status_json"`
 	Operations       bool `json:"operations"`
+	// Server-authority features (CLI capability tokens). Each gates its
+	// UI and API surface; with an older CLI on PATH they stay hidden.
+	Events             bool `json:"events"`              // events-v1
+	ActorFlag          bool `json:"actor_flag"`          // actor-flag-v1
+	ConfigHome         bool `json:"config_home"`         // config-home-v1
+	UndeployedList     bool `json:"undeployed_list"`     // undeployed-list-v1
+	LockWait           bool `json:"lock_wait"`           // lock-wait-v1
+	ConfigMerge        bool `json:"config_merge"`        // config-merge-v1
+	ConfigUnprivileged bool `json:"config_unprivileged"` // config-unprivileged-v1
+	DeployHome         bool `json:"deploy_home"`         // deploy-home-v1
 }
 
 type capabilityError struct {
@@ -53,9 +78,13 @@ type capabilityError struct {
 func (s *Server) capabilities(ctx context.Context) capabilities {
 	s.capabilitiesCache.mu.Lock()
 	defer s.capabilitiesCache.mu.Unlock()
-	if !s.capabilitiesCache.builtAt.IsZero() && time.Since(s.capabilitiesCache.builtAt) < capabilityCacheTTL {
+	identity := s.cliIdentity()
+	if !s.capabilitiesCache.stale.Load() && !s.capabilitiesCache.builtAt.IsZero() &&
+		time.Since(s.capabilitiesCache.builtAt) < capabilityCacheTTL &&
+		s.capabilitiesCache.identity == identity {
 		return s.capabilitiesCache.value
 	}
+	s.capabilitiesCache.identity = identity
 
 	now := time.Now().UTC()
 	value := capabilities{
@@ -108,6 +137,7 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 					})
 					s.capabilitiesCache.value = value
 					s.capabilitiesCache.builtAt = now
+					s.capabilitiesCache.stale.Store(false)
 					return value
 				}
 				hasToken := func(t string) bool {
@@ -120,6 +150,14 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				}
 				value.Features.AppListJSON = hasToken("app-list-machine")
 				value.Features.ServerStatusJSON = hasToken("server-status-machine")
+				value.Features.Events = hasToken("events-v1")
+				value.Features.ActorFlag = hasToken("actor-flag-v1")
+				value.Features.ConfigHome = hasToken("config-home-v1")
+				value.Features.UndeployedList = hasToken("undeployed-list-v1")
+				value.Features.LockWait = hasToken("lock-wait-v1")
+				value.Features.ConfigMerge = hasToken("config-merge-v1")
+				value.Features.ConfigUnprivileged = hasToken("config-unprivileged-v1")
+				value.Features.DeployHome = hasToken("deploy-home-v1")
 			}
 		} else {
 			// Pre-MI CLI (or version --json refused): the legacy path.
@@ -141,6 +179,7 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 
 	s.capabilitiesCache.value = value
 	s.capabilitiesCache.builtAt = now
+	s.capabilitiesCache.stale.Store(false)
 	return value
 }
 

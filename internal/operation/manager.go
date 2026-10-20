@@ -122,6 +122,11 @@ type Options struct {
 	// this deployment cannot reconcile: interrupted outcomes are labeled
 	// needs-manual-check with that exact reason instead of guessing.
 	ReceiptReader ReceiptReader
+	// ActorArgs returns the arguments that name the operation's actor in
+	// the target's server event history (`--actor dash:<user> --actor-op
+	// <id>`), or nil when the installed CLI cannot take them. Appended at
+	// execution, so a record admitted under an older CLI still runs.
+	ActorArgs func(op *Operation) []string
 }
 
 // job is one admitted operation waiting for or receiving execution on its
@@ -211,6 +216,7 @@ type Manager struct {
 	reconcileCtx    context.Context
 	reconcileCancel context.CancelFunc
 	reconcileWG     sync.WaitGroup
+	actorArgs       func(op *Operation) []string
 	// receiptReader is Options.ReceiptReader (nil = cannot reconcile).
 	receiptReader ReceiptReader
 	// readOnly is non-empty when stored records carry a schema version
@@ -319,6 +325,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 		projectResolver:     options.ProjectResolver,
 		executor:            options.Executor,
 		receiptReader:       options.ReceiptReader,
+		actorArgs:           options.ActorArgs,
 		maxEvents:           options.MaxEvents,
 		maxHistoryAge:       options.MaxHistoryAge,
 		maxOperations:       options.MaxOperations,
@@ -719,6 +726,11 @@ func (m *Manager) execute(j job) {
 			m.finish(j.id, StatusFailed, -1, err.Error())
 		}
 		return
+	}
+	if m.actorArgs != nil && j.command.SourceRequest == nil {
+		if extra := m.actorArgs(op); len(extra) > 0 {
+			j.command.Args = append(append([]string(nil), j.command.Args...), extra...)
+		}
 	}
 	exitCode, err := m.executor(j.ctx, j.command, func(stream Stream, data string) {
 		eventType := EventStdout

@@ -516,11 +516,22 @@
                @keydown.arrow-right.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.nextElementSibling?.focus()"
                @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
             <button class="tab" :class="{ active: tab === 'general' }" role="tab" id="app-tab-general" aria-controls="app-panel-general" :aria-selected="(tab === 'general').toString()" :tabindex="tab === 'general' ? 0 : -1" @focus="switchTab('general')">General</button>
+            <button class="tab" x-show="hasFeature('config_home')" :class="{ active: tab === 'settings' }" role="tab" id="app-tab-settings" aria-controls="app-panel-settings" :aria-selected="(tab === 'settings').toString()" :tabindex="tab === 'settings' ? 0 : -1" @focus="switchTab('settings')">Settings</button>
             <button class="tab" :class="{ active: tab === 'env' }" role="tab" id="app-tab-env" aria-controls="app-panel-env" :aria-selected="(tab === 'env').toString()" :tabindex="tab === 'env' ? 0 : -1" @focus="switchTab('env')">Environment</button>
             <button class="tab" :class="{ active: tab === 'logs' }" role="tab" id="app-tab-logs" aria-controls="app-panel-logs" :aria-selected="(tab === 'logs').toString()" :tabindex="tab === 'logs' ? 0 : -1" @focus="switchTab('logs')">Logs</button>
             <button class="tab" :class="{ active: tab === 'deploys' }" role="tab" id="app-tab-deploys" aria-controls="app-panel-deploys" :aria-selected="(tab === 'deploys').toString()" :tabindex="tab === 'deploys' ? 0 : -1" @focus="switchTab('deploys')">Deploys</button>
+            <button class="tab" x-show="hasFeature('events')" :class="{ active: tab === 'activity' }" role="tab" id="app-tab-activity" aria-controls="app-panel-activity" :aria-selected="(tab === 'activity').toString()" :tabindex="tab === 'activity' ? 0 : -1" @focus="switchTab('activity')">Activity</button>
             <button class="tab" :class="{ active: tab === 'kv' }" role="tab" id="app-tab-kv" aria-controls="app-panel-kv" :aria-selected="(tab === 'kv').toString()" :tabindex="tab === 'kv' ? 0 : -1" @focus="switchTab('kv')">KV</button>
           </div>
+
+          <!-- Desired vs applied (spec §2.3): the Teploy settings changed
+               since the running release was deployed. -->
+          <template x-if="configPending()">
+            <div role="status" class="stale-banner pending-banner">
+              <span><strong>Settings changed since the last deploy.</strong> The running release does not have them yet.</span>
+              <button class="btn btn-sm btn-primary" x-show="canEdit()" @click="deployPending()" :disabled="actionLoading">Deploy pending changes</button>
+            </div>
+          </template>
 
           <!-- General Tab: the resource overview (D07 exemplar). One place
                answers: what is running (release), how fresh that answer is,
@@ -558,9 +569,19 @@
                   <div class="status-label">Domain</div>
                   <div class="status-value mono" x-text="app.domain || 'N/A'"></div>
                 </div>
+                <!-- "Settings edited in" (spec §2.1): where this app's
+                     configuration is changed. Only with a CLI that knows
+                     config homes. -->
+                <div class="status-item" x-show="configHomeLabel()">
+                  <div class="status-label">Settings edited in</div>
+                  <div class="status-value" style="font-size: 13px;">
+                    <a href="#" @click.prevent="switchTab('settings')" style="color: var(--accent);" x-text="configHomeLabel()"></a>
+                  </div>
+                </div>
                 <!-- D07 authority indicator: which side owns the
-                     configuration. -->
-                <div class="status-item">
+                     configuration (the dash manifest store). A Teploy-home
+                     app answers that with "Settings edited in" instead. -->
+                <div class="status-item" x-show="authority() || !teployHome()">
                   <div class="status-label">Configuration</div>
                   <div class="status-value" style="font-size: 13px;">
                     <a href="#" @click.prevent="switchTab('env')" style="color: var(--accent);"
@@ -834,6 +855,11 @@
                   <a x-show="authority().repository_url" :href="authority().repository_url" target="_blank" rel="noreferrer noopener" style="color: var(--accent); margin-left: 6px;">Create a source change</a>
                 </div>
               </template>
+              <template x-if="!authority() && teployHome()">
+                <div class="card-meta" style="margin-bottom: 16px;">
+                  Settings for this app are edited in Teploy. Keys its settings declare are changed in <a href="#" @click.prevent="switchTab('settings')" style="color: var(--accent);">Settings</a>; keys set here are kept as secrets on the server.
+                </div>
+              </template>
               <template x-if="authority() && authority().mode === 'dash-managed'">
                 <div class="card-meta" style="margin-bottom: 16px;">
                   Configuration is owned by the dash manifest (keys it declares show a "from manifest" badge; edit them in the manifest to stay in sync).
@@ -848,8 +874,8 @@
                   <input class="form-input" placeholder="value" x-model="newEnvValue" aria-label="Environment variable value">
                 </div>
                 <button class="btn btn-primary" @click="addEnvVar"
-                        :disabled="gitManaged() && envKeySource(newEnvKey) === 'manifest'"
-                        :title="gitManaged() && envKeySource(newEnvKey) === 'manifest' ? 'Declared in the git-managed manifest — change it at the source' : ''">Add</button>
+                        :disabled="envKeyLocked(newEnvKey)"
+                        :title="envKeyLocked(newEnvKey) ? (teployHome() ? 'Declared in this app\'s settings — change it in Settings' : 'Declared in the git-managed manifest — change it at the source') : ''">Add</button>
               </div>
 
               <template x-if="envVars && envVars.length > 0">
@@ -870,11 +896,11 @@
                             <!-- D07 inherited-vs-local: keys the (registered)
                                  manifest declares are inherited from the
                                  config source; the rest are set locally. -->
-                            <template x-if="authority()">
+                            <template x-if="authority() || teployHome()">
                               <span class="badge" style="margin-left: 6px; font-size: 10px; opacity: 0.85;"
                                     :style="envKeySource(v.key) === 'manifest' ? 'background:var(--accent, #0969da);color:#fff;' : ''"
-                                    :title="envKeySource(v.key) === 'manifest' ? 'Declared in the registered manifest' : 'Set outside the manifest'"
-                                    x-text="envKeySource(v.key) === 'manifest' ? 'from manifest' : 'local'"></span>
+                                    :title="envKeySource(v.key) === 'manifest' ? (teployHome() ? 'Declared in this app\'s settings' : 'Declared in the registered manifest') : (teployHome() ? 'Set here, outside the settings' : 'Set outside the manifest')"
+                                    x-text="envKeySource(v.key) === 'manifest' ? (teployHome() ? 'from settings' : 'from manifest') : 'local'"></span>
                             </template>
                           </td>
                           <td>
@@ -883,8 +909,8 @@
                           <td>
                             <!-- Git-managed declared keys render read-only:
                                  no Remove, the source owns them. -->
-                            <button x-show="!(gitManaged() && envKeySource(v.key) === 'manifest')" class="btn btn-sm btn-danger" @click="deleteEnvVar(v.key)">Remove</button>
-                            <span x-show="gitManaged() && envKeySource(v.key) === 'manifest'" class="card-meta" style="font-size: 11px;">in source</span>
+                            <button x-show="!envKeyLocked(v.key)" class="btn btn-sm btn-danger" @click="deleteEnvVar(v.key)">Remove</button>
+                            <span x-show="envKeyLocked(v.key)" class="card-meta" style="font-size: 11px;" x-text="teployHome() ? 'in settings' : 'in source'"></span>
                           </td>
                         </tr>
                       </template>
@@ -895,6 +921,156 @@
 
               <template x-if="!envVars || envVars.length === 0">
                 <div class="empty-state"><p>No environment variables set.</p></div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Settings Tab (server-authority P2): the app's teploy.yml as
+               stored on its server. Teploy-home apps edit it here with a
+               compare-and-swap save; folder apps are read-only with "Make
+               editable here". Dash holds no copy — every read and write is
+               the CLI against the server. -->
+          <template x-if="tab === 'settings'">
+            <div role="tabpanel" id="app-panel-settings" aria-labelledby="app-tab-settings" tabindex="-1">
+              <template x-if="settingsLoading && !settings">
+                <div class="loading"><div class="spinner"></div></div>
+              </template>
+              <template x-if="!settingsLoading && !settings && settingsError">
+                <div role="alert" class="empty-state"><p x-text="'Could not load settings: ' + settingsError"></p><button class="btn btn-sm" @click="loadSettings()">Retry</button></div>
+              </template>
+
+              <template x-if="settings && settings.home === 'folder'">
+                <div>
+                  <div class="settings-home">
+                    <h3>Settings are edited in the app's folder</h3>
+                    <p class="card-meta">This app is deployed from a <span class="mono">teploy.yml</span> in a folder, so that file is where its settings change. Deploying from the folder keeps working as before.</p>
+                    <p class="card-meta">To edit them here instead, Teploy rebuilds the settings from what is running and switches only if they match exactly. After that, any client (this dashboard, <span class="mono">teploy config edit</span>, CI) edits the same settings on the server.</p>
+                    <template x-if="settingsError">
+                      <div role="alert" class="stale-banner settings-error" x-text="settingsError"></div>
+                    </template>
+                    <button class="btn btn-primary" x-show="canEdit()" @click="makeEditableHere()" :disabled="settingsSaving" x-text="settingsSaving ? 'Checking…' : 'Make editable here'"></button>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="settings && settings.home === 'teploy'">
+                <div>
+                  <div class="settings-meta">
+                    <span>Edited in Teploy</span>
+                    <span class="mono" x-show="settings.commit" x-text="'settings ' + shortHash(settings.commit)" :title="settings.commit"></span>
+                    <span x-show="settings.applied_commit" class="mono" x-text="'running ' + shortHash(settings.applied_commit)" :title="settings.applied_commit"></span>
+                  </div>
+
+                  <template x-if="settingsError">
+                    <div role="alert" class="stale-banner settings-error" x-text="settingsError"></div>
+                  </template>
+                  <template x-if="settingsMerge && settingsMerge.conflicts && settingsMerge.conflicts.length">
+                    <div class="table-wrap" style="margin-bottom: 12px;">
+                      <table>
+                        <thead><tr><th>Key</th><th>Your edit</th><th>Saved elsewhere</th></tr></thead>
+                        <tbody>
+                          <template x-for="c in settingsMerge.conflicts" :key="c.key">
+                            <tr>
+                              <td class="mono" x-text="c.key"></td>
+                              <td class="mono" x-text="mergeValue(c.mine, c.mine_removed)"></td>
+                              <td class="mono" x-text="mergeValue(c.current, c.current_removed)"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+
+                  <label for="settings-editor" class="form-label">teploy.yml</label>
+                  <textarea id="settings-editor" class="form-input config-editor" spellcheck="false" autocapitalize="off" autocomplete="off"
+                            x-model="settingsDraft" :readonly="!canEdit() || settingsSaving"></textarea>
+                  <p class="card-meta settings-hint">Secrets do not belong here: reference them as <span class="mono">secret:NAME</span> and set the value under Environment or with <span class="mono">teploy secret set</span>. Changes that reach the host (host volumes, published ports, networks, <span class="mono">caddy_extra</span>) need an administrator.</p>
+
+                  <div class="btn-group" x-show="canEdit()">
+                    <button class="btn btn-primary" @click="saveSettings()" :disabled="settingsSaving || (!settingsDirty() && !settingsMerge)" x-text="settingsSaving ? 'Saving…' : 'Save'"></button>
+                    <button class="btn" @click="discardSettings()" :disabled="settingsSaving || (!settingsDirty() && !settingsMerge)">Discard</button>
+                    <button class="btn" @click="deployPending()" :disabled="actionLoading || settingsDirty()" :title="settingsDirty() ? 'Save first' : ''">Deploy</button>
+                    <button class="btn" @click="moveSettingsToFolder()" :disabled="settingsSaving">Edit in a folder instead</button>
+                  </div>
+
+                  <h3 class="settings-section">History</h3>
+                  <template x-if="settingsHistory.length === 0">
+                    <div class="empty-state"><p>No saved changes yet.</p></div>
+                  </template>
+                  <template x-if="settingsHistory.length > 0">
+                    <div class="table-wrap">
+                      <table>
+                        <thead><tr><th>Change</th><th>When</th><th>By</th><th></th></tr></thead>
+                        <tbody>
+                          <template x-for="c in settingsHistory" :key="c.commit">
+                            <tr>
+                              <td>
+                                <span class="mono" x-text="shortHash(c.commit)" :title="c.commit"></span>
+                                <span class="badge" x-show="c.commit === settings.commit">current</span>
+                                <span class="badge" x-show="c.commit === settings.applied_commit">running</span>
+                                <div class="card-meta" x-text="c.message"></div>
+                              </td>
+                              <td x-text="formatWhen(c.date)"></td>
+                              <td x-text="c.author"></td>
+                              <td>
+                                <button class="btn btn-sm" @click="viewSettingsAt(c.commit)">View</button>
+                                <button class="btn btn-sm" x-show="canEdit() && c.commit !== settings.commit" @click="restoreSettings(c.commit)">Restore</button>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+                  <template x-if="settingsViewing">
+                    <div style="margin-top: 12px;">
+                      <div class="section-header">
+                        <h3 class="settings-section" style="margin: 0;" x-text="'Settings at ' + shortHash(settingsViewing.commit)"></h3>
+                        <button class="btn btn-sm" @click="settingsViewing = null">Close</button>
+                      </div>
+                      <pre class="log-viewer" x-text="settingsViewing.content"></pre>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Activity Tab (server-authority P2): the app's server event
+               history. Every client writes it — laptop CLI, CI, this
+               dashboard — so a deploy from anywhere shows here. -->
+          <template x-if="tab === 'activity'">
+            <div role="tabpanel" id="app-panel-activity" aria-labelledby="app-tab-activity" tabindex="-1">
+              <div class="section-header" style="margin-bottom: 12px;">
+                <span class="card-meta">Everything done to this app, from any client.</span>
+                <button class="btn btn-sm" @click="loadEvents()" :disabled="eventsLoading" x-text="eventsLoading ? 'Loading…' : 'Refresh'"></button>
+              </div>
+              <template x-if="eventsError">
+                <div role="alert" class="empty-state"><p x-text="'Could not load activity: ' + eventsError"></p><button class="btn btn-sm" @click="loadEvents()">Retry</button></div>
+              </template>
+              <template x-if="!eventsError && !eventsLoading && events.length === 0">
+                <div class="empty-state"><p>No recorded activity yet. Actions taken with teploy v0.1.42 or later appear here.</p></div>
+              </template>
+              <template x-if="!eventsError && events.length > 0">
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>What</th><th>When</th><th>Result</th><th>By</th><th>Detail</th></tr></thead>
+                    <tbody>
+                      <template x-for="ev in events" :key="ev.id || ev.seq">
+                        <tr>
+                          <td class="mono" x-text="ev.kind"></td>
+                          <td x-text="formatWhen(ev.ts)"></td>
+                          <td>
+                            <span class="status-dot" :class="eventOutcomeClass(ev)" style="margin-right: 6px;"></span>
+                            <span x-text="ev.outcome"></span>
+                          </td>
+                          <td x-text="eventActor(ev)"></td>
+                          <td class="event-detail" x-text="eventSummary(ev)" :title="eventSummary(ev)"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
               </template>
             </div>
           </template>
