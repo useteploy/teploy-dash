@@ -531,7 +531,9 @@
             <button class="tab" :class="{ active: tab === 'env' }" role="tab" id="app-tab-env" aria-controls="app-panel-env" :aria-selected="(tab === 'env').toString()" :tabindex="tab === 'env' ? 0 : -1" @focus="switchTab('env')">Environment</button>
             <button class="tab" :class="{ active: tab === 'logs' }" role="tab" id="app-tab-logs" aria-controls="app-panel-logs" :aria-selected="(tab === 'logs').toString()" :tabindex="tab === 'logs' ? 0 : -1" @focus="switchTab('logs')">Logs</button>
             <button class="tab" :class="{ active: tab === 'deploys' }" role="tab" id="app-tab-deploys" aria-controls="app-panel-deploys" :aria-selected="(tab === 'deploys').toString()" :tabindex="tab === 'deploys' ? 0 : -1" @focus="switchTab('deploys')">Deploys</button>
+            <button class="tab" x-show="hasFeature('releases')" :class="{ active: tab === 'releases' }" role="tab" id="app-tab-releases" aria-controls="app-panel-releases" :aria-selected="(tab === 'releases').toString()" :tabindex="tab === 'releases' ? 0 : -1" @focus="switchTab('releases')">Releases</button>
             <button class="tab" x-show="hasFeature('events')" :class="{ active: tab === 'activity' }" role="tab" id="app-tab-activity" aria-controls="app-panel-activity" :aria-selected="(tab === 'activity').toString()" :tabindex="tab === 'activity' ? 0 : -1" @focus="switchTab('activity')">Activity</button>
+            <button class="tab" x-show="hasFeature('backups')" :class="{ active: tab === 'backups' }" role="tab" id="app-tab-backups" aria-controls="app-panel-backups" :aria-selected="(tab === 'backups').toString()" :tabindex="tab === 'backups' ? 0 : -1" @focus="switchTab('backups')">Backups</button>
             <button class="tab" :class="{ active: tab === 'kv' }" role="tab" id="app-tab-kv" aria-controls="app-panel-kv" :aria-selected="(tab === 'kv').toString()" :tabindex="tab === 'kv' ? 0 : -1" @focus="switchTab('kv')">KV</button>
           </div>
 
@@ -611,6 +613,9 @@
                 <button class="btn" x-show="app.port" @click="doAction('stop')" :disabled="actionLoading">Stop</button>
                 <button class="btn" x-show="app.port" @click="doAction('start')" :disabled="actionLoading">Start</button>
                 <button class="btn" @click="doAction('rollback')" :disabled="actionLoading">Rollback</button>
+                <!-- D5: redeploy the current release with env re-resolved —
+                     how a secret or env edit reaches containers. -->
+                <button class="btn" x-show="hasFeature('redeploy')" @click="doAction('redeploy')" :disabled="actionLoading">Redeploy</button>
                 <button class="btn" @click="doAction(app.locked ? 'unlock' : 'lock')" :disabled="actionLoading" x-text="app.locked ? 'Unlock' : 'Lock'"></button>
                 <button class="btn" @click="doAction(app.maintenance ? 'maintenance/off' : 'maintenance/on')" :disabled="actionLoading" x-text="app.maintenance ? 'End Maintenance' : 'Maintenance'"></button>
                 <button class="btn btn-danger" @click="removeApp()" :disabled="actionLoading">Remove</button>
@@ -902,6 +907,57 @@
               <template x-if="!envVars || envVars.length === 0">
                 <div class="empty-state"><p>No environment variables set.</p></div>
               </template>
+
+              <!-- Secrets (D5): the CLI's encrypted store, write-only from
+                   here. Values are never read back — the list is key names,
+                   masked at the source by the CLI itself. -->
+              <template x-if="hasFeature('secrets')">
+                <div style="margin-top: 32px;">
+                  <div class="section-header" style="margin-bottom: 12px;">
+                    <div>
+                      <h3 style="font-size: 15px; margin: 0;">Secrets</h3>
+                      <p class="card-meta" style="margin: 2px 0 0;">Encrypted on the app's server; values are never displayed. Redeploy to apply a change.</p>
+                    </div>
+                    <button class="btn btn-sm" @click="loadSecrets()" :disabled="secretsLoading" x-text="secretsLoading ? 'Loading…' : 'Refresh'"></button>
+                  </div>
+                  <div class="form-row" style="margin-bottom: 16px;" x-show="canEdit()">
+                    <div class="form-group">
+                      <input class="form-input" placeholder="KEY" x-model="newSecretKey" aria-label="Secret name" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                      <input class="form-input" type="password" placeholder="value" x-model="newSecretValue" aria-label="Secret value" autocomplete="new-password" @keydown.enter="addSecret()">
+                    </div>
+                    <button class="btn btn-primary" @click="addSecret()" :disabled="secretsLoading || !newSecretKey || !newSecretValue">Set</button>
+                  </div>
+                  <template x-if="secrets.length > 0">
+                    <div class="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Key</th>
+                            <th>Provider</th>
+                            <th style="width: 100px;"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="s in secrets" :key="s.key">
+                            <tr>
+                              <td style="font-family: var(--mono); font-size: 12px;" x-text="s.key"></td>
+                              <td class="card-meta" x-text="s.provider"></td>
+                              <td>
+                                <button x-show="canEdit()" class="btn btn-sm btn-danger" @click="deleteSecret(s.key)">Remove</button>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+                  <template x-if="!secretsLoading && secrets.length === 0">
+                    <div class="empty-state"><p>No secrets set.</p></div>
+                  </template>
+                </div>
+              </template>
             </div>
           </template>
 
@@ -933,12 +989,42 @@
                 </div>
               </template>
 
+              <!-- Repo home (or any home a newer CLI reports): the settings
+                   live in the repository's teploy.yml; dash only reads. -->
+              <template x-if="settings && settings.home !== 'folder' && settings.home !== 'teploy'">
+                <div class="settings-home">
+                  <h3 x-text="settings.home === 'repo' ? 'Settings are edited in the app\'s repository' : 'Settings are edited elsewhere (' + settings.home + ')'"></h3>
+                  <p class="card-meta" x-show="settings.home === 'repo'">This app deploys from a <span class="mono">teploy.yml</span> kept in its repository, so changes to its settings are commits there.</p>
+                  <p class="card-meta" x-show="settings.repository">
+                    Edit it in <a class="mono" :href="settings.repository" target="_blank" rel="noopener" x-text="settings.repository"></a>
+                  </p>
+                </div>
+              </template>
+
               <template x-if="settings && settings.home === 'teploy'">
                 <div>
                   <div class="settings-meta">
                     <span>Edited in Teploy</span>
                     <span class="mono" x-show="settings.commit" x-text="'settings ' + shortHash(settings.commit)" :title="settings.commit"></span>
                     <span x-show="settings.applied_commit" class="mono" x-text="'running ' + shortHash(settings.applied_commit)" :title="settings.applied_commit"></span>
+                  </div>
+
+                  <!-- Settings fields (D5): the two common scalars as inputs.
+                       Update patches the YAML draft below — the operator
+                       reviews the diff and saves with the same compare-and-
+                       swap Save. Instances cannot apply to every app (static,
+                       published/host ingress); the CLI's refusal reason
+                       surfaces on save. -->
+                  <div class="form-row" style="margin-bottom: 12px;" x-show="canEdit()">
+                    <div class="form-group">
+                      <label class="form-label" for="settings-field-replicas">Web instances</label>
+                      <input id="settings-field-replicas" class="form-input" type="number" min="1" step="1" x-model="settingsFields.replicas" :placeholder="topLevelYAML(settingsDraft, 'replicas') || '1'">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="settings-field-domain">Domain</label>
+                      <input id="settings-field-domain" class="form-input" x-model="settingsFields.domain" :placeholder="topLevelYAML(settingsDraft, 'domain') || 'app.example.com'" autocomplete="off">
+                    </div>
+                    <button class="btn" style="align-self: flex-end;" @click="applySettingsFields()" :disabled="settingsSaving">Update</button>
                   </div>
 
                   <template x-if="settingsError">
@@ -1118,6 +1204,153 @@
               <template x-if="!deployLog || deployLog.length === 0">
                 <div class="empty-state"><p>No deploy history yet.</p></div>
               </template>
+            </div>
+          </template>
+
+          <!-- Releases Tab (D5): the app's release records as the server
+               holds them, newest first. Rollback-to goes through the durable
+               rollback operation; a row that cannot be rolled back says why
+               (retention removed its containers). -->
+          <template x-if="tab === 'releases'">
+            <div role="tabpanel" id="app-panel-releases" aria-labelledby="app-tab-releases" tabindex="-1">
+              <div class="section-header" style="margin-bottom: 12px;">
+                <span class="card-meta">Every release the server recorded, newest first.</span>
+                <button class="btn btn-sm" @click="loadReleases()" :disabled="releasesLoading" x-text="releasesLoading ? 'Loading…' : 'Refresh'"></button>
+              </div>
+              <template x-if="releasesError">
+                <div role="alert" class="empty-state"><p x-text="'Could not load releases: ' + releasesError"></p><button class="btn btn-sm" @click="loadReleases()">Retry</button></div>
+              </template>
+              <template x-if="!releasesError && !releasesLoading && releases.length === 0">
+                <div class="empty-state"><p>No releases recorded yet.</p></div>
+              </template>
+              <template x-if="!releasesError && releases.length > 0">
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Release</th>
+                        <th>Deployed</th>
+                        <th>Image</th>
+                        <th>By</th>
+                        <th style="width: 140px;"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="rel in releases" :key="rel.release">
+                        <tr>
+                          <td style="font-family: var(--mono); font-size: 12px;">
+                            <span x-text="shortHash(rel.release)" :title="rel.release"></span>
+                            <span class="badge green" x-show="rel.current">current</span>
+                            <div class="card-meta" x-show="!rel.current && !rel.rollback_available && rel.reason" x-text="rel.reason"></div>
+                          </td>
+                          <td x-text="rel.deployed_at ? new Date(rel.deployed_at).toLocaleString() : '-'"></td>
+                          <td style="font-family: var(--mono); font-size: 12px;" x-text="rel.image || '-'"></td>
+                          <td class="card-meta" x-text="rel.actor || '-'"></td>
+                          <td>
+                            <button x-show="canEdit() && hasFeature('rollback_to') && rel.rollback_available"
+                                    class="btn btn-sm" @click="rollbackTo(rel)" :disabled="actionLoading">Roll back to</button>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Backups Tab (D5): the app's backups and schedules as the CLI
+               reads them from the server's stored backup target. Restore
+               replaces the app's live data under its lock — it asks for the
+               app name typed, and runs as a durable operation. -->
+          <template x-if="tab === 'backups'">
+            <div role="tabpanel" id="app-panel-backups" aria-labelledby="app-tab-backups" tabindex="-1">
+              <div class="section-header" style="margin-bottom: 12px;">
+                <span class="card-meta" x-text="backups && backups.target ? 'Stored in ' + backups.target.bucket + (backups.target.region ? ' (' + backups.target.region + ')' : '') : 'The server\'s stored backup target'"></span>
+                <div style="display:flex; gap:8px;">
+                  <button class="btn btn-sm" @click="loadBackups()" :disabled="backupsLoading" x-text="backupsLoading ? 'Loading…' : 'Refresh'"></button>
+                  <button x-show="canEdit()" class="btn btn-sm btn-primary" @click="runBackupNow()" :disabled="backupSaving" x-text="backupSaving ? 'Starting…' : 'Run now'"></button>
+                </div>
+              </div>
+              <template x-if="backupsError">
+                <div role="alert" class="empty-state"><p x-text="'Could not load backups: ' + backupsError"></p><button class="btn btn-sm" @click="loadBackups()">Retry</button></div>
+              </template>
+              <template x-if="!backupsError && !backupsLoading && (!backups || (backups.backups || []).length === 0)">
+                <div class="empty-state"><p>No backups listed for this app.</p></div>
+              </template>
+
+              <template x-if="backups && (backups.schedules || []).length > 0">
+                <div style="margin-bottom: 20px;">
+                  <h3 style="font-size: 15px; margin: 0 0 8px;">Schedules</h3>
+                  <div class="table-wrap">
+                    <table>
+                      <thead><tr><th>Kind</th><th>Cron</th><th>Keep</th><th>Form</th></tr></thead>
+                      <tbody>
+                        <template x-for="(sc, i) in backups.schedules" :key="i">
+                          <tr>
+                            <td x-text="sc.kind === 'accessory' ? 'accessory ' + (sc.accessory || '') : sc.kind"></td>
+                            <td class="mono" style="font-size: 12px;" x-text="sc.cron"></td>
+                            <td class="card-meta" x-text="sc.keep_last ? 'last ' + sc.keep_last : (sc.max_age_days ? sc.max_age_days + 'd' : '-')"></td>
+                            <td>
+                              <span class="badge" x-text="sc.form"></span>
+                              <span class="card-meta" x-show="sc.form === 'legacy'" title="Pre-D3 teploy cron with the bucket and credentials embedded; `teploy server backup-target set` rewrites it."> — rewrite with backup-target set</span>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="backups && (backups.backups || []).length > 0">
+                <div>
+                  <h3 style="font-size: 15px; margin: 0 0 8px;">Backups</h3>
+                  <div class="table-wrap">
+                    <table>
+                      <thead><tr><th>Backup</th><th>Kind</th><th>Size</th><th>Created</th><th style="width: 100px;"></th></tr></thead>
+                      <tbody>
+                        <template x-for="b in backups.backups" :key="b.key">
+                          <tr>
+                            <td style="font-family: var(--mono); font-size: 12px;" x-text="b.id"></td>
+                            <td x-text="backupKindLabel(b)"></td>
+                            <td x-text="formatBytes(b.size_bytes)"></td>
+                            <td x-text="new Date(b.created_at).toLocaleString()"></td>
+                            <td>
+                              <button x-show="canEdit() && b.restorable" class="btn btn-sm btn-danger" @click="openBackupRestore(b)">Restore</button>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Restore confirmation (D5): restoring replaces the app's
+                   live data, so the operator types the app name. -->
+              <div class="dialog-overlay" x-show="backupRestore" @click.self="backupRestore = null"
+                   @keydown.escape.window="backupRestore && (backupRestore = null)" x-cloak>
+                <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="backup-restore-title"
+                     tabindex="-1" x-effect="backupRestore && $nextTick(() => $el.focus())">
+                  <h2 id="backup-restore-title">Restore backup</h2>
+                  <template x-if="backupRestore">
+                    <form @submit.prevent="confirmBackupRestore()">
+                      <p>Restoring <span class="mono" x-text="backupRestore.id"></span><span x-show="backupRestore.accessory" x-text="' (accessory ' + backupRestore.accessory + ')'"></span> replaces this app's current data with the backup's contents.</p>
+                      <p>The app's containers are stopped for the restore and started again after; requests fail while they are down. On failure the previous data is kept on the server and its location is named in the operation log.</p>
+                      <div class="field">
+                        <label for="backup-restore-confirm">Type <span class="mono" x-text="resource.name"></span> to confirm</label>
+                        <input id="backup-restore-confirm" type="text" class="form-input" x-model="backupRestoreConfirm" autocomplete="off">
+                      </div>
+                      <div class="dialog-actions">
+                        <button type="button" class="btn" @click="backupRestore = null">Cancel</button>
+                        <button type="submit" class="btn btn-danger" :disabled="backupSaving || backupRestoreConfirm !== resource.name"
+                                x-text="backupSaving ? 'Restoring…' : 'Restore'"></button>
+                      </div>
+                    </form>
+                  </template>
+                </div>
+              </div>
             </div>
           </template>
 
