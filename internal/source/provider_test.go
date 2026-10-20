@@ -372,3 +372,172 @@ func TestProviderPolicyIgnoresLegacyPreviewKeyButNotOtherUnknownFields(t *testin
 		t.Fatal("unknown provider field accepted")
 	}
 }
+
+// forgeTestServer is a minimal forge API double for the registration
+// surface: it records POST bodies and answers listings with whatever was
+// registered, so dedupe-by-content can be exercised.
+func forgeTestServer(t *testing.T, forge Forge) (*httptest.Server, *[]map[string]interface{}) {
+	t.Helper()
+	registered := &[]map[string]interface{}{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "keys") && r.Method == "GET":
+			rows := []map[string]interface{}{}
+			for _, body := range *registered {
+				if _, ok := body["key"]; ok {
+					rows = append(rows, body)
+				}
+			}
+			json.NewEncoder(w).Encode(rows)
+		case strings.HasSuffix(r.URL.Path, "keys") && r.Method == "POST":
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			*registered = append(*registered, body)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": len(*registered)})
+		case strings.HasSuffix(r.URL.Path, "/hooks") && r.Method == "GET":
+			rows := []map[string]interface{}{}
+			for _, body := range *registered {
+				if _, ok := body["config"]; ok {
+					rows = append(rows, map[string]interface{}{"config": body["config"]})
+				} else if _, ok := body["url"]; ok {
+					rows = append(rows, map[string]interface{}{"url": body["url"]})
+				}
+			}
+			json.NewEncoder(w).Encode(rows)
+		case strings.HasSuffix(r.URL.Path, "/hooks") && r.Method == "POST":
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			*registered = append(*registered, body)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": len(*registered)})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, registered
+}
+
+func registrationAccess(t *testing.T, forge Forge, origin string) *Access {
+	t.Helper()
+	client, err := providerClient(origin, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	return &Access{Provider: Provider{Forge: forge, APIURL: origin}, Token: "test-token", Client: client}
+}
+
+func TestRegisterDeployKeyAndWebhookForEachge(t *testing.T) {
+	const publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeF"
+	for _, tc := range []struct {
+		forge Forge
+		url   string
+	}{
+		{ForgeGitHub, "https://github.com/owner/repo"},
+		{ForgeForgejo, "https://forge.example/owner/repo"},
+		{ForgeGitLab, "https://gitlab.example/group/sub/repo"},
+	} {
+		t.Run(string(tc.forge), func(t *testing.T) {
+			server, registered := forgeTestServer(t, tc.forge)
+			access := registrationAccess(t, tc.forge, server.URL)
+			src := &Source{Forge: tc.forge, CloneURL: tc.url}
+			ctx := context.Background()
+			if err := access.RegisterDeployKey(ctx, src, "teploy w6probe", publicKey); err != nil {
+				t.Fatal(err)
+			}
+			// The same key material registers exactly once.
+			if err := access.RegisterDeployKey(ctx, src, "teploy w6probe", publicKey); err != nil {
+				t.Fatal(err)
+			}
+			if err := access.RegisterWebhook(ctx, src, "https://dash.example/hooks/sources/src-0123456789abcdef", "whsec", "main"); err != nil {
+				t.Fatal(err)
+			}
+			if err := access.RegisterWebhook(ctx, src, "https://dash.example/hooks/sources/src-0123456789abcdef", "whsec", "main"); err != nil {
+				t.Fatal(err)
+			}
+			keys, hooks := 0, 0
+			for _, body := range *registered {
+				if _, ok := body["key"]; ok {
+					keys++
+					if body["key"] != publicKey {
+						t.Fatalf("key body = %v", body)
+					}
+					if tc.forge == ForgeGitLab {
+						if body["can_push"] != false {
+							t.Fatalf("gitlab key not read-only: %v", body)
+						}
+					} else if body["read_only"] != true {
+						t.Fatalf("key not read-only: %v", body)
+					}
+					continue
+				}
+				hooks++
+				switch tc.forge {
+				case ForgeGitLab:
+					if body["url"] != "https://dash.example/hooks/sources/src-0123456789abcdef" || body["token"] != "whsec" || body["push_events_branch_filter"] != "main" {
+						t.Fatalf("gitlab hook body = %v", body)
+					}
+				default:
+					config, ok := body["config"].(map[string]interface{})
+					if !ok || config["url"] != "https://dash.example/hooks/sources/src-0123456789abcdef" || config["secret"] != "whsec" {
+						t.Fatalf("hook body = %v", body)
+					}
+					if tc.forge == ForgeForgejo && (body["branch_filter"] != "main" || body["type"] != "forgejo") {
+						t.Fatalf("forgejo hook body = %v", body)
+					}
+				}
+			}
+			if keys != 1 || hooks != 1 {
+				t.Fatalf("registered keys=%d hooks=%d, want 1 and 1 (dedupe failed)", keys, hooks)
+			}
+		})
+	}
+}
+
+func TestRegistrationRefusesGenericForgeAndBadURLs(t *testing.T) {
+	server, _ := forgeTestServer(t, ForgeGeneric)
+	access := registrationAccess(t, ForgeGeneric, server.URL)
+	src := &Source{Forge: ForgeGeneric, CloneURL: "https://forge.example/owner/repo"}
+	if err := access.RegisterDeployKey(context.Background(), src, "t", "k"); err == nil {
+		t.Fatal("generic forge accepted a deploy key registration")
+	}
+	if err := access.RegisterWebhook(context.Background(), src, "https://dash.example/hooks/x", "s", ""); err == nil {
+		t.Fatal("generic forge accepted a webhook registration")
+	}
+	forgejo, _ := forgeTestServer(t, ForgeForgejo)
+	real := registrationAccess(t, ForgeForgejo, forgejo.URL)
+	if err := real.RegisterWebhook(context.Background(), &Source{Forge: ForgeForgejo, CloneURL: "https://forge.example/owner/repo"}, "javascript:alert(1)", "s", ""); err == nil {
+		t.Fatal("non-http webhook url accepted")
+	}
+	if err := real.RegisterWebhook(context.Background(), &Source{Forge: ForgeForgejo, CloneURL: "https://forge.example/owner"}, "https://dash.example/h", "s", ""); err == nil {
+		t.Fatal("repository without an owner/name path accepted")
+	}
+}
+
+func TestCredentialRefForFindsMatchingProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "providers.json")
+	os.WriteFile(path, []byte(`{
+		"alpha": {"forge":"github","repository":"git@github.com:owner/repo.git","token_env":"TOK"},
+		"beta": {"forge":"forgejo","repository":"https://forge.example/other/repo","token_env":"TOK2"}
+	}`), 0600)
+	providers := &Providers{Path: path}
+	if ref, provider, ok := providers.CredentialRefFor("https://github.com/OWNER/Repo.git"); !ok || ref != "alpha" || provider.Forge != ForgeGitHub {
+		t.Fatalf("lookup = %q %+v %v", ref, provider, ok)
+	}
+	if ref, _, ok := providers.CredentialRefFor("https://forge.example/other/repo/"); !ok || ref != "beta" {
+		t.Fatalf("lookup = %q %v", ref, ok)
+	}
+	if _, _, ok := providers.CredentialRefFor("https://github.com/nothing/repo"); ok {
+		t.Fatal("unrelated repository matched a provider")
+	}
+	if _, _, ok := (&Providers{}).CredentialRefFor("https://github.com/owner/repo"); ok {
+		t.Fatal("unconfigured providers matched")
+	}
+	os.WriteFile(path, []byte("{damage"), 0600)
+	if _, _, ok := providers.CredentialRefFor("https://github.com/owner/repo"); ok {
+		t.Fatal("damaged provider file matched")
+	}
+}

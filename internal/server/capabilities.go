@@ -77,6 +77,8 @@ type machineFeatures struct {
 	EnvConfigGuard bool `json:"env_config_guard"` // env-config-guard-v1
 	BackupTarget   bool `json:"backup_target"`    // backup-target-v1
 	Backups        bool `json:"backups"`          // backup-json-v1
+	GitSource      bool `json:"git_source"`       // git-source-v1
+	TriggerPoll    bool `json:"trigger_poll"`     // trigger-poll-v1
 }
 
 type capabilityError struct {
@@ -174,6 +176,8 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				value.Features.EnvConfigGuard = hasToken("env-config-guard-v1")
 				value.Features.BackupTarget = hasToken("backup-target-v1")
 				value.Features.Backups = hasToken("backup-json-v1")
+				value.Features.GitSource = hasToken("git-source-v1")
+				value.Features.TriggerPoll = hasToken("trigger-poll-v1")
 			}
 		} else {
 			// Pre-MI CLI (or version --json refused): the legacy path.

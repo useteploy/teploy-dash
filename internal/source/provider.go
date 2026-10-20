@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -395,6 +396,187 @@ func (a *Access) Close() {
 		a.Client.CloseIdleConnections()
 	}
 	a.Token = ""
+}
+
+// CredentialRefFor returns the named provider entry whose repository scope
+// covers the clone URL — how dash knows it holds a credential for a forge
+// repository at connect time (registration then happens through the forge
+// API instead of showing values for the operator to paste).
+func (p *Providers) CredentialRefFor(rawCloneURL string) (string, Provider, bool) {
+	if p == nil || p.Path == "" {
+		return "", Provider{}, false
+	}
+	want, err := CanonicalURL(rawCloneURL)
+	if err != nil {
+		return "", Provider{}, false
+	}
+	b, err := privateRead(p.Path)
+	if err != nil {
+		return "", Provider{}, false
+	}
+	var entries map[string]providerEntry
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	if d.Decode(&entries) != nil || d.Decode(new(any)) != io.EOF {
+		return "", Provider{}, false
+	}
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		repo, err := CanonicalURL(entries[name].Repository)
+		if err != nil || repo != want {
+			continue
+		}
+		return name, entries[name].Provider, true
+	}
+	return "", Provider{}, false
+}
+
+// RegisterDeployKey adds the app's public deploy key to the repository as a
+// read-only key, skipping the call when the same key material is already
+// registered (connect flows re-run; forges would stack duplicates).
+func (a *Access) RegisterDeployKey(ctx context.Context, src *Source, title, publicKey string) error {
+	repo := repoPathOf(src)
+	if repo == "" {
+		return fmt.Errorf("repository path invalid")
+	}
+	var existing []struct {
+		Key string `json:"key"`
+	}
+	switch src.Forge {
+	case ForgeGitHub:
+		if err := a.call(ctx, "GET", "/repos/"+repo+"/keys?per_page=100", nil, &existing); err != nil {
+			return err
+		}
+	case ForgeGitLab:
+		if err := a.call(ctx, "GET", "/projects/"+url.PathEscape(repo)+"/deploy_keys", nil, &existing); err != nil {
+			return err
+		}
+	case ForgeGitea, ForgeForgejo:
+		if err := a.call(ctx, "GET", "/repos/"+repo+"/keys", nil, &existing); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("this forge has no registration API; add the key by hand")
+	}
+	for _, row := range existing {
+		if strings.TrimSpace(row.Key) == strings.TrimSpace(publicKey) {
+			return nil
+		}
+	}
+	body := map[string]interface{}{"title": title, "key": publicKey}
+	switch src.Forge {
+	case ForgeGitHub, ForgeGitea, ForgeForgejo:
+		body["read_only"] = true
+	case ForgeGitLab:
+		body["can_push"] = false
+	}
+	path := "/repos/" + repo + "/keys"
+	if src.Forge == ForgeGitLab {
+		path = "/projects/" + url.PathEscape(repo) + "/deploy_keys"
+	}
+	return a.call(ctx, "POST", path, body, nil)
+}
+
+// RegisterWebhook points the repository's push webhook at url,
+// authenticating with secret, skipping the call when a hook with the same
+// URL already exists (HMAC secrets are not readable back from any forge).
+func (a *Access) RegisterWebhook(ctx context.Context, src *Source, hookURL, secret, branch string) error {
+	repo := repoPathOf(src)
+	if repo == "" {
+		return fmt.Errorf("repository path invalid")
+	}
+	if u, err := url.Parse(hookURL); err != nil || u.Scheme != "https" && u.Scheme != "http" || u.Host == "" {
+		return fmt.Errorf("webhook url invalid")
+	}
+	var existing []struct {
+		Config struct {
+			URL string `json:"url"`
+		} `json:"config"`
+		URL string `json:"url"`
+	}
+	switch src.Forge {
+	case ForgeGitHub:
+		if err := a.call(ctx, "GET", "/repos/"+repo+"/hooks?per_page=100", nil, &existing); err != nil {
+			return err
+		}
+	case ForgeGitLab:
+		if err := a.call(ctx, "GET", "/projects/"+url.PathEscape(repo)+"/hooks", nil, &existing); err != nil {
+			return err
+		}
+	case ForgeGitea, ForgeForgejo:
+		if err := a.call(ctx, "GET", "/repos/"+repo+"/hooks", nil, &existing); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("this forge has no registration API; add the webhook by hand")
+	}
+	for _, row := range existing {
+		if row.Config.URL == hookURL || row.URL == hookURL {
+			return nil
+		}
+	}
+	var body map[string]interface{}
+	switch src.Forge {
+	case ForgeGitHub:
+		body = map[string]interface{}{
+			"name": "web", "active": true, "events": []string{"push"},
+			"config": map[string]interface{}{"url": hookURL, "content_type": "json", "secret": secret},
+		}
+	case ForgeGitLab:
+		u, _ := url.Parse(hookURL)
+		body = map[string]interface{}{
+			"url": hookURL, "push_events": true, "token": secret,
+			"enable_ssl_verification": u != nil && u.Scheme == "https",
+		}
+		if branch != "" {
+			// GitLab matches branch names (no refs/heads/ prefix) and treats
+			// an empty filter as a wildcard.
+			body["push_events_branch_filter"] = branch
+		}
+	case ForgeGitea, ForgeForgejo:
+		hookType := "gitea"
+		if src.Forge == ForgeForgejo {
+			hookType = "forgejo"
+		}
+		body = map[string]interface{}{
+			"type": hookType, "active": true, "events": []string{"push"},
+			"config": map[string]interface{}{"url": hookURL, "content_type": "json", "secret": secret},
+		}
+		if branch != "" {
+			body["branch_filter"] = branch
+		}
+	}
+	path := "/repos/" + repo + "/hooks"
+	if src.Forge == ForgeGitLab {
+		path = "/projects/" + url.PathEscape(repo) + "/hooks"
+	}
+	return a.call(ctx, "POST", path, body, nil)
+}
+
+// repoPathOf derives the forge API repository path segment from the
+// source's canonical clone URL: owner/name for GitHub and Gitea-shaped
+// forges, the full namespace path for GitLab (subgroups are legal).
+func repoPathOf(src *Source) string {
+	u, err := url.Parse(src.CloneURL)
+	if err != nil {
+		return ""
+	}
+	repo := strings.Trim(u.Path, "/")
+	parts := strings.Split(repo, "/")
+	if src.Forge == ForgeGitLab {
+		if len(parts) < 2 || strings.Contains(repo, "//") {
+			return ""
+		}
+		return repo
+	}
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.Join(parts[:2], "/")
 }
 
 // PushHead binds a signed payload to the live forge ref. Commit timestamps are

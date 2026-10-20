@@ -76,3 +76,39 @@ func TestEnvKeysBounds(t *testing.T) {
 		t.Fatal("overly deep config accepted")
 	}
 }
+
+func TestGitSource(t *testing.T) {
+	cases := []struct {
+		name       string
+		config     string
+		repository string
+		branch     string
+		ok         bool
+		wantErr    bool
+	}{
+		{"declared block", "app: web\ngit:\n  repository: git@github.com:owner/repo.git\n  branch: main\n", "git@github.com:owner/repo.git", "main", true, false},
+		{"no branch", "app: web\ngit:\n  repository: https://forge.example/owner/repo.git\n", "https://forge.example/owner/repo.git", "", true, false},
+		{"no git block", "app: web\nimage: example/web:1\n", "", "", false, false},
+		{"empty git mapping", "app: web\ngit: {}\n", "", "", false, true},
+		{"blank repository", "app: web\ngit:\n  repository: \"\"\n  branch: main\n", "", "", false, true},
+		{"non-mapping git", "app: web\ngit: not-a-map\n", "", "", false, true},
+		{"unparseable yaml", "\t{{{ not yaml", "", "", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repository, branch, ok, err := GitSource([]byte(tc.config))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("GitSource = %q %q %v, want error", repository, branch, ok)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GitSource: %v", err)
+			}
+			if repository != tc.repository || branch != tc.branch || ok != tc.ok {
+				t.Fatalf("GitSource = %q %q %v, want %q %q %v", repository, branch, ok, tc.repository, tc.branch, tc.ok)
+			}
+		})
+	}
+}

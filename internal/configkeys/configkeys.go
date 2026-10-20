@@ -1,5 +1,6 @@
 // Package configkeys reads the environment keys an app's teploy.yml declares,
-// so env edits that would compete with the app's settings can be refused.
+// so env edits that would compete with the app's settings can be refused, and
+// the git: source block a Teploy-home config declares.
 package configkeys
 
 import (
@@ -22,27 +23,15 @@ const (
 // EnvKeys follows the CLI's two flat string maps, including YAML aliases and
 // merge precedence. Invalid content is an error, never "no keys".
 func EnvKeys(content []byte) ([]string, error) {
-	if len(content) > maxBytes {
-		return nil, fmt.Errorf("config exceeds bounds")
-	}
-	var document yaml.Node
-	decoder := yaml.NewDecoder(strings.NewReader(string(content)))
-	if err := decoder.Decode(&document); err != nil {
-		return nil, fmt.Errorf("config invalid")
-	}
-	var extra yaml.Node
-	if decoder.Decode(&extra) != io.EOF || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("config invalid")
-	}
-	count := 0
-	if err := inspectNode(document.Content[0], map[*yaml.Node]bool{}, &count, 0); err != nil {
+	root, err := decodeMapping(content)
+	if err != nil {
 		return nil, err
 	}
 	var value struct {
 		Env     map[string]string `yaml:"env"`
 		Literal map[string]string `yaml:"env_literal"`
 	}
-	if err := document.Decode(&value); err != nil {
+	if err := root.Decode(&value); err != nil {
 		return nil, fmt.Errorf("config environment invalid")
 	}
 	keys := map[string]bool{}
@@ -82,4 +71,54 @@ func inspectNode(node *yaml.Node, active map[*yaml.Node]bool, count *int, depth 
 		}
 	}
 	return nil
+}
+
+// GitSource reads the git: block a Teploy-home config declares (server
+// authority D4): the repository an app builds from and the branch it
+// admits. ok is false when the config declares no git: source. Invalid
+// content is an error, never a silent "no source" — the webhook relay
+// must not skip a connected app because its config looked unreadable.
+func GitSource(content []byte) (repository, branch string, ok bool, err error) {
+	root, err := decodeMapping(content)
+	if err != nil {
+		return "", "", false, err
+	}
+	var value struct {
+		Git *struct {
+			Repository string `yaml:"repository"`
+			Branch     string `yaml:"branch"`
+		} `yaml:"git"`
+	}
+	if err := root.Decode(&value); err != nil {
+		return "", "", false, fmt.Errorf("config git source invalid")
+	}
+	if value.Git == nil {
+		return "", "", false, nil
+	}
+	if strings.TrimSpace(value.Git.Repository) == "" {
+		return "", "", false, fmt.Errorf("config git source invalid")
+	}
+	return value.Git.Repository, value.Git.Branch, true, nil
+}
+
+// decodeMapping decodes one bounded teploy.yml document into its root
+// mapping node (the shared EnvKeys/GitSource walk).
+func decodeMapping(content []byte) (*yaml.Node, error) {
+	if len(content) > maxBytes {
+		return nil, fmt.Errorf("config exceeds bounds")
+	}
+	var document yaml.Node
+	decoder := yaml.NewDecoder(strings.NewReader(string(content)))
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("config invalid")
+	}
+	var extra yaml.Node
+	if decoder.Decode(&extra) != io.EOF || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config invalid")
+	}
+	count := 0
+	if err := inspectNode(document.Content[0], map[*yaml.Node]bool{}, &count, 0); err != nil {
+		return nil, err
+	}
+	return document.Content[0], nil
 }

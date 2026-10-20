@@ -170,7 +170,8 @@ func appActionCapabilities(method, path string) []string {
 		case "log":
 			return []string{caps.ViewLogs}
 		default:
-			// status, drift, stats, health, accessories, and the bare app
+			// status, drift, stats, health, accessories, config-authority,
+			// the git source state (config source show) and the bare app
 			// record are metadata.
 			return []string{caps.ViewMetadata}
 		}
@@ -180,6 +181,14 @@ func appActionCapabilities(method, path string) []string {
 		switch {
 		case action == "env", action == "kv", action == "secrets":
 			return []string{caps.ExecuteMutate}
+		case action == "source/key", action == "source/host-key", action == "source/register":
+			// Git-source connect steps: config/credential writes and forge
+			// registration scoped to the app's own repository.
+			return []string{caps.ExecuteMutate}
+		case action == "source/reset-watermark", action == "source/retry", action == "source/install-timer":
+			// Watermark resets, retries and the server poll timer cause or
+			// enable deploys.
+			return []string{caps.ExecuteDeploy}
 		case action == "", action == "stop", action == "start", action == "restart", action == "deploy",
 			action == "rollback", action == "redeploy", action == "remove", action == "lock", action == "unlock",
 			action == "maintenance/on", action == "maintenance/off",
