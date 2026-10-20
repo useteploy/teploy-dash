@@ -284,10 +284,10 @@ func newRestoreIncarnation() (string, error) {
 }
 
 // sameRestoreTarget compares the target identity fields that a result is
-// attributed to (A24/F037: region included).
+// attributed to (A24/F037). The backup destination is resolved by the CLI at
+// run time (plan D3), so it is no longer part of the identity.
 func sameRestoreTarget(a, b RestoreTest) bool {
-	return a.Server == b.Server && a.App == b.App && a.Accessory == b.Accessory &&
-		a.Bucket == b.Bucket && a.Region == b.Region
+	return a.Server == b.Server && a.App == b.App && a.Accessory == b.Accessory
 }
 
 func (s *FileStore) DeleteRestoreTest(id string) error {
@@ -328,11 +328,8 @@ func (s *FileStore) SaveRestoreTestResult(id string, result RestoreTest) (bool, 
 	// A24: a result only applies to the configuration that produced it. If
 	// the test was retargeted (or deleted and recreated) while the run was
 	// in flight, the stored identity no longer matches and the result is
-	// dropped rather than attributed to the new target. F037: region is
-	// part of the identity — the same bucket name in a different region is
-	// a different target.
-	if stored.Incarnation != result.Incarnation || stored.Server != result.Server || stored.App != result.App || stored.Accessory != result.Accessory ||
-		stored.Bucket != result.Bucket || stored.Region != result.Region {
+	// dropped rather than attributed to the new target.
+	if stored.Incarnation != result.Incarnation || stored.Server != result.Server || stored.App != result.App || stored.Accessory != result.Accessory {
 		return false, nil
 	}
 	stored.LastRunAt = result.LastRunAt

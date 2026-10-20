@@ -1537,7 +1537,7 @@
                 </div>
               </div>
               <div class="monitor-target">
-                <span x-text="'s3://' + t.bucket + ' — every ' + t.interval_hours + 'h'"></span>
+                <span x-text="'every ' + t.interval_hours + 'h'"></span>
               </div>
               <div class="monitor-meta">
                 <template x-if="t.last_run_at && !t.last_run_at.startsWith('0001')">
@@ -1603,16 +1603,7 @@
                 <input type="text" id="restore-accessory" x-model="newTest.accessory" placeholder="postgres" required>
               </div>
             </div>
-            <div class="field-row">
-              <div class="field">
-                <label for="restore-bucket">S3 Bucket</label>
-                <input type="text" id="restore-bucket" x-model="newTest.bucket" placeholder="my-backups" required>
-              </div>
-              <div class="field">
-                <label for="restore-region">Region</label>
-                <input type="text" id="restore-region" x-model="newTest.region" placeholder="us-east-1">
-              </div>
-            </div>
+            <p class="card-meta">The backup comes from the server's stored backup target — nothing to configure here.</p>
             <div class="field">
               <label for="restore-interval">Run Every</label>
               <select id="restore-interval" x-model="newTest.interval_hours">

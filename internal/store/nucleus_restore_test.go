@@ -20,7 +20,7 @@ func TestPgwireRestoreIncarnationAndPersistence(t *testing.T) {
 	defer s.Close()
 	id := "restore-fixture"
 	defer s.DeleteRestoreTest(id)
-	config := RestoreTest{ID: id, Server: "prod", App: "web", Accessory: "db", Bucket: "b", Region: "us-east-1", IntervalHours: 24, Enabled: true}
+	config := RestoreTest{ID: id, Server: "prod", App: "web", Accessory: "db", IntervalHours: 24, Enabled: true}
 	if err := s.SaveRestoreTest(config); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestPgwireRestoreIncarnationAndPersistence(t *testing.T) {
 		t.Fatalf("list: %v %v", all, err)
 	}
 	other := config
-	other.Bucket = "other"
+	other.Accessory = "other"
 	if err := s.SaveRestoreTest(other); err != nil {
 		t.Fatal(err)
 	}

@@ -1908,8 +1908,6 @@ document.addEventListener('alpine:init', () => {
       server: '',
       app: '',
       accessory: '',
-      bucket: '',
-      region: 'us-east-1',
       interval_hours: '24',
     },
 
@@ -1962,8 +1960,6 @@ document.addEventListener('alpine:init', () => {
           server: this.newTest.server,
           app: this.newTest.app.trim(),
           accessory: this.newTest.accessory.trim(),
-          bucket: this.newTest.bucket.trim(),
-          region: this.newTest.region.trim() || 'us-east-1',
           interval_hours: parseInt(this.newTest.interval_hours) || 24,
           enabled: true,
         };
@@ -2002,7 +1998,7 @@ document.addEventListener('alpine:init', () => {
         // and delivery metadata, which strict POST decoding must reject.
         const config = {
           id: t.id, server: t.server, app: t.app, accessory: t.accessory,
-          bucket: t.bucket, region: t.region, interval_hours: t.interval_hours,
+          interval_hours: t.interval_hours,
           enabled: !t.enabled,
         };
         await rawFetch.post('/api/restore-tests', config);
@@ -2049,7 +2045,7 @@ document.addEventListener('alpine:init', () => {
     resetForm() {
       this.newTest = {
         server: '', app: '', accessory: '',
-        bucket: '', region: 'us-east-1', interval_hours: '24',
+        interval_hours: '24',
       };
     },
 

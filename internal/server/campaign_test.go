@@ -62,7 +62,7 @@ func TestCampaignRestoreSavePreservesScheduleAndStrictDTO(t *testing.T) {
 	st := store.NewFileStore(t.TempDir())
 	runner := restoretest.New(st)
 	defer runner.Stop(context.Background())
-	rt := store.RestoreTest{ID: "rt", Server: "prod", App: "web", Accessory: "db", Bucket: "b", Region: "us-east-1", Enabled: true, IntervalHours: 24, LastRunAt: time.Now(), LastOK: true, LastDetail: "verified"}
+	rt := store.RestoreTest{ID: "rt", Server: "prod", App: "web", Accessory: "db", Enabled: true, IntervalHours: 24, LastRunAt: time.Now(), LastOK: true, LastDetail: "verified"}
 	if err := st.SaveRestoreTest(rt); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestCampaignRestoreSavePreservesScheduleAndStrictDTO(t *testing.T) {
 		return restoretest.Target{}, errors.New("unexpected scheduled run")
 	})
 	s := New(Config{DataDir: t.TempDir(), NoAuth: true, Store: st, Restore: runner, CLIInstalled: func() bool { return false }})
-	body := `{"id":"rt","server":"prod","app":"web","accessory":"db","bucket":"b","region":"us-east-1","enabled":true,"interval_hours":12}`
+	body := `{"id":"rt","server":"prod","app":"web","accessory":"db","enabled":true,"interval_hours":12}`
 	rec := httptest.NewRecorder()
 	s.handler().ServeHTTP(rec, httptest.NewRequest("POST", "/api/restore-tests", strings.NewReader(body)))
 	var saved store.RestoreTest
@@ -105,7 +105,7 @@ func TestCampaignNotificationSaveRetainsDurableRestoreOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner.SetAlerter(ob)
-	rt := store.RestoreTest{ID: "rt", Server: "prod", App: "web", Accessory: "db", Bucket: "b", Region: "us-east-1", IntervalHours: 24}
+	rt := store.RestoreTest{ID: "rt", Server: "prod", App: "web", Accessory: "db", IntervalHours: 24}
 	st.SaveRestoreTest(rt)
 	stored, _ := st.GetRestoreTest("rt")
 	// A resolution failure is a failed restore verdict, with no network or CLI.

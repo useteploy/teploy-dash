@@ -4568,10 +4568,6 @@ func writeRawJSON(w http.ResponseWriter, raw string) {
 
 // ── Restore Tests ─────────────────────────────────────────────────────────
 
-// bucketPattern matches safe S3 bucket/region values for CLI argv use —
-// mirrors the CLI's own backup.ValidateBucket charset.
-var bucketPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
-
 func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeJSON(w, []interface{}{})
@@ -4608,14 +4604,14 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		// A24: configuration input is a CONFIG-ONLY DTO. Result fields
 		// (last_ok, last_run_at, ...) are rejected outright — the old
 		// full-shape upsert let a caller forge verification results onto a
-		// freshly created test.
+		// freshly created test. D3: no backup destination is stored — the
+		// CLI resolves the server's backup target at run time, so bucket
+		// and region are gone from the DTO.
 		var body struct {
 			ID            string `json:"id"`
 			Server        string `json:"server"`
 			App           string `json:"app"`
 			Accessory     string `json:"accessory"`
-			Bucket        string `json:"bucket"`
-			Region        string `json:"region"`
 			IntervalHours int    `json:"interval_hours"`
 			Enabled       bool   `json:"enabled"`
 		}
@@ -4636,17 +4632,6 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		// keep the store-ID grammar they always had.
 		if !store.ValidID(body.Server) || !validAppName(body.App) || !store.ValidID(body.Accessory) {
 			http.Error(w, "server and accessory are required (letters, digits, '_' or '-'); app must be a valid deployment name", 400)
-			return
-		}
-		if !bucketPattern.MatchString(body.Bucket) || len(body.Bucket) > 63 {
-			http.Error(w, "invalid bucket name", 400)
-			return
-		}
-		if body.Region == "" {
-			body.Region = "us-east-1"
-		}
-		if !bucketPattern.MatchString(body.Region) || len(body.Region) > 25 {
-			http.Error(w, "invalid region", 400)
 			return
 		}
 		if body.IntervalHours < 1 {
@@ -4671,7 +4656,7 @@ func (s *Server) handleRestoreTests(w http.ResponseWriter, r *http.Request) {
 		// edit is in flight can no longer be overwritten by a stale copy.
 		t := store.RestoreTest{
 			ID: body.ID, Server: body.Server, App: body.App, Accessory: body.Accessory,
-			Bucket: body.Bucket, Region: body.Region, IntervalHours: body.IntervalHours, Enabled: body.Enabled,
+			IntervalHours: body.IntervalHours, Enabled: body.Enabled,
 		}
 		if err := s.store.SaveRestoreTest(t); err != nil {
 			http.Error(w, err.Error(), 500)

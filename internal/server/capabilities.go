@@ -70,13 +70,13 @@ type machineFeatures struct {
 	DeployHome         bool `json:"deploy_home"`         // deploy-home-v1
 	// Screens features (plan D5, CLI v0.1.45): secrets, the releases list
 	// with rollback-to, redeploy, the CLI-side env guard, and backups.
-	Secrets        bool `json:"secrets"`         // secret-stdin-v1
-	Releases       bool `json:"releases"`        // releases-json-v1
-	RollbackTo     bool `json:"rollback_to"`     // rollback-json-v1
-	Redeploy       bool `json:"redeploy"`        // redeploy-v1
+	Secrets        bool `json:"secrets"`          // secret-stdin-v1
+	Releases       bool `json:"releases"`         // releases-json-v1
+	RollbackTo     bool `json:"rollback_to"`      // rollback-json-v1
+	Redeploy       bool `json:"redeploy"`         // redeploy-v1
 	EnvConfigGuard bool `json:"env_config_guard"` // env-config-guard-v1
-	BackupTarget   bool `json:"backup_target"`   // backup-target-v1
-	Backups        bool `json:"backups"`         // backup-json-v1
+	BackupTarget   bool `json:"backup_target"`    // backup-target-v1
+	Backups        bool `json:"backups"`          // backup-json-v1
 }
 
 type capabilityError struct {

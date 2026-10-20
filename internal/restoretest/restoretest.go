@@ -52,7 +52,7 @@ type VerifyResult struct {
 // the CLI's NON-ZERO EXIT, which the documented verify-backup semantics say
 // still carries a JSON verdict on stdout; err is a TRANSPORT failure
 // (timeout, missing binary) that no stdout payload can override (A26).
-type runCLIFunc func(server, user, app, accessory, bucket, region string) (stdout, stderr string, exitErr error, err error)
+type runCLIFunc func(server, user, app, accessory string) (stdout, stderr string, exitErr error, err error)
 
 // Runner manages restore tests and runs them on their intervals.
 type Runner struct {
@@ -97,8 +97,11 @@ func New(st store.Store) *Runner {
 		stopChs: make(map[string]chan struct{}),
 		lastOK:  make(map[string]bool),
 		running: make(map[string]bool),
-		runCLI: func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
-			res, err := cli.AccessoryVerifyBackupContext(ctx, server, user, app, accessory, bucket, region)
+		// No backup destination is passed (plan D3): the CLI resolves the
+		// server's stored backup target at run time, so dash holds no
+		// bucket, region or credential.
+		runCLI: func(server, user, app, accessory string) (string, string, error, error) {
+			res, err := cli.AccessoryVerifyBackupContext(ctx, server, user, app, accessory)
 			if res == nil {
 				return "", "", nil, err
 			}
@@ -380,7 +383,7 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 			err = fmt.Errorf("restore target %q is unavailable", t.Server)
 		}
 		if err == nil {
-			stdout, stderr, _, err = runCLI(target.Host, target.User, t.App, t.Accessory, t.Bucket, t.Region)
+			stdout, stderr, _, err = runCLI(target.Host, target.User, t.App, t.Accessory)
 		}
 	}
 

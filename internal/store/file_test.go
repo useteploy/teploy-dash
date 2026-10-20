@@ -173,7 +173,7 @@ func TestFileStore_RestoreTestRoundTrip(t *testing.T) {
 
 	rt := RestoreTest{
 		ID: "rt1", Server: "prod", App: "myapp", Accessory: "db",
-		Bucket: "backups", Region: "us-east-1", IntervalHours: 24, Enabled: true,
+		IntervalHours: 24, Enabled: true,
 		LastRunAt: time.Now().Truncate(time.Second), LastOK: true,
 		LastMetric: "tables=42", LastDate: "20260710-040000", LastDurationMs: 9500,
 	}
@@ -287,12 +287,12 @@ func TestNewFileStore_UnwritableDirReportsInitErr(t *testing.T) {
 // overwrite configuration fields edited while the run was in flight.
 func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 	s := NewFileStore(t.TempDir())
-	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", Enabled: true}); err != nil {
+	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 
 	// A run against the CURRENT configuration applies its result.
-	run := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", LastOK: true, LastDetail: "ok", LastMetric: "checksum", LastRunAt: time.Now()}
+	run := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", LastOK: true, LastDetail: "ok", LastMetric: "checksum", LastRunAt: time.Now()}
 	current, _ := s.GetRestoreTest("t1")
 	run.Incarnation = current.Incarnation
 	applied, err := s.SaveRestoreTestResult("t1", run)
@@ -310,14 +310,14 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 		t.Errorf("result fields not applied: %+v", got)
 	}
 
-	// A24: the operator retargets the test (new bucket) while a run against
-	// the OLD bucket is still in flight. The late result describes a
+	// A24: the operator retargets the test (new accessory) while a run
+	// against the OLD target is still in flight. The late result describes a
 	// different target and must be dropped, not attached to the new config —
 	// while the config edit itself survives untouched.
-	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "NEW", Enabled: true}); err != nil {
+	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "redis", Enabled: true, IntervalHours: 12}); err != nil {
 		t.Fatal(err)
 	}
-	stale := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "b", LastOK: false, LastDetail: "stale", LastRunAt: time.Now()}
+	stale := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", LastOK: false, LastDetail: "stale", LastRunAt: time.Now()}
 	applied, err = s.SaveRestoreTestResult("t1", stale)
 	if err != nil {
 		t.Fatal(err)
@@ -325,21 +325,9 @@ func TestSaveRestoreTestResult_ResultOnly(t *testing.T) {
 	if applied {
 		t.Fatal("retargeted result reported as applied")
 	}
-	// F037: a region-only change is also a retarget.
-	if err := s.SaveRestoreTest(RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "NEW", Region: "eu-west-1", Enabled: true}); err != nil {
-		t.Fatal(err)
-	}
-	sameBucketOtherRegion := RestoreTest{ID: "t1", Server: "prod", App: "web", Accessory: "pg", Bucket: "NEW", Region: "us-east-1", LastOK: true, LastRunAt: time.Now()}
-	applied, err = s.SaveRestoreTestResult("t1", sameBucketOtherRegion)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if applied {
-		t.Fatal("region-only retarget inherited the old region's result")
-	}
 	got, _ = s.GetRestoreTest("t1")
-	if got.Bucket != "NEW" {
-		t.Errorf("config edit overwritten by late result: bucket=%q", got.Bucket)
+	if got.Accessory != "redis" || got.IntervalHours != 12 {
+		t.Errorf("config edit overwritten by late result: %+v", got)
 	}
 	if got.LastDetail == "stale" {
 		t.Errorf("retargeted test inherited the old target's result: %+v", got)
@@ -387,10 +375,10 @@ func TestFileStore_GetChecks_OrdersByCheckedAtNotAppendOrder(t *testing.T) {
 // zero result fields (the handler's stale read can no longer win).
 func TestFileStore_SaveRestoreTest_PreservesStoredResultInTransaction(t *testing.T) {
 	s := NewFileStore(t.TempDir())
-	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", Bucket: "b", Region: "r", IntervalHours: 24}); err != nil {
+	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", IntervalHours: 24}); err != nil {
 		t.Fatal(err)
 	}
-	fresh := RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", Bucket: "b", Region: "r",
+	fresh := RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db",
 		LastOK: false, LastDetail: "just failed", LastRunAt: time.Now()}
 	current, _ := s.GetRestoreTest("rt")
 	fresh.Incarnation = current.Incarnation
@@ -398,7 +386,7 @@ func TestFileStore_SaveRestoreTest_PreservesStoredResultInTransaction(t *testing
 		t.Fatalf("SaveRestoreTestResult applied=%v err=%v", applied, err)
 	}
 	// Config-only edit arriving with stale/empty result fields.
-	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", Bucket: "b", Region: "r", IntervalHours: 12}); err != nil {
+	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "a", App: "app", Accessory: "db", IntervalHours: 12}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetRestoreTest("rt")
@@ -412,7 +400,7 @@ func TestFileStore_SaveRestoreTest_PreservesStoredResultInTransaction(t *testing
 		t.Fatalf("config edit must apply, got interval=%d", got.IntervalHours)
 	}
 	// Retargeting clears the verdict (F038 preserved through the new path).
-	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "other", App: "app", Accessory: "db", Bucket: "b", Region: "r", IntervalHours: 12}); err != nil {
+	if err := s.SaveRestoreTest(RestoreTest{ID: "rt", Server: "other", App: "app", Accessory: "db", IntervalHours: 12}); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.GetRestoreTest("rt")
@@ -429,7 +417,7 @@ func TestRestoreIncarnationRejectsABAAndRecreation(t *testing.T) {
 		t.Run(fmt.Sprint(recreation), func(t *testing.T) {
 			dir := t.TempDir()
 			s := NewFileStore(dir)
-			config := RestoreTest{ID: "rt", Server: "prod", App: "web", Accessory: "db", Bucket: "b", Region: "r"}
+			config := RestoreTest{ID: "rt", Server: "prod", App: "web", Accessory: "db"}
 			if err := s.SaveRestoreTest(config); err != nil {
 				t.Fatal(err)
 			}
@@ -444,7 +432,7 @@ func TestRestoreIncarnationRejectsABAAndRecreation(t *testing.T) {
 				s = NewFileStore(dir)
 			} else {
 				other := config
-				other.Bucket = "other"
+				other.Accessory = "other"
 				if err := s.SaveRestoreTest(other); err != nil {
 					t.Fatal(err)
 				}

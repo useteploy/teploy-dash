@@ -19,7 +19,7 @@ func newTestRunner(t *testing.T, out string, cliErr error) (*Runner, store.Store
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
 	installTestResolver(r)
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		// cliErr models the CLI's non-zero EXIT (verdict-bearing per the
 		// documented verify-backup semantics), not a transport failure.
 		return out, "boom-stderr", cliErr, nil
@@ -41,7 +41,7 @@ func seedTest(t *testing.T, st store.Store) store.RestoreTest {
 	t.Helper()
 	rt := store.RestoreTest{
 		ID: "rt1", Server: "prod", App: "myapp", Accessory: "db",
-		Bucket: "backups", Region: "us-east-1", IntervalHours: 24, Enabled: true,
+		IntervalHours: 24, Enabled: true,
 	}
 	if err := st.SaveRestoreTest(rt); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -129,7 +129,7 @@ func TestRunNow_TracksOutcomeTransitions(t *testing.T) {
 	}
 
 	r.mu.Lock()
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		return `{"ok":true,"metric":"tables=7","date":"20260710-050000"}`, "", nil, nil
 	}
 	r.mu.Unlock()
@@ -151,13 +151,13 @@ func TestStartSeedsBaselineAndSkipsImmediateRunForKnownTests(t *testing.T) {
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
 	installTestResolver(r)
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		ran++
 		return `{"ok":true}`, "", nil, nil
 	}
 	rt := store.RestoreTest{
 		ID: "rt2", Server: "prod", App: "a", Accessory: "db",
-		Bucket: "b", IntervalHours: 24, Enabled: true,
+		IntervalHours: 24, Enabled: true,
 		LastRunAt: time.Now().Add(-time.Hour), LastOK: false,
 	}
 	if err := st.SaveRestoreTest(rt); err != nil {
@@ -189,7 +189,7 @@ func TestRunNow_TransportErrorBeatsLyingStdout(t *testing.T) {
 	r := New(st)
 	installTestResolver(r)
 	var calls int32
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		atomic.AddInt32(&calls, 1)
 		if atomic.LoadInt32(&calls) == 1 {
 			// A clean, persisted success first, so stale fields exist.
@@ -226,7 +226,7 @@ func TestRunNow_TransportErrorBeatsLyingStdout(t *testing.T) {
 	bad := &failingResultStore{Store: st}
 	r2 := New(bad)
 	installTestResolver(r2)
-	r2.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r2.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		return `{"ok":false,"detail":"broken backup"}`, "", nil, nil
 	}
 	_, _ = r2.RunNow(seedTest(t, st))
@@ -253,7 +253,7 @@ func TestRunNow_ConcurrentClaimReturnsBusyError(t *testing.T) {
 	release := make(chan struct{})
 	r := New(st)
 	installTestResolver(r)
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		<-release
 		return `{"ok":true}`, "", nil, nil
 	}
@@ -297,7 +297,7 @@ func TestRunNow_UnregisteredTargetFailsClosedWithoutCLICall(t *testing.T) {
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
 	called := false
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		called = true
 		return `{"ok":true}`, "", nil, nil
 	}
@@ -334,7 +334,7 @@ func TestRunNow_EmptyUserTargetFailsClosed(t *testing.T) {
 	st := store.NewFileStore(t.TempDir())
 	r := New(st)
 	called := false
-	r.runCLI = func(server, user, app, accessory, bucket, region string) (string, string, error, error) {
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
 		called = true
 		return `{"ok":true}`, "", nil, nil
 	}
