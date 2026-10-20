@@ -331,19 +331,20 @@ type Server struct {
 	sourceVerifier       func(context.Context, *source.Source) error
 	routing              *source.Routing
 	routingInitErr       error
-	// relayInFlight dedupes webhook delivery ids whose relay goroutine has
-	// not finished recording yet (the ledger record lands after the poll).
+	// relayMu guards relayInFlight (the delivery-id set of webhook relays
+	// whose ledger record has not landed yet).
+	relayMu       sync.Mutex
 	relayInFlight map[string]bool
 	// gitTimer caches the doctor-derived poll-timer verdict per server.
-	gitTimerMu sync.Mutex
-	gitTimer   map[string]gitTimerEntry
-	runCLI     cliRunner
-	runCLIStdin          cliStdinRunner
-	cliIdentity          func() string
-	cliInstalled         func() bool
-	remoteListApps       func(context.Context, remote.ServerConn) ([]remote.AppState, error)
-	remoteServerStatus   func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
-	capabilitiesCache    capabilityCache
+	gitTimerMu         sync.Mutex
+	gitTimer           map[string]gitTimerEntry
+	runCLI             cliRunner
+	runCLIStdin        cliStdinRunner
+	cliIdentity        func() string
+	cliInstalled       func() bool
+	remoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
+	remoteServerStatus func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
+	capabilitiesCache  capabilityCache
 
 	httpSrvMu sync.Mutex
 	httpSrv   *http.Server

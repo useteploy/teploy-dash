@@ -523,18 +523,15 @@ func (s *Server) handleAppSourceInstallTimer(w http.ResponseWriter, r *http.Requ
 // relaySourcePoll is the CLI call an authenticated, verified push runs to
 // wake the server's admitter: `trigger poll --app X --host S --now --hint
 // <sha> --json`. The server re-reads the branch head itself; the hint only
-// saves an ls-remote when it matches.
-func (s *Server) relaySourcePoll(ctx context.Context, serverName, appName, hint string) (*gitPollResult, error) {
+// saves an ls-remote when it matches. The raw CLI result is returned so
+// callers can read a refusal's machine error.
+func (s *Server) relaySourcePoll(ctx context.Context, serverName, appName, hint string) (*cli.Result, error) {
 	args := []string{"trigger", "poll", "--now", "--json"}
 	if hint != "" {
 		args = append(args, "--hint", hint)
 	}
 	args = append(args, s.relayActorArgs()...)
-	res, err := s.cliAppRun(ctx, serverName, appName, args...)
-	if err != nil {
-		return nil, err
-	}
-	return parseGitPollResult(res.Stdout)
+	return s.cliAppRun(ctx, serverName, appName, args...)
 }
 
 // relayActorArgs names the relay in the app's event history.
@@ -570,6 +567,141 @@ func (s *Server) canRelayGitSources() bool {
 	features := s.capabilities(context.Background()).Features
 	return features.ConfigHome && features.TriggerPoll && s.cliInstalled()
 }
+
+// relayVerifiedPush is the D4 webhook relay: an authenticated, verified
+// push wakes the connected apps' admitter. It answers the forge as soon as
+// the wake is claimed (a poll that deploys takes minutes; forges time out
+// around ten seconds and redeliver), then runs the polls in the
+// background and records the RESULT in the delivery ledger. No dash
+// outbox: a wake lost to a crash is caught by the server's own poll
+// timer. Callers hold sourceActionMu; the goroutine must not.
+func (s *Server) relayVerifiedPush(w http.ResponseWriter, src *source.Source, delivery source.Delivery) {
+	if !s.canRelayGitSources() {
+		s.recordIgnoredDelivery(w, src.ID, delivery, noAppConnectedReason)
+		return
+	}
+	routes := s.routingRoutesFor(src.CloneURL)
+	if len(routes) == 0 {
+		s.recordIgnoredDelivery(w, src.ID, delivery, noAppConnectedReason)
+		return
+	}
+	s.relayMu.Lock()
+	if s.relayInFlight[delivery.ID] {
+		s.relayMu.Unlock()
+		writeDeliveryStatus(w, http.StatusOK, "duplicate", "relay already running for this delivery")
+		return
+	}
+	s.relayInFlight[delivery.ID] = true
+	s.relayMu.Unlock()
+
+	writeDeliveryStatus(w, http.StatusOK, "relayed",
+		fmt.Sprintf("poll started for %s (%s)", routes[0].App, routes[0].Server))
+
+	go func() {
+		defer func() {
+			s.relayMu.Lock()
+			delete(s.relayInFlight, delivery.ID)
+			s.relayMu.Unlock()
+		}()
+		delivery.Disposition = source.DispositionIgnored
+		delivery.Reason = ""
+		for _, route := range routes {
+			reason, deployed := s.relayOneRoute(route, src, delivery.Branch, delivery.Commit)
+			if reason == "" {
+				continue
+			}
+			if delivery.Reason != "" {
+				delivery.Reason += "; "
+			}
+			delivery.Reason += reason
+			if deployed {
+				delivery.Disposition = source.DispositionAdmitted
+			}
+		}
+		if delivery.Reason == "" {
+			delivery.Reason = noAppConnectedReason
+		}
+		if len(delivery.Reason) > 512 {
+			delivery.Reason = delivery.Reason[:512]
+		}
+		if err := s.sources.RecordDelivery(src.ID, delivery); err != nil {
+			log.Printf("[source] relay ledger record for %s: %v", src.ID, err)
+			return
+		}
+		if delivery.Disposition == source.DispositionAdmitted {
+			s.fleet.invalidate()
+		}
+	}()
+}
+
+// relayOneRoute verifies one routing hint against the app's live config
+// and, when it matches, runs the poll. It reports the outcome reason for
+// the ledger ("" = nothing to record for this route) and whether the poll
+// deployed. Stale hints are unlinked; a verification that could not say
+// keeps the hint (transient read, the timer still catches up).
+func (s *Server) relayOneRoute(route source.Route, src *source.Source, branch, commit string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	repository, err := source.CanonicalURL(src.CloneURL)
+	if err != nil {
+		return "relay failed: source identity unreadable", false
+	}
+	match, stale := s.gitAppMatch(ctx, route.Server, route.App, repository, branch)
+	if stale {
+		s.noteSourceRoute(route.Server, route.App, "")
+		return "", false
+	}
+	if !match {
+		// A read that could not say, or a push to a branch this app does
+		// not build: not this delivery's app. Another candidate may still
+		// relay.
+		return "", false
+	}
+	res, err := s.relaySourcePoll(ctx, route.Server, route.App, commit)
+	if err != nil {
+		var exited *cli.ExitStatusError
+		if errors.As(err, &exited) {
+			_, detail := cliMachineError(res)
+			if detail == "" {
+				detail = strings.TrimSpace(res.Stderr)
+			}
+			return fmt.Sprintf("%s on %s: poll refused: %s", route.App, route.Server, detail), false
+		}
+		return fmt.Sprintf("%s on %s: relay failed: %v", route.App, route.Server, err), false
+	}
+	result, err := parseGitPollResult(res.Stdout)
+	if err != nil {
+		return fmt.Sprintf("%s on %s: relay failed: %v", route.App, route.Server, err), false
+	}
+	if result.Admitted {
+		release := result.DeployedRelease
+		if release == "" {
+			release = result.Head
+		}
+		return fmt.Sprintf("%s on %s: deployed %s", route.App, route.Server, release), true
+	}
+	reason := result.Reason
+	if reason == "" {
+		reason = "no change"
+	}
+	return fmt.Sprintf("%s on %s: %s", route.App, route.Server, reason), false
+}
+
+// recordIgnoredDelivery is the pre-relay ignore path: durably record the
+// delivery, then acknowledge it (the C02 ack-after-fsync discipline).
+func (s *Server) recordIgnoredDelivery(w http.ResponseWriter, id string, delivery source.Delivery, reason string) {
+	delivery.Disposition = source.DispositionIgnored
+	delivery.Reason = reason
+	if err := s.sources.RecordDelivery(id, delivery); err != nil {
+		writeError(w, err.Error())
+		return
+	}
+	writeDeliveryStatus(w, http.StatusOK, "ignored", reason)
+}
+
+// noAppConnectedReason is the ledger/response reason a verified push found
+// no app to wake (the pre-D4 behavior, kept verbatim).
+const noAppConnectedReason = "no app is connected to this repository yet"
 
 // gitAppMatch verifies one routing hint against the app's live config:
 // Teploy home, the same repository (any spelling), the delivered branch.

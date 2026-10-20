@@ -4,9 +4,10 @@ package server
 // path. The source store owns canonical identity (forge kind + normalized
 // clone URL — the F03 lesson), the credential REFERENCE and the webhook
 // secret. Authenticated pushes are verified against the live branch head and
-// recorded in a durable per-source ledger (dedupe by delivery id). Nothing
-// deploys from a delivery yet: until an app is connected to a repository
-// (server-authority P3) every authenticated push is recorded as ignored.
+// recorded in a durable per-source ledger (dedupe by delivery id). A
+// verified push for a repository an app builds from wakes that app's
+// admitter on its server (`trigger poll --now`, the D4 relay); the poll —
+// not dash — decides what deploys.
 
 import (
 	"context"
@@ -400,7 +401,12 @@ func (s *Server) handleSourceWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	ignore("no app is connected to this repository yet")
+	// D4: a verified push wakes the connected app's admitter (the relay
+	// re-verifies the routing hint against the app's config, answers the
+	// forge immediately, and records the poll result in the ledger).
+	s.relayVerifiedPush(w, src, source.Delivery{
+		ID: deliveryID, Event: event, Branch: branch, Commit: commit, ReceivedAt: receivedAt,
+	})
 }
 
 func (s *Server) resolveSourceAccess(ctx context.Context, src *source.Source) (*source.Access, error) {
