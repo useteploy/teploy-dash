@@ -589,18 +589,6 @@
                     <a href="#" @click.prevent="switchTab('settings')" style="color: var(--accent);" x-text="configHomeLabel()"></a>
                   </div>
                 </div>
-                <!-- D07 authority indicator: which side owns the
-                     configuration (the dash manifest store). A Teploy-home
-                     app answers that with "Settings edited in" instead. -->
-                <div class="status-item" x-show="authority() || !teployHome()">
-                  <div class="status-label">Configuration</div>
-                  <div class="status-value" style="font-size: 13px;">
-                    <a href="#" @click.prevent="switchTab('env')" style="color: var(--accent);"
-                       x-text="authority() ? (authority().mode === 'git-managed' ? 'Git-managed' : 'Dash-managed') : 'Not registered'"></a>
-                  </div>
-                  <div class="card-meta" style="margin-top:4px;" x-show="authority() && authority().mode === 'git-managed'"
-                       x-text="authority() && authority().git ? (authority().git.repository || '') + (authority().git.manifest_path ? ' — ' + authority().git.manifest_path : '') : ''"></div>
-                </div>
               </div>
 
               <!-- Partial observation errors (D07 misleading states): the
@@ -852,28 +840,9 @@
           <template x-if="tab === 'env'">
             <div role="tabpanel" id="app-panel-env" aria-labelledby="app-tab-env" tabindex="-1">
 
-              <!-- D07 authority indicator: which side owns this app's
-                   configuration. Git-managed = the repository is the source
-                   of truth (dash holds a pinned revision); the affordance
-                   is "create a source change", never a silent competing
-                   edit. -->
-              <template x-if="authority() && authority().mode === 'git-managed'">
-                <div class="stale-banner" style="margin-bottom: 16px;">
-                  <strong>Configuration is managed in Git</strong> —
-                  <span x-text="(authority().git && authority().git.repository) || 'the source repository'"></span>
-                  <span x-show="authority().git && authority().git.manifest_path" x-text="' at ' + ((authority().git && authority().git.manifest_path) || '')"></span>.
-                  Keys declared there are read-only here; change them at the source.
-                  <a x-show="authority().repository_url" :href="authority().repository_url" target="_blank" rel="noreferrer noopener" style="color: var(--accent); margin-left: 6px;">Create a source change</a>
-                </div>
-              </template>
-              <template x-if="!authority() && teployHome()">
+              <template x-if="teployHome()">
                 <div class="card-meta" style="margin-bottom: 16px;">
                   Settings for this app are edited in Teploy. Keys its settings declare are changed in <a href="#" @click.prevent="switchTab('settings')" style="color: var(--accent);">Settings</a>; keys set here are kept as secrets on the server.
-                </div>
-              </template>
-              <template x-if="authority() && authority().mode === 'dash-managed'">
-                <div class="card-meta" style="margin-bottom: 16px;">
-                  Configuration is owned by the dash manifest (keys it declares show a "from manifest" badge; edit them in the manifest to stay in sync).
                 </div>
               </template>
 
@@ -886,7 +855,7 @@
                 </div>
                 <button class="btn btn-primary" @click="addEnvVar"
                         :disabled="envKeyLocked(newEnvKey)"
-                        :title="envKeyLocked(newEnvKey) ? (teployHome() ? 'Declared in this app\'s settings — change it in Settings' : 'Declared in the git-managed manifest — change it at the source') : ''">Add</button>
+                        :title="envKeyLocked(newEnvKey) ? 'Declared in this app\'s settings — change it in Settings' : ''">Add</button>
               </div>
 
               <template x-if="envVars && envVars.length > 0">
@@ -904,24 +873,24 @@
                         <tr>
                           <td style="font-family: var(--mono); font-size: 12px;">
                             <span x-text="v.key"></span>
-                            <!-- D07 inherited-vs-local: keys the (registered)
-                                 manifest declares are inherited from the
-                                 config source; the rest are set locally. -->
-                            <template x-if="authority() || teployHome()">
+                            <!-- Inherited-vs-local: keys this app's Teploy
+                                 settings declares are inherited from the
+                                 settings; the rest are set locally. -->
+                            <template x-if="teployHome()">
                               <span class="badge" style="margin-left: 6px; font-size: 10px; opacity: 0.85;"
-                                    :style="envKeySource(v.key) === 'manifest' ? 'background:var(--accent, #0969da);color:#fff;' : ''"
-                                    :title="envKeySource(v.key) === 'manifest' ? (teployHome() ? 'Declared in this app\'s settings' : 'Declared in the registered manifest') : (teployHome() ? 'Set here, outside the settings' : 'Set outside the manifest')"
-                                    x-text="envKeySource(v.key) === 'manifest' ? (teployHome() ? 'from settings' : 'from manifest') : 'local'"></span>
+                                    :style="envKeySource(v.key) === 'settings' ? 'background:var(--accent, #0969da);color:#fff;' : ''"
+                                    :title="envKeySource(v.key) === 'settings' ? 'Declared in this app\'s settings' : 'Set here, outside the settings'"
+                                    x-text="envKeySource(v.key) === 'settings' ? 'from settings' : 'local'"></span>
                             </template>
                           </td>
                           <td>
                             <span x-data="{ show: false }" style="font-family: var(--mono); font-size: 12px;" :style="v.restricted ? '' : 'cursor: pointer;'" @click="v.restricted || (show = !show)" x-text="v.restricted ? '(restricted)' : (show ? v.value : '--------')" title="v.restricted ? 'Values require the reveal.secrets capability' : ''"></span>
                           </td>
                           <td>
-                            <!-- Git-managed declared keys render read-only:
-                                 no Remove, the source owns them. -->
+                            <!-- Declared keys render read-only: no Remove,
+                                 the settings own them. -->
                             <button x-show="!envKeyLocked(v.key)" class="btn btn-sm btn-danger" @click="deleteEnvVar(v.key)">Remove</button>
-                            <span x-show="envKeyLocked(v.key)" class="card-meta" style="font-size: 11px;" x-text="teployHome() ? 'in settings' : 'in source'"></span>
+                            <span x-show="envKeyLocked(v.key)" class="card-meta" style="font-size: 11px;">in settings</span>
                           </td>
                         </tr>
                       </template>
@@ -1894,7 +1863,7 @@
       <div class="page-header">
         <div>
           <h1 class="page-title">Sources</h1>
-          <p class="subtitle">Connect a repository to its Git-managed app. Provider names select credentials configured by the operator.</p>
+          <p class="subtitle">Register a repository so dash can receive and verify its webhook pushes. Provider names select credentials configured by the operator.</p>
         </div>
         <div class="header-actions">
           <button class="btn" @click="load()" :disabled="loading">Refresh</button>
@@ -1927,12 +1896,7 @@
           <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button class="btn btn-sm" @click="webhookSecret = ''">Hide</button></div>
           <h3>Recent deliveries</h3>
           <template x-for="delivery in selected.deliveries || []" :key="delivery.id + delivery.received_at"><p><code x-text="delivery.commit"></code> <span x-text="delivery.disposition"></span> <span x-text="delivery.reason"></span></p></template>
-          <h3>Pull request previews</h3>
-          <p role="status" x-show="previewError" x-text="previewError"></p>
-          <template x-if="previews"><div>
-            <template x-for="row in previews.live" :key="row.server + row.app + row.preview.branch"><p><span x-text="row.preview.branch"></span> <span x-text="row.preview.url"></span> · expires <span x-text="row.preview.expires_at"></span></p></template>
-            <template x-for="op in previews.operations" :key="op.id"><p><a :href="previews.review_base + op.request.source_pull_request" target="_blank" rel="noopener noreferrer" x-text="'PR #' + op.request.source_pull_request"></a> <code x-text="op.request.source_commit"></code> <button class="btn btn-sm" @click="$store.router.navigate('operation-detail', {id: op.id})" x-text="op.status"></button><span x-text="op.error || ''"></span></p></template>
-          </div></template>
+          <p class="card-meta">Pushes are recorded here, but nothing deploys until an app is connected to the repository (coming soon).</p>
         </section>
       </template>
     </div>

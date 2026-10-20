@@ -948,11 +948,10 @@ document.addEventListener('alpine:init', () => {
     resource: null,
     app: null,
     envVars: [],
-    // D07 config authority: which side owns this app's configuration
-    // (git-managed manifest / dash-managed manifest / null = unregistered or
-    // unknown). Drives the env tab's authority banner, the per-key
-    // inherited-vs-local badges, and the read-only treatment of
-    // source-owned keys.
+    // Where this app's settings are edited (the CLI's config home), the env
+    // keys a Teploy-home config declares, and whether the config changed
+    // since the running release. Drives the env tab's settings note, the
+    // per-key badges and the read-only treatment of declared keys.
     configAuthority: null,
     // Server-authority P2: the CLI features this dash can use (null until
     // /api/capabilities answers), the app's Teploy config and editor draft,
@@ -1092,7 +1091,7 @@ document.addEventListener('alpine:init', () => {
       this.loadConfigAuthority();
     },
 
-    // D07: which side owns this app's configuration. A manifest read is a
+    // The CLI's config-home answer for this app.
     // local file read (no SSH); a failure degrades to "unknown" — the env
     // tab then shows no indicators and the SERVER guard still refuses
     // source-owned edits explicitly, so a degraded read can only cost the
@@ -1348,12 +1347,9 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    // The authority answer, null when unknown/unregistered.
-    authority() { return this.configAuthority && this.configAuthority.registered ? this.configAuthority : null; },
-
-    // Declared-key lookup against the loaded authority.
+    // Env keys this app's Teploy settings declare.
     declaredKeys() {
-      const a = this.authority() || (this.teployHome() ? this.configAuthority : null);
+      const a = this.teployHome() ? this.configAuthority : null;
       return a && Array.isArray(a.declared_env_keys) ? a.declared_env_keys : [];
     },
 
@@ -1362,12 +1358,9 @@ document.addEventListener('alpine:init', () => {
     teployHome() { return this.configHome() === 'teploy'; },
 
     // Declared keys this page must not edit directly.
-    envKeyLocked(key) { return (this.gitManaged() || this.teployHome()) && this.envKeySource(key) === 'manifest'; },
+    envKeyLocked(key) { return this.teployHome() && this.envKeySource(key) === 'settings'; },
 
-    envKeySource(key) { return this.declaredKeys().includes(key) ? 'manifest' : 'local'; },
-
-    // Git-managed authority: declared keys are owned by the repository.
-    gitManaged() { const a = this.authority(); return !!a && a.mode === 'git-managed'; },
+    envKeySource(key) { return this.declaredKeys().includes(key) ? 'settings' : 'local'; },
 
     // Resource usage per container. Like drift, a failure here (older bundled
     // CLI without `stats --app`) hides the panel rather than breaking the page.
@@ -1707,13 +1700,8 @@ document.addEventListener('alpine:init', () => {
 
     async addEnvVar() {
       if (!this.newEnvKey) return;
-      // D07: a declared key under git-managed authority belongs to the
-      // repository — the affordance must send the operator to the source,
-      // never fire an edit the server would (rightly) refuse as competing.
-      if (this.gitManaged() && this.envKeySource(this.newEnvKey) === 'manifest') {
-        showToast(`${this.newEnvKey} is declared in the git-managed manifest — change it at the source`, 'error');
-        return;
-      }
+      // A key this app's Teploy settings declares is changed in Settings —
+      // never through a competing env edit the server would refuse.
       if (this.envKeyLocked(this.newEnvKey)) {
         showToast(`${this.newEnvKey} is set in this app's settings — change it in Settings`, 'error');
         return;
@@ -2652,12 +2640,12 @@ document.addEventListener('alpine:init', () => {
 
   // ── Templates Page ──
   Alpine.data('sourcesPage', () => withAsyncLoad({
-    sources: [], selected: null, previews: null, previewError: '', error: '', busy: false,
+    sources: [], selected: null, error: '', busy: false,
     generation: 0, listGeneration: 0, webhookSecret: '', destroyed: false,
     form: {forge: 'github', clone_url: '', default_branch: '', credential_ref: '', display_name: ''},
     alive(generation) { return !this.destroyed && generation === this.generation; },
     async init() { await this.load(); },
-    destroy() { this.destroyed = true; this.generation++; this.listGeneration++; this.webhookSecret = ''; this.selected = null; this.previews = null; this.form = {}; },
+    destroy() { this.destroyed = true; this.generation++; this.listGeneration++; this.webhookSecret = ''; this.selected = null; this.form = {}; },
     async load() {
       if (this.destroyed) return false;
       const generation = ++this.listGeneration;
@@ -2674,16 +2662,11 @@ document.addEventListener('alpine:init', () => {
     async select(id) {
       if (this.destroyed) return null;
       const generation = ++this.generation;
-      this.selected = null; this.previews = null; this.previewError = ''; this.webhookSecret = ''; this.error = '';
+      this.selected = null; this.webhookSecret = ''; this.error = '';
       try {
         const selected = await api.get(`/api/sources/${encodeURIComponent(id)}`);
         if (!this.alive(generation) || selected.id !== id) return null;
         this.selected = selected;
-        try {
-          const previews = await api.get(`/api/sources/${encodeURIComponent(id)}/previews`);
-          if (!this.alive(generation)) return null;
-          this.previews = previews;
-        } catch (e) { if (!this.alive(generation)) return null; this.previewError = e.message; }
         return generation;
       } catch (e) { if (this.alive(generation)) this.error = e.message; return null; }
     },
