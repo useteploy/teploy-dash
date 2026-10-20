@@ -250,8 +250,9 @@ func TestDeployPendingRunsServerConfigDeploy(t *testing.T) {
 	c := &configRunner{tokens: allConfigTokens}
 	s := newConfigServer(t, c)
 	if s.operations == nil {
-		t.Skip("operations unavailable in this environment")
+		t.Fatal("operations unavailable")
 	}
+	t.Cleanup(func() { s.DrainOperations(context.Background()) })
 	rec := serve(s, "POST", "/api/apps/prod/web/deploy", "")
 	if rec.Code != http.StatusAccepted && rec.Code != http.StatusOK {
 		t.Fatalf("deploy pending = %d: %s", rec.Code, rec.Body.String())
