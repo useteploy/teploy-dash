@@ -4,6 +4,8 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-20
+
 ### Added
 - **App screens backed by the CLI (server-authority plan D5), with teploy
   CLI v0.1.45 or later on the dashboard host.** Dash stores none of it —
