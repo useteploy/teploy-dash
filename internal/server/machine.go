@@ -17,6 +17,8 @@ const observationStaleAfter = 2 * time.Minute
 
 type cliRunner func(context.Context, ...string) (*cli.Result, error)
 
+type cliStdinRunner func(context.Context, string, ...string) (*cli.Result, error)
+
 type machineError struct {
 	Scope   string `json:"scope"`
 	Message string `json:"message"`

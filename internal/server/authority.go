@@ -10,6 +10,8 @@ package server
 // the UI renders the indicators.
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -32,6 +34,57 @@ type configAuthorityResponse struct {
 	// when normalization fails; the raw repository string stays in Git.
 	RepositoryURL   string   `json:"repository_url,omitempty"`
 	DeclaredEnvKeys []string `json:"declared_env_keys,omitempty"`
+	// Home is where the app's settings are edited, from the CLI (spec
+	// §2.1): "folder" or "teploy" ("" when the CLI cannot say). For a
+	// Teploy-home app DeclaredEnvKeys are its config's env keys and
+	// ConfigCommit/AppliedCommit tell whether the config changed since the
+	// running release was deployed.
+	Home          string `json:"home,omitempty"`
+	ConfigCommit  string `json:"config_commit,omitempty"`
+	AppliedCommit string `json:"applied_commit,omitempty"`
+}
+
+// cliConfigHome asks the CLI where an app's settings live; ok is false when
+// the installed CLI has no config homes or the read failed.
+func (s *Server) cliConfigHome(ctx context.Context, serverName, appName string) (home, commit, applied, content string, ok bool) {
+	if !s.cliInstalled() || !s.capabilities(ctx).Features.ConfigHome {
+		return "", "", "", "", false
+	}
+	res, err := s.cliAppRun(ctx, serverName, appName, "config", "get", "--json")
+	if err != nil {
+		return "", "", "", "", false
+	}
+	var dto struct {
+		Home          string `json:"home"`
+		Commit        string `json:"commit"`
+		AppliedCommit string `json:"applied_commit"`
+		Content       string `json:"content"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &dto) != nil || dto.Home == "" {
+		return "", "", "", "", false
+	}
+	return dto.Home, dto.Commit, dto.AppliedCommit, dto.Content, true
+}
+
+// refuseConfigOwnedEnvEdit is the env guard for Teploy-home apps (spec P2,
+// "env guard via CLI"): a key the app's server config declares under env:
+// is edited in Settings — a dash env edit would compete with it.
+func (s *Server) refuseConfigOwnedEnvEdit(w http.ResponseWriter, r *http.Request, serverName, appName, key string) bool {
+	home, _, _, content, ok := s.cliConfigHome(r.Context(), serverName, appName)
+	if !ok || home != "teploy" {
+		return false
+	}
+	keys, err := manifest.AuthorityEnvKeys([]byte(content))
+	if err != nil {
+		return false
+	}
+	for _, k := range keys {
+		if k == key {
+			writeErrorStatus(w, "environment variable "+key+" is set in this app's Teploy config — change it in Settings, where the edit is versioned with the rest of the config", http.StatusConflict)
+			return true
+		}
+	}
+	return false
 }
 
 // handleConfigAuthority serves GET /api/apps/{server}/{app}/config-authority
@@ -58,6 +111,14 @@ func (s *Server) handleConfigAuthority(w http.ResponseWriter, r *http.Request, s
 		} else if !errors.Is(err, manifest.ErrNotFound) {
 			writeError(w, err.Error())
 			return
+		}
+	}
+	if home, commit, applied, content, ok := s.cliConfigHome(r.Context(), serverName, appName); ok {
+		resp.Home, resp.ConfigCommit, resp.AppliedCommit = home, commit, applied
+		if home == "teploy" {
+			if keys, err := manifest.AuthorityEnvKeys([]byte(content)); err == nil {
+				resp.DeclaredEnvKeys = keys
+			}
 		}
 	}
 	if resp.DeclaredEnvKeys == nil {

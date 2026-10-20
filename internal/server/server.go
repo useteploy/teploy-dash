@@ -114,7 +114,12 @@ type Config struct {
 	OperationIdempotencyWindow time.Duration
 	// CLI/read hooks keep machine-contract handling testable without changing
 	// production behavior.
-	CLIRunner          func(context.Context, ...string) (*cli.Result, error)
+	CLIRunner func(context.Context, ...string) (*cli.Result, error)
+	// CLIStdinRunner runs the CLI with stdin (config writes); tests inject
+	// it like CLIRunner. CLIIdentity fingerprints the CLI binary for the
+	// capability cache (tests pin it).
+	CLIStdinRunner     func(context.Context, string, ...string) (*cli.Result, error)
+	CLIIdentity        func() string
 	CLIInstalled       func() bool
 	KVStdinSupport     func() (bool, error)
 	RemoteListApps     func(context.Context, remote.ServerConn) ([]remote.AppState, error)
@@ -333,6 +338,8 @@ type Server struct {
 	sourceMaintenanceDone   chan struct{}
 	sourceVerifier          func(context.Context, *source.Source) error
 	runCLI                  cliRunner
+	runCLIStdin             cliStdinRunner
+	cliIdentity             func() string
 	cliInstalled            func() bool
 	remoteListApps          func(context.Context, remote.ServerConn) ([]remote.AppState, error)
 	remoteServerStatus      func(context.Context, remote.ServerConn) (*remote.ServerStatus, error)
@@ -361,6 +368,26 @@ func New(config Config) *Server {
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
 		s.runCLI = cli.RunContext
+	}
+	// An exec failure (not a non-zero exit) can mean the binary on PATH
+	// changed or vanished: drop the capability answer so the next read
+	// re-probes (spec §3.1).
+	runner := s.runCLI
+	s.runCLI = func(ctx context.Context, args ...string) (*cli.Result, error) {
+		res, err := runner(ctx, args...)
+		var exited *cli.ExitStatusError
+		if err != nil && !errors.As(err, &exited) && ctx.Err() == nil {
+			s.capabilitiesCache.invalidate()
+		}
+		return res, err
+	}
+	s.runCLIStdin = config.CLIStdinRunner
+	if s.runCLIStdin == nil {
+		s.runCLIStdin = cli.RunWithStdin
+	}
+	s.cliIdentity = config.CLIIdentity
+	if s.cliIdentity == nil {
+		s.cliIdentity = cli.Identity
 	}
 	s.cliInstalled = config.CLIInstalled
 	if s.cliInstalled == nil {
@@ -467,6 +494,12 @@ func New(config Config) *Server {
 		// target's receipts through the same machine interface the fleet
 		// uses. The method value resolves s.runCLI at call time.
 		ReceiptReader: s.operationReceipt,
+		ActorArgs: func(op *operation.Operation) []string {
+			if !s.capabilities(context.Background()).Features.ActorFlag {
+				return nil
+			}
+			return dashActorArgs(op.Actor, op.ID)
+		},
 	})
 	if s.operationInitErr != nil {
 		log.Printf("operations: disabled: %v", s.operationInitErr)
@@ -1942,6 +1975,10 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.handleAppConfigRoutes(w, r, serverName, appName, action) {
+		return
+	}
+
 	switch {
 	case action == "status" && r.Method == "GET":
 		// Return from fleet cache if available, else fetch directly.
@@ -2016,11 +2053,14 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, body.Key) {
 			return
 		}
+		if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, body.Key) {
+			return
+		}
 		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.EnvSet(r.Context(), s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value)
+		result, err := cli.EnvSet(r.Context(), s.serverHost(serverName), s.serverUser(serverName), appName, body.Key, body.Value, s.requestActorArgs(r)...)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -2037,11 +2077,14 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		if s.refuseSourceOwnedEnvEdit(w, serverName, appName, key) {
 			return
 		}
+		if s.refuseConfigOwnedEnvEdit(w, r, serverName, appName, key) {
+			return
+		}
 		if !s.cliInstalled() {
 			writeError(w, "teploy CLI not installed")
 			return
 		}
-		result, err := cli.EnvUnset(s.serverHost(serverName), s.serverUser(serverName), appName, key)
+		result, err := cli.EnvUnset(s.serverHost(serverName), s.serverUser(serverName), appName, key, s.requestActorArgs(r)...)
 		if err != nil {
 			writeError(w, err.Error())
 			return
@@ -2180,6 +2223,15 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 			return
 		}
 		s.enqueueOperation(w, r, operation.Request{Kind: operation.KindRollback, Server: serverName, App: appName})
+
+	case "deploy":
+		// "Deploy pending changes" (spec §2.3): a Teploy-home app deploys
+		// from its server config — `deploy <server> --app X` with no image
+		// is served from config.git by the CLI, under the app lock.
+		if !s.requireFeature(w, r, func(f machineFeatures) bool { return f.ConfigHome }, "Deploying from Teploy settings") {
+			return
+		}
+		s.enqueueOperation(w, r, operation.Request{Kind: operation.KindDeploy, Server: serverName, App: appName, Mode: "ad-hoc"})
 
 	case "remove":
 		if !s.cliInstalled() {
@@ -2539,9 +2591,15 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		// operator selected (D05). Optional: absent/empty on the current
 		// version-less catalog.
 		TemplateVersion string `json:"template_version"`
+		// Home "teploy" installs the template as a Teploy-home app, with
+		// generated and supplied secrets moved to the secret store.
+		Home string `json:"home"`
 	}
 	if err := strictDecode(r, &body); err != nil {
 		writeError(w, "invalid request body")
+		return
+	}
+	if body.Home != "" && !s.requireFeature(w, r, func(f machineFeatures) bool { return f.ConfigHome }, "Installing into Teploy home") {
 		return
 	}
 	if body.Template == "" || body.Domain == "" || body.Server == "" {
@@ -2580,7 +2638,7 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 	s.enqueueOperation(w, r, operation.Request{
 		Kind: operation.KindTemplateInstall, Server: body.Server,
 		Template: body.Template, TemplateVersion: pinnedVersion,
-		Domain: body.Domain, Vars: body.Vars,
+		Domain: body.Domain, Vars: body.Vars, Home: body.Home,
 	})
 }
 
@@ -2722,15 +2780,21 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Image  string `json:"image"`
 		Domain string `json:"domain"`
 		Port   int    `json:"port"`
+		// Home "teploy" creates a new app with its settings on the server
+		// (spec P2); needs the CLI's deploy-home-v1.
+		Home string `json:"home"`
 	}
 	if err := strictDecode(r, &body); err != nil {
 		writeError(w, "invalid request body")
 		return
 	}
+	if body.Home != "" && !s.requireFeature(w, r, func(f machineFeatures) bool { return f.DeployHome }, "Creating an app with its settings in Teploy") {
+		return
+	}
 
 	s.enqueueOperation(w, r, operation.Request{
 		Kind: operation.KindDeploy, Server: body.Server, App: body.App,
-		Mode: "ad-hoc", Image: body.Image, Domain: body.Domain, Port: body.Port,
+		Mode: "ad-hoc", Image: body.Image, Domain: body.Domain, Port: body.Port, Home: body.Home,
 	})
 }
 

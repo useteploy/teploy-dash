@@ -561,21 +561,21 @@ func EnvList(server, user, app string) (interface{}, error) {
 // — secret-bearing values are refused unless the operator explicitly accepts
 // the process-list exposure via TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV=1.
 // Empty values keep the legacy path: they carry no secret.
-func EnvSet(ctx context.Context, server, user, app, key, value string) (*Result, error) {
+func EnvSet(ctx context.Context, server, user, app, key, value string, extra ...string) (*Result, error) {
 	supported, err := EnvStdinSupport()
 	if err != nil {
 		return nil, err
 	}
 	if supported {
 		args := []string{"env", "set", key, "--stdin", "--host", server, "--app", app}
-		args = append(args, userArgs(user)...)
+		args = append(append(args, userArgs(user)...), extra...)
 		return RunWithStdin(ctx, value, args...)
 	}
 	if value != "" && !LegacySecretArgVAllowed() {
 		return nil, ErrLegacySecretArgV
 	}
 	args := []string{"env", "set", fmt.Sprintf("%s=%s", key, value), "--host", server, "--app", app}
-	args = append(args, userArgs(user)...)
+	args = append(append(args, userArgs(user)...), extra...)
 	return RunChecked(args...)
 }
 
@@ -592,8 +592,8 @@ func LegacySecretArgVAllowed() bool {
 }
 
 // EnvUnset removes an environment variable.
-func EnvUnset(server, user, app, key string) (*Result, error) {
-	args := append([]string{"env", "unset", key, "--host", server, "--app", app}, userArgs(user)...)
+func EnvUnset(server, user, app, key string, extra ...string) (*Result, error) {
+	args := append(append([]string{"env", "unset", key, "--host", server, "--app", app}, userArgs(user)...), extra...)
 	return RunChecked(args...)
 }
 
@@ -745,6 +745,11 @@ func probeFlagVerified(flag string, args ...string) (supported, verified bool) {
 	}
 	return strings.Contains(result.Stdout, flag) || strings.Contains(result.Stderr, flag), true
 }
+
+// Identity fingerprints the resolved teploy executable (path, size,
+// mtime) so a replaced or upgraded binary invalidates cached capability
+// answers.
+func Identity() string { return cliIdentity() }
 
 // cliIdentity fingerprints the resolved teploy executable so a replaced or
 // upgraded binary invalidates cached capability answers (R48).

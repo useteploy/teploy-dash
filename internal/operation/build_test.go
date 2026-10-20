@@ -59,6 +59,37 @@ func TestDeployBuilderPreservesImageOptionalRedeploy(t *testing.T) {
 	}
 }
 
+// Spec P2: a new app can be created with its settings in Teploy home; any
+// other home value is refused before it reaches the CLI.
+func TestDeployAndTemplateHome(t *testing.T) {
+	command, _, _, err := BuildDeploy(Request{Kind: KindDeploy, Server: "prod", App: "web", Image: "nginx", Home: "teploy"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(command.Args, "--home"); i < 0 || command.Args[i+1] != "teploy" {
+		t.Fatalf("deploy --home args = %v", command.Args)
+	}
+	plain, _, _, err := BuildDeploy(Request{Kind: KindDeploy, Server: "prod", App: "web", Image: "nginx"}, testResolver)
+	if err != nil || slices.Contains(plain.Args, "--home") {
+		t.Fatalf("no home must keep today's argv: %v %v", plain.Args, err)
+	}
+	tpl, _, _, err := Build(Request{Kind: KindTemplateInstall, Server: "prod", Template: "postgres", Domain: "db.example", Home: "teploy"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(tpl.Args, "--home"); i < 0 || tpl.Args[i+1] != "teploy" {
+		t.Fatalf("template --home args = %v", tpl.Args)
+	}
+	for _, request := range []Request{
+		{Kind: KindDeploy, Server: "prod", App: "web", Image: "nginx", Home: "folder"},
+		{Kind: KindTemplateInstall, Server: "prod", Template: "postgres", Domain: "db.example", Home: "--purge"},
+	} {
+		if _, _, _, err := Build(request, testResolver); err == nil {
+			t.Fatalf("Build(%+v) accepted an unknown home", request)
+		}
+	}
+}
+
 func TestManifestCommandConstructionUsesInternalProjectResolver(t *testing.T) {
 	projectDir := "/var/teploy-dash/manifests/prod/web/revisions/" + strings.Repeat("a", 64)
 	resolver := func(server, app, revision string) (string, error) {

@@ -83,6 +83,7 @@ async function requestJSON(url, options = {}, unwrap = true) {
     const fallback = media.startsWith('text/plain') ? text.trim().slice(0, 512) : '';
     const error = new Error(detail || fallback || `Request failed (HTTP ${response.status})`);
     error.status = response.status;
+    error.payload = payload;
     throw error;
   }
   if (payload === undefined) throw new Error('Expected a JSON response');
@@ -168,6 +169,18 @@ function withDeployReadiness(component) {
       enumerable: true,
     },
   });
+  // Spec P2: a NEW app deployed from the form is created with its settings
+  // in Teploy (editable here and by any client) when the CLI can; an app
+  // already on that server redeploys exactly as before.
+  component.deployRequest = async function (f) {
+    const body = { ...f };
+    const exists = (this.apps || []).some((a) => (a.app ?? a.name) === f.app && a.server === f.server);
+    if (!exists) {
+      const caps = await api.get('/api/capabilities').catch(() => null);
+      if (caps && caps.features && caps.features.deploy_home) body.home = 'teploy';
+    }
+    return body;
+  };
   component.preflightCheckClass = function (c) {
     return 'preflight-check check-' + c.result + ' sev-' + c.severity;
   };
@@ -632,7 +645,7 @@ document.addEventListener('alpine:init', () => {
       }
       this.deploying = true;
       try {
-        const op = await api.post('/api/deploy', f);
+        const op = await api.post('/api/deploy', await this.deployRequest(f));
         // Auto-assign the app to this group. A failure here is organizational
         // metadata only — warn separately rather than swallowing it or
         // pretending the deploy failed.
@@ -893,7 +906,7 @@ document.addEventListener('alpine:init', () => {
       }
       this.deploying = true;
       try {
-        const op = await api.post('/api/deploy', {...f});
+        const op = await api.post('/api/deploy', await this.deployRequest(f));
         if (!this.current(generation)) return;
         // Auto-assign to the group and project; failures are metadata-only
         // and warned separately.
@@ -935,6 +948,22 @@ document.addEventListener('alpine:init', () => {
     // inherited-vs-local badges, and the read-only treatment of
     // source-owned keys.
     configAuthority: null,
+    // Server-authority P2: the CLI features this dash can use (null until
+    // /api/capabilities answers), the app's Teploy config and editor draft,
+    // its config history and its server event history.
+    features: null,
+    settings: null,
+    settingsDraft: '',
+    settingsBase: '',
+    settingsLoading: false,
+    settingsSaving: false,
+    settingsError: '',
+    settingsMerge: null,
+    settingsHistory: [],
+    settingsViewing: null,
+    events: [],
+    eventsLoading: false,
+    eventsError: '',
     deployLog: [],
     accessories: [],
     // D05 database-action inventory state: dbActions holds the server's
@@ -1013,6 +1042,10 @@ document.addEventListener('alpine:init', () => {
       this.app = null;
       this.envVars = [];
       this.configAuthority = null;
+      this.resetSettings();
+      this.events = [];
+      this.eventsError = '';
+      this.eventsLoading = false;
       this.deployLog = [];
       this.accessories = [];
       this.drift = null;
@@ -1045,7 +1078,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async reload() {
-      await Promise.all([this.loadStatus(), this.loadAccessories()]);
+      await Promise.all([this.loadStatus(), this.loadAccessories(), this.loadFeatures()]);
       // Both are extra SSH round trips; run them after the page paints and in
       // parallel with each other so neither delays the view.
       this.loadDrift();
@@ -1069,14 +1102,261 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // Which server-authority surfaces the installed CLI provides. Unknown
+    // (null) hides them: an older CLI must show today's page, not errors.
+    async loadFeatures() {
+      if (this.features) return;
+      try {
+        const caps = await api.get('/api/capabilities');
+        this.features = (caps && caps.features) || {};
+      } catch {
+        this.features = {};
+      }
+    },
+    hasFeature(name) { return !!(this.features && this.features[name]); },
+
+    // "Settings edited in": folder, Teploy or unknown ('' with an older CLI).
+    configHome() { return (this.configAuthority && this.configAuthority.home) || ''; },
+    configHomeLabel() {
+      switch (this.configHome()) {
+        case 'teploy': return 'Teploy';
+        case 'folder': return 'Its folder (teploy.yml)';
+        default: return '';
+      }
+    },
+    // Config changed since the running release was deployed (desired vs
+    // applied, spec §2.3).
+    configPending() {
+      const a = this.configAuthority;
+      return !!(a && a.home === 'teploy' && a.config_commit && a.config_commit !== a.applied_commit);
+    },
+
+    resetSettings() {
+      this.settings = null;
+      this.settingsDraft = '';
+      this.settingsBase = '';
+      this.settingsLoading = false;
+      this.settingsSaving = false;
+      this.settingsError = '';
+      this.settingsMerge = null;
+      this.settingsHistory = [];
+      this.settingsViewing = null;
+    },
+
+    // Settings tab: the app's config as the CLI reads it from the server.
+    // The draft starts from the loaded commit; a save is compare-and-swap
+    // against that commit, so a concurrent edit (laptop, CI, another tab)
+    // is never overwritten silently.
+    async loadSettings() {
+      const target = this.resource;
+      this.settingsLoading = true;
+      this.settingsError = '';
+      try {
+        const [cfg, history] = await Promise.all([
+          api.get(`${this.appPath()}/config`),
+          api.get(`${this.appPath()}/config/history`).catch(() => null),
+        ]);
+        if (this.resource !== target) return;
+        this.settings = cfg || null;
+        this.settingsDraft = (cfg && cfg.content) || '';
+        this.settingsBase = (cfg && cfg.commit) || '';
+        this.settingsMerge = null;
+        this.settingsViewing = null;
+        this.settingsHistory = (history && history.commits) || [];
+      } catch (e) {
+        if (this.resource === target) this.settingsError = e.message;
+      }
+      if (this.resource === target) this.settingsLoading = false;
+    },
+
+    settingsDirty() {
+      return !!this.settings && this.settings.home === 'teploy' && this.settingsDraft !== (this.settings.content || '');
+    },
+
+    async saveSettings() {
+      const target = this.resource;
+      if (!this.settingsDirty() && !this.settingsMerge) return;
+      this.settingsSaving = true;
+      this.settingsError = '';
+      try {
+        await api.put(`${this.appPath()}/config`, { content: this.settingsDraft, expect: this.settingsBase });
+        if (this.resource !== target) return;
+        showToast('Settings saved. Deploy to apply them.', 'success');
+        await Promise.all([this.loadSettings(), this.loadConfigAuthority()]);
+      } catch (e) {
+        if (this.resource !== target) return;
+        const merge = e.status === 409 && e.payload && e.payload.merge;
+        if (merge && typeof merge.merged === 'string') {
+          // Someone else saved since this edit started. The CLI merged both
+          // edits key by key; overlapping keys are listed for review, and
+          // the next save is against the commit that now exists.
+          this.settingsMerge = merge;
+          this.settingsDraft = merge.merged;
+          this.settingsBase = merge.current;
+          this.settingsError = (merge.conflicts && merge.conflicts.length)
+            ? 'These settings changed elsewhere while you edited. Both edits were merged; review the keys listed below, then save again.'
+            : 'These settings changed elsewhere while you edited. Your edit was merged with theirs; review it, then save again.';
+        } else {
+          this.settingsError = e.message;
+        }
+      }
+      if (this.resource === target) this.settingsSaving = false;
+    },
+
+    discardSettings() {
+      if (!this.settings) return;
+      this.settingsDraft = this.settings.content || '';
+      this.settingsBase = this.settings.commit || '';
+      this.settingsMerge = null;
+      this.settingsError = '';
+    },
+
+    mergeValue(v, removed) {
+      if (removed) return '(removed)';
+      if (v === null || v === undefined) return '(unset)';
+      return typeof v === 'string' ? v : JSON.stringify(v);
+    },
+
+    async viewSettingsAt(commit) {
+      const target = this.resource;
+      try {
+        const cfg = await api.get(`${this.appPath()}/config?at=${encodeURIComponent(commit)}`);
+        if (this.resource !== target) return;
+        this.settingsViewing = { commit, content: (cfg && cfg.content) || '' };
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+    },
+
+    async restoreSettings(commit) {
+      const target = this.resource;
+      if (!confirm(`Restore the settings from ${this.shortHash(commit)}?\n\nThey become the current settings as a new change; nothing is deployed until you deploy.`)) return;
+      try {
+        await api.post(`${this.appPath()}/config/restore`, { commit });
+        if (this.resource !== target) return;
+        showToast('Settings restored. Deploy to apply them.', 'success');
+        await Promise.all([this.loadSettings(), this.loadConfigAuthority()]);
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+    },
+
+    async deployPending() {
+      const target = this.resource;
+      if (!confirm(`Deploy ${target.name} on ${target.server} with its current settings?`)) return;
+      this.actionLoading = true;
+      try {
+        const op = await api.post(`${this.appPath()}/deploy`);
+        if (isOperation(op)) Alpine.store('router').navigate('operation-detail', { id: op.id });
+      } catch (e) {
+        if (this.resource === target) showToast(e.message, 'error');
+      }
+      if (this.resource === target) this.actionLoading = false;
+    },
+
+    // "Make editable here": the CLI rebuilds the config from the server's
+    // records and adopts it only if it reproduces what runs exactly; when it
+    // cannot, its refusal names the way forward.
+    async makeEditableHere() {
+      const target = this.resource;
+      if (!confirm(`Edit ${target.name}'s settings in Teploy from now on?\n\nTeploy rebuilds them from what is running, and only switches if that matches exactly. After this, deploys from the app's folder are refused until you switch back.`)) return;
+      this.settingsSaving = true;
+      try {
+        await api.post(`${this.appPath()}/config/home`, { home: 'teploy' });
+        if (this.resource !== target) return;
+        showToast('Settings are now edited in Teploy', 'success');
+        await Promise.all([this.loadSettings(), this.loadConfigAuthority()]);
+      } catch (e) {
+        if (this.resource === target) this.settingsError = e.message;
+      }
+      if (this.resource === target) this.settingsSaving = false;
+    },
+
+    // Back to folder home: the server config is archived and its last
+    // content offered as a teploy.yml download for the app's folder.
+    async moveSettingsToFolder() {
+      const target = this.resource;
+      if (!confirm(`Edit ${target.name}'s settings in a folder again?\n\nThe Teploy settings are kept in history and downloaded as teploy.yml; deploy from the folder that holds it from now on.`)) return;
+      this.settingsSaving = true;
+      try {
+        const res = await api.post(`${this.appPath()}/config/home`, { home: 'folder' });
+        if (this.resource !== target) return;
+        if (res && res.teploy_yml) {
+          const url = URL.createObjectURL(new Blob([res.teploy_yml], { type: 'text/yaml' }));
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'teploy.yml';
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+        showToast('Settings are now edited in the app folder', 'success');
+        await Promise.all([this.loadSettings(), this.loadConfigAuthority()]);
+      } catch (e) {
+        if (this.resource === target) this.settingsError = e.message;
+      }
+      if (this.resource === target) this.settingsSaving = false;
+    },
+
+    // Activity tab: the app's server event history, the one record every
+    // client (laptop CLI, CI, this dashboard) writes to.
+    async loadEvents() {
+      const target = this.resource;
+      this.eventsLoading = true;
+      this.eventsError = '';
+      try {
+        const res = await api.get(`${this.appPath()}/events`);
+        if (this.resource !== target) return;
+        this.events = ((res && res.events) || []).slice().reverse();
+      } catch (e) {
+        if (this.resource === target) this.eventsError = e.message;
+      }
+      if (this.resource === target) this.eventsLoading = false;
+    },
+
+    eventActor(ev) {
+      const a = ev.actor || {};
+      const client = a.client === 'dash' ? 'Dashboard' : a.client === 'cli' ? 'CLI' : (a.client || 'unknown');
+      return a.label ? `${client} (${a.label})` : client;
+    },
+
+    eventSummary(ev) {
+      const d = ev.detail || {};
+      const parts = [];
+      if (ev.release) parts.push(this.shortHash(ev.release));
+      if (d.image) parts.push(d.image);
+      if (Array.isArray(d.keys) && d.keys.length) parts.push(d.keys.join(', '));
+      if (ev.kind === 'config.home' && d.to) parts.push(`${d.from || '?'} to ${d.to}`);
+      else if (d.to) parts.push('to ' + this.shortHash(d.to));
+      if (d.privileged) parts.push('privileged');
+      if (ev.config_commit && ev.kind !== 'config.set') parts.push('settings ' + this.shortHash(ev.config_commit));
+      if (d.message) parts.push(d.message);
+      if (d.error) parts.push(d.error);
+      return parts.join(' · ');
+    },
+
+    eventOutcomeClass(ev) {
+      switch (ev.outcome) {
+        case 'succeeded': return 'running';
+        case 'failed': case 'refused': return 'stopped';
+        default: return '';
+      }
+    },
+
     // The authority answer, null when unknown/unregistered.
     authority() { return this.configAuthority && this.configAuthority.registered ? this.configAuthority : null; },
 
     // Declared-key lookup against the loaded authority.
     declaredKeys() {
-      const a = this.authority();
+      const a = this.authority() || (this.teployHome() ? this.configAuthority : null);
       return a && Array.isArray(a.declared_env_keys) ? a.declared_env_keys : [];
     },
+
+    // A Teploy-home app: keys its server config declares under env: are
+    // edited in Settings (the server refuses a competing env edit).
+    teployHome() { return this.configHome() === 'teploy'; },
+
+    // Declared keys this page must not edit directly.
+    envKeyLocked(key) { return (this.gitManaged() || this.teployHome()) && this.envKeySource(key) === 'manifest'; },
 
     envKeySource(key) { return this.declaredKeys().includes(key) ? 'manifest' : 'local'; },
 
@@ -1346,6 +1626,8 @@ document.addEventListener('alpine:init', () => {
       if (t === 'env') await this.loadEnv();
       if (t === 'deploys') await this.loadLog();
       if (t === 'general') await this.loadAccessories();
+      if (t === 'settings') await this.loadSettings();
+      if (t === 'activity') await this.loadEvents();
       if (t === 'logs') this.$nextTick(() => this.$dispatch('start-logs'));
       // Lazy: an SSH round trip per open, never part of init().
       if (t === 'kv') {
@@ -1426,6 +1708,10 @@ document.addEventListener('alpine:init', () => {
         showToast(`${this.newEnvKey} is declared in the git-managed manifest — change it at the source`, 'error');
         return;
       }
+      if (this.envKeyLocked(this.newEnvKey)) {
+        showToast(`${this.newEnvKey} is set in this app's settings — change it in Settings`, 'error');
+        return;
+      }
       try {
         await api.post(`${this.appPath()}/env`, { key: this.newEnvKey, value: this.newEnvValue });
         showToast('Env var added', 'success');
@@ -1438,7 +1724,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteEnvVar(key) {
-      if (this.gitManaged() && this.envKeySource(key) === 'manifest') return; // read-only: source-owned
+      if (this.envKeyLocked(key)) return; // read-only: owned by the source or the app's settings
       if (!confirm(`Delete ${key}?`)) return;
       try {
         await api.del(`${this.appPath()}/env/${key}`);
@@ -1491,6 +1777,8 @@ document.addEventListener('alpine:init', () => {
     shortHash(h) {
       return h ? String(h).slice(0, 12) : '';
     },
+
+    formatWhen(iso) { return iso ? formatObservedAt(iso) : ''; },
 
     openRestoreTests() {
       Alpine.store('router').navigate('restore-tests');
@@ -2456,6 +2744,11 @@ document.addEventListener('alpine:init', () => {
       this.loading = false;
     },
 
+    async installHome() {
+      const caps = await api.get('/api/capabilities').catch(() => null);
+      return caps && caps.features && caps.features.config_home ? { home: 'teploy' } : {};
+    },
+
     selectTemplate(t) {
       this.selected = t;
       this.installForm = { domain: '', server: '', vars: {} };
@@ -2478,6 +2771,10 @@ document.addEventListener('alpine:init', () => {
           // server re-verifies it against the catalog at submit — a moved
           // catalog answers 409 with the upgrade pointer, shown below.
           template_version: this.selected.version_state === 'versioned' ? this.selected.version : '',
+          // Spec P2: installed apps get their settings in Teploy (generated
+          // passwords go to the server's secret store, never into the
+          // settings) when the CLI can.
+          ...(await this.installHome()),
         });
         if (!isOperation(op)) throw new Error('Expected an operation response');
         // A queued operation is not a completed installation — drop the

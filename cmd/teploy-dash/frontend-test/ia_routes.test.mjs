@@ -142,9 +142,9 @@ assert(!!router, 'router store was not registered');
   // Tab semantics on the resource page (app) and the server page.
   assert(html.includes('role="tablist"'), 'tabs render tablist semantics');
   const tabs = (html.match(/role="tab"/g) || []).length;
-  assert(tabs === 7, `expected 7 role=tab buttons (5 app + 2 server), found ${tabs}`);
+  assert(tabs === 9, `expected 9 role=tab buttons (7 app incl. capability-gated Settings and Activity + 2 server), found ${tabs}`);
   const panels = (html.match(/role="tabpanel"/g) || []).length;
-  assert(panels === 7, `expected 7 role=tabpanel containers, found ${panels}`);
+  assert(panels === 9, `expected 9 role=tabpanel containers, found ${panels}`);
   assert(html.includes('aria-selected='), 'tabs expose aria-selected');
   assert(html.includes('@keydown.arrow-right.prevent='), 'tablist supports arrow-key navigation');
 }

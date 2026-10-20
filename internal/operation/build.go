@@ -114,6 +114,13 @@ func BuildDeploy(req Request, resolve Resolver) (Command, Server, string, error)
 	if req.Port > 0 {
 		args = append(args, "--port", strconv.Itoa(req.Port))
 	}
+	switch req.Home {
+	case "":
+	case "teploy":
+		args = append(args, "--home", "teploy")
+	default:
+		return Command{}, Server{}, "", fmt.Errorf("home must be teploy or empty")
+	}
 	return Command{Args: args, Timeout: 30 * time.Minute}, srv, appTarget(req), nil
 }
 
@@ -220,6 +227,13 @@ func BuildTemplateInstall(req Request, resolve Resolver, varStdin bool) (Command
 		return Command{}, Server{}, "", fmt.Errorf("domain is required")
 	}
 	args := []string{"template", "install", req.Template, "--domain", req.Domain, "--server", srv.Name}
+	switch req.Home {
+	case "":
+	case "teploy":
+		args = append(args, "--home", "teploy")
+	default:
+		return Command{}, Server{}, "", fmt.Errorf("home must be teploy or empty")
+	}
 	keys := make([]string, 0, len(req.Vars))
 	for key := range req.Vars {
 		if !varNamePattern.MatchString(key) {

@@ -5,6 +5,28 @@ All notable changes to teploy-dash are recorded here.
 ## [Unreleased]
 
 ### Added
+- **App settings stored on the server (server-authority spec P2).** With
+  teploy CLI v0.1.44 or later on the dashboard host, the app page gains a
+  **Settings** tab: the app's `teploy.yml` as kept on its own server. Apps
+  whose settings are edited in Teploy save with a compare-and-swap; when
+  someone else saved first (laptop, CI, another tab) the CLI merges both
+  edits key by key and overlapping keys are listed for review. History and
+  restore, "Deploy pending changes" when the settings moved past the
+  running release, "Make editable here" for folder apps (adopted only if
+  the server records reproduce the running release exactly) and "Edit in
+  a folder instead". Users without the admin capability save with
+  `--unprivileged`, so a change that reaches the host is refused.
+- **Activity tab: the app's server event history**, written by every
+  client (CLI, CI, this dashboard). Dashboard actions are recorded as
+  `dash:<user>`, linked to the operation id.
+- **New apps start in Teploy home.** The Deploy form and template install
+  create new apps with their settings on the server (template passwords go
+  to the server's secret store, never into the settings). Existing apps
+  redeploy as before.
+- **Env guard for Teploy-home apps.** Keys an app's settings declare are
+  edited in Settings; the Environment tab marks them and the server refuses
+  a competing edit.
+
 - **Readiness vs liveness probes.** `/healthz` is a cheap, dependency-free
   liveness check (a broken store should not get the process restarted);
   `/readyz` reports readiness: store reachable, operation persistence not
@@ -24,6 +46,11 @@ All notable changes to teploy-dash are recorded here.
   Users gains a per-account "Revoke sessions" button.
 
 ### Changed
+- Bundled teploy CLI v0.1.44; contracts corpus pin rev 13.
+- The CLI capability cache follows the binary's identity: an upgraded or
+  replaced `teploy` is re-probed at once instead of after the TTL.
+- Every server-authority surface (Settings, Activity, Teploy-home deploys) is capability-gated: with an older CLI on PATH the
+  page is unchanged and the new API routes answer 501 with the remedy.
 - **Machine interface 2: `server list` decode adopts the CLI's envelope.**
   Dash's maximum supported machine interface is now 2 (MI 2 = MI 1 plus
   the CLI's `server list --json` reshape; no other envelope changed). The
