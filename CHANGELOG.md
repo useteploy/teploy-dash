@@ -4,6 +4,32 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+- **App screens backed by the CLI (server-authority plan D5), with teploy
+  CLI v0.1.45 or later on the dashboard host.** Dash stores none of it —
+  every read and write shells out to the teploy CLI, and each surface
+  hides itself when the CLI lacks its capability token (an older CLI shows
+  exactly the previous page). The Environment tab gains a **Secrets**
+  section: key names only (values are write-only, set through stdin and
+  never displayed), managed with `teploy secret`. A **Releases** tab lists
+  the server's release records with per-release **Roll back to** (the
+  durable rollback operation with `--to`). The General tab gains
+  **Redeploy**: a fresh deploy of the current release's recorded image
+  with env and secrets re-resolved — how a secret or env edit reaches
+  containers. A **Backups** tab lists the app's backups and schedules from
+  the server's stored backup target, with **Run now** and a **Restore**
+  behind a typed type-the-app-name confirmation (both durable operations;
+  restore quiesces the app under its lock). Settings gains **Web
+  instances** (replicas) and **Domain** fields for Teploy-home apps — they
+  patch the YAML draft and save through the existing compare-and-swap PUT,
+  and the CLI's refusal reason surfaces when replicas cannot apply. A repo
+  home renders read-only with an "edit in repository" link. The Teploy-home
+  env guard now defers to the CLI's own (`env-config-guard-v1`): with the
+  token present, dash surfaces the CLI's refusal instead of pre-checking
+  locally. Restore tests no longer store a bucket/region — the CLI
+  resolves the server's backup target at run time. The bundled CLI is
+  v0.1.45 and the contracts pin moves to corpus rev 16.
+
 ### Removed
 - **Dash-side manifest store and the D04 webhook-to-deploy pipeline.**
   App settings live on the app's server (Settings tab / `teploy config`),
