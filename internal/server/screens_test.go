@@ -6,12 +6,14 @@ package server
 // confighome_test.go.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/operation"
 )
 
 // allScreenTokens is every token the D5 surfaces gate on, on top of the P2
@@ -22,6 +24,37 @@ var screenTokens = []string{"secret-stdin-v1", "releases-json-v1", "rollback-jso
 
 func withScreenTokens(extra ...string) []string {
 	return append(append([]string{}, allConfigTokens...), append(append([]string{}, screenTokens...), extra...)...)
+}
+
+// newScreenOpServer is newConfigServer plus an instant operation executor
+// and resolver: the enqueue tests' operations complete synchronously, so
+// draining in cleanup stops every worker before t.TempDir removal (a live
+// executor's late record writes race the cleanup on CI).
+type screenOpServer struct {
+	*Server
+	screenRunner *configRunner
+}
+
+func newScreenOpServer(t *testing.T) *screenOpServer {
+	t.Helper()
+	c := &configRunner{tokens: withScreenTokens()}
+	s := New(Config{
+		DataDir:         t.TempDir(),
+		NoAuth:          true,
+		CLIInstalled:    func() bool { return true },
+		CLIRunner:       c.run,
+		CLIStdinRunner:  c.runStdin,
+		CLIIdentity:     func() string { return "test-cli" },
+		EnvStdinSupport: func() (bool, error) { return true, nil },
+		OperationResolver: func(name string) (operation.Server, error) {
+			return operation.Server{Name: name, Host: "192.0.2.10", User: "deploy"}, nil
+		},
+		OperationExecutor: func(_ context.Context, command operation.Command, _ func(operation.Stream, string)) (int, error) {
+			return 0, nil
+		},
+	})
+	t.Cleanup(func() { s.DrainOperations(context.Background()) })
+	return &screenOpServer{Server: s, screenRunner: c}
 }
 
 // Every D5 surface answers 501 with the remedy when the CLI lacks its token,
@@ -130,9 +163,8 @@ func TestSecretsListSetRemove(t *testing.T) {
 // rollback --to goes through the durable operation path; an invalid target
 // is refused at admission and never enqueued.
 func TestRollbackToEnqueuesOperation(t *testing.T) {
-	c := &configRunner{tokens: withScreenTokens()}
-	s := newConfigServer(t, c)
-	rec := serve(s, "POST", "/api/apps/prod/web/rollback", `{"to":"20261019-120000"}`)
+	s := newScreenOpServer(t)
+	rec := serve(s.Server, "POST", "/api/apps/prod/web/rollback", `{"to":"20261019-120000"}`)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("rollback-to = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -140,16 +172,15 @@ func TestRollbackToEnqueuesOperation(t *testing.T) {
 		t.Fatalf("rollback-to must enqueue a rollback operation with its target: %s", rec.Body.String())
 	}
 	for _, body := range []string{`{"to":"--image"}`, `{"to":"a; rm -rf /"}`, `{"unexpected":1}`} {
-		if rec := serve(s, "POST", "/api/apps/prod/web/rollback", body); rec.Code != http.StatusBadRequest {
+		if rec := serve(s.Server, "POST", "/api/apps/prod/web/rollback", body); rec.Code != http.StatusBadRequest {
 			t.Errorf("rollback body %s = %d, want 400: %s", body, rec.Code, rec.Body.String())
 		}
 	}
 }
 
 func TestRedeployEnqueuesOperation(t *testing.T) {
-	c := &configRunner{tokens: withScreenTokens()}
-	s := newConfigServer(t, c)
-	rec := serve(s, "POST", "/api/apps/prod/web/redeploy", "")
+	s := newScreenOpServer(t)
+	rec := serve(s.Server, "POST", "/api/apps/prod/web/redeploy", "")
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("redeploy = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -159,11 +190,12 @@ func TestRedeployEnqueuesOperation(t *testing.T) {
 }
 
 func TestBackupsListAndOperations(t *testing.T) {
-	c := &configRunner{tokens: withScreenTokens(), reply: func(_ []string, _ string) (*cli.Result, error) {
+	s := newScreenOpServer(t)
+	c := s.screenRunner
+	c.reply = func(_ []string, _ string) (*cli.Result, error) {
 		return &cli.Result{Stdout: `{"machine_interface":2,"host":"h","app":"web","target":{"bucket":"b","region":"us-east-1","has_credentials":true},"backups":[{"id":"20261019-120000","kind":"volumes","size_bytes":10,"created_at":"2026-10-19T12:00:00Z","key":"s3://b/web","restorable":true}],"schedules":[]}`}, nil
-	}}
-	s := newConfigServer(t, c)
-	rec := serve(s, "GET", "/api/apps/prod/web/backups", "")
+	}
+	rec := serve(s.Server, "GET", "/api/apps/prod/web/backups", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("backups = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -171,7 +203,7 @@ func TestBackupsListAndOperations(t *testing.T) {
 		t.Fatalf("backup list argv = %v", call)
 	}
 
-	rec = serve(s, "POST", "/api/apps/prod/web/backups/create", `{"accessory":"postgres"}`)
+	rec = serve(s.Server, "POST", "/api/apps/prod/web/backups/create", `{"accessory":"postgres"}`)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("backup create = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -179,7 +211,7 @@ func TestBackupsListAndOperations(t *testing.T) {
 		t.Fatalf("backup create must be a durable operation: %s", rec.Body.String())
 	}
 
-	rec = serve(s, "POST", "/api/apps/prod/web/backups/restore", `{"id":"20261019-120000-0123456789abcdef"}`)
+	rec = serve(s.Server, "POST", "/api/apps/prod/web/backups/restore", `{"id":"20261019-120000-0123456789abcdef"}`)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("backup restore = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -187,7 +219,7 @@ func TestBackupsListAndOperations(t *testing.T) {
 		t.Fatalf("backup restore must be a durable operation: %s", rec.Body.String())
 	}
 	for _, body := range []string{`{"id":"../../etc"}`, `{"id":""}`, `{"id":"not-a-date"}`, `{"other":1}`} {
-		if rec := serve(s, "POST", "/api/apps/prod/web/backups/restore", body); rec.Code != http.StatusBadRequest {
+		if rec := serve(s.Server, "POST", "/api/apps/prod/web/backups/restore", body); rec.Code != http.StatusBadRequest {
 			t.Errorf("restore body %s = %d, want 400: %s", body, rec.Code, rec.Body.String())
 		}
 	}
