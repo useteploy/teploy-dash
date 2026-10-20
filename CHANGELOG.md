@@ -4,6 +4,8 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-10-19
+
 ### Added
 - **App settings stored on the server (server-authority spec P2).** With
   teploy CLI v0.1.44 or later on the dashboard host, the app page gains a
