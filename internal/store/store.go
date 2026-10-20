@@ -68,18 +68,19 @@ type UptimeStats struct {
 }
 
 // RestoreTest is a scheduled backup verification: on its interval, dash runs
-// `teploy accessory verify-backup` against the accessory's latest S3 backup,
-// which restores it into a scratch container on the server and proves it's
+// `teploy accessory verify-backup` against the accessory's latest backup,
+// which restores it into a scratch container on the server and proves it is
 // usable. Only the most recent result is persisted on the entity itself —
 // these run hourly/daily, so a per-run history table would be noise.
+// The backup destination is NOT stored here (plan D3): the CLI resolves the
+// server's backup target at run time, so dash holds no bucket, region or
+// credential for a test.
 type RestoreTest struct {
 	Incarnation   string `json:"incarnation,omitempty"`
 	ID            string `json:"id"`
 	Server        string `json:"server"` // server name from servers.yml
 	App           string `json:"app"`
 	Accessory     string `json:"accessory"`
-	Bucket        string `json:"bucket"`
-	Region        string `json:"region"`
 	IntervalHours int    `json:"interval_hours"`
 	Enabled       bool   `json:"enabled"`
 	// Last result

@@ -66,6 +66,24 @@ const artifacts = {
   "config-envelope": { schema: "config-envelope.schema.json", classes: { valid: "validate" } },
   "config-history-envelope": { schema: "config-history-envelope.schema.json", classes: { valid: "validate" } },
   "config-merge-envelope": { schema: "config-merge-envelope.schema.json", classes: { valid: "validate" } },
+  // Screens artifacts (corpus rev 14, plan D2): the releases list with
+  // rollback availability, the rollback machine result and redeploy.
+  "releases-envelope": { schema: "releases-envelope.schema.json", classes: { valid: "validate" } },
+  "rollback-result": { schema: "rollback-result.schema.json", classes: { valid: "validate" } },
+  "redeploy-result": { schema: "redeploy-result.schema.json", classes: { valid: "validate" } },
+  // Backup artifacts (corpus rev 15, plan D3): the per-server target, the
+  // parsed backup list with schedules, and the create/restore envelopes.
+  "backup-target-envelope": { schema: "backup-target-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-list-envelope": { schema: "backup-list-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-create-envelope": { schema: "backup-create-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-restore-envelope": { schema: "backup-restore-envelope.schema.json", classes: { valid: "validate" } },
+  // Git-source artifacts (corpus rev 16, plan D4): the connected-source
+  // show envelope, credential provisioning receipts and the poll results.
+  // Dash adopts these surfaces separately (D4); classified here so the
+  // corpus job stays exhaustive.
+  "source-show-envelope": { schema: "source-show-envelope.schema.json", classes: { valid: "validate" } },
+  "source-key-envelope": { schema: "source-key-envelope.schema.json", classes: { valid: "validate" } },
+  "trigger-poll-envelope": { schema: "trigger-poll-envelope.schema.json", classes: { valid: "validate" } },
 };
 
 const failures = [];

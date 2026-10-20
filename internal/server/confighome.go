@@ -68,12 +68,18 @@ func canWritePrivilegedConfig(r *http.Request) bool {
 // requireFeature answers 501 with the remedy when the installed CLI lacks a
 // token-gated surface.
 func (s *Server) requireFeature(w http.ResponseWriter, r *http.Request, ok func(machineFeatures) bool, what string) bool {
+	return s.requireFeatureMin(w, r, ok, what, "v0.1.44")
+}
+
+// requireFeatureMin is requireFeature with the CLI version the surface first
+// appeared in, so the remedy names the release that actually provides it.
+func (s *Server) requireFeatureMin(w http.ResponseWriter, r *http.Request, ok func(machineFeatures) bool, what, minVersion string) bool {
 	if !s.cliInstalled() {
 		writeError(w, "teploy CLI not installed")
 		return false
 	}
 	if !ok(s.capabilities(r.Context()).Features) {
-		writeErrorStatus(w, what+" needs a newer teploy CLI on the dashboard host (upgrade teploy to v0.1.44 or later)", http.StatusNotImplemented)
+		writeErrorStatus(w, what+" needs a newer teploy CLI on the dashboard host (upgrade teploy to "+minVersion+" or later)", http.StatusNotImplemented)
 		return false
 	}
 	return true

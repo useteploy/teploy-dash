@@ -99,7 +99,7 @@ func TestMonitorListExposesDeliveryStatus(t *testing.T) {
 // record never leaks into a monitor's (or vice versa, same id).
 func TestRestoreTestsExposeDeliveryStatus(t *testing.T) {
 	st := store.NewFileStore(t.TempDir())
-	rt := store.RestoreTest{ID: "rt1", Server: "srv", App: "web", Accessory: "db", Bucket: "b", Region: "us-east-1", IntervalHours: 24, Enabled: true}
+	rt := store.RestoreTest{ID: "rt1", Server: "srv", App: "web", Accessory: "db", IntervalHours: 24, Enabled: true}
 	if err := st.SaveRestoreTest(rt); err != nil {
 		t.Fatal(err)
 	}

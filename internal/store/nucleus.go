@@ -293,11 +293,15 @@ func (s *NucleusStore) GetRestoreTest(id string) (*RestoreTest, error) {
 }
 
 // scanRestoreTest maps a restore_tests row onto the struct; shared between
-// List and Get so the column order lives in one place.
+// List and Get so the column order lives in one place. The legacy bucket and
+// region columns are scanned into discards: they are no longer part of the
+// test (plan D3 — the CLI resolves the server's backup target at run time),
+// but stay in the table so existing installs read without a migration.
 func scanRestoreTest(scan func(dest ...any) error) (RestoreTest, error) {
 	var t RestoreTest
 	var lastRunMs int64
-	err := scan(&t.ID, &t.Server, &t.App, &t.Accessory, &t.Bucket, &t.Region,
+	var bucket, region string
+	err := scan(&t.ID, &t.Server, &t.App, &t.Accessory, &bucket, &region,
 		&t.IntervalHours, &t.Enabled, &lastRunMs, &t.LastOK,
 		&t.LastDetail, &t.LastMetric, &t.LastDate, &t.LastDurationMs, &t.Incarnation)
 	if err != nil {
@@ -314,6 +318,8 @@ func scanRestoreTest(scan func(dest ...any) error) (RestoreTest, error) {
 // identity is unchanged (and reset when it changed, F038) — the handler used
 // to round-trip stale Last* values through the API, letting a config save
 // overwrite a verification that completed while the edit was in flight.
+// The legacy bucket/region columns are written empty: dash no longer stores
+// a backup destination (plan D3).
 func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
@@ -325,56 +331,31 @@ func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 	if !t.LastRunAt.IsZero() {
 		lastRunMs = t.LastRunAt.UnixMilli()
 	}
+	sameTarget := "restore_tests.server = EXCLUDED.server AND restore_tests.app = EXCLUDED.app AND restore_tests.accessory = EXCLUDED.accessory"
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO restore_tests (id, server, app, accessory, bucket, region, interval_hours, enabled,
 		                            last_run_ms, last_ok, last_detail, last_metric, last_date, last_duration_ms, incarnation)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		 VALUES ($1, $2, $3, $4, '', '', $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 ON CONFLICT (id) DO UPDATE SET
-           incarnation = CASE WHEN restore_tests.server = EXCLUDED.server
-             AND restore_tests.app = EXCLUDED.app AND restore_tests.accessory = EXCLUDED.accessory
-             AND restore_tests.bucket = EXCLUDED.bucket AND restore_tests.region = EXCLUDED.region
+           incarnation = CASE WHEN `+sameTarget+`
              AND restore_tests.incarnation <> ''
              THEN restore_tests.incarnation ELSE EXCLUDED.incarnation END,
 		   server = EXCLUDED.server, app = EXCLUDED.app, accessory = EXCLUDED.accessory,
-		   bucket = EXCLUDED.bucket, region = EXCLUDED.region,
+		   bucket = '', region = '',
 		   interval_hours = EXCLUDED.interval_hours, enabled = EXCLUDED.enabled,
-		   last_run_ms = CASE WHEN restore_tests.server = EXCLUDED.server
-		                       AND restore_tests.app = EXCLUDED.app
-		                       AND restore_tests.accessory = EXCLUDED.accessory
-		                       AND restore_tests.bucket = EXCLUDED.bucket
-		                       AND restore_tests.region = EXCLUDED.region
+		   last_run_ms = CASE WHEN `+sameTarget+`
 		                      THEN restore_tests.last_run_ms ELSE EXCLUDED.last_run_ms END,
-		   last_ok = CASE WHEN restore_tests.server = EXCLUDED.server
-		                   AND restore_tests.app = EXCLUDED.app
-		                   AND restore_tests.accessory = EXCLUDED.accessory
-		                   AND restore_tests.bucket = EXCLUDED.bucket
-		                   AND restore_tests.region = EXCLUDED.region
+		   last_ok = CASE WHEN `+sameTarget+`
 		                  THEN restore_tests.last_ok ELSE EXCLUDED.last_ok END,
-		   last_detail = CASE WHEN restore_tests.server = EXCLUDED.server
-		                       AND restore_tests.app = EXCLUDED.app
-		                       AND restore_tests.accessory = EXCLUDED.accessory
-		                       AND restore_tests.bucket = EXCLUDED.bucket
-		                       AND restore_tests.region = EXCLUDED.region
+		   last_detail = CASE WHEN `+sameTarget+`
 		                      THEN restore_tests.last_detail ELSE EXCLUDED.last_detail END,
-		   last_metric = CASE WHEN restore_tests.server = EXCLUDED.server
-		                       AND restore_tests.app = EXCLUDED.app
-		                       AND restore_tests.accessory = EXCLUDED.accessory
-		                       AND restore_tests.bucket = EXCLUDED.bucket
-		                       AND restore_tests.region = EXCLUDED.region
+		   last_metric = CASE WHEN `+sameTarget+`
 		                      THEN restore_tests.last_metric ELSE EXCLUDED.last_metric END,
-		   last_date = CASE WHEN restore_tests.server = EXCLUDED.server
-		                     AND restore_tests.app = EXCLUDED.app
-		                     AND restore_tests.accessory = EXCLUDED.accessory
-		                     AND restore_tests.bucket = EXCLUDED.bucket
-		                     AND restore_tests.region = EXCLUDED.region
+		   last_date = CASE WHEN `+sameTarget+`
 		                    THEN restore_tests.last_date ELSE EXCLUDED.last_date END,
-		   last_duration_ms = CASE WHEN restore_tests.server = EXCLUDED.server
-		                            AND restore_tests.app = EXCLUDED.app
-		                            AND restore_tests.accessory = EXCLUDED.accessory
-		                            AND restore_tests.bucket = EXCLUDED.bucket
-		                            AND restore_tests.region = EXCLUDED.region
+		   last_duration_ms = CASE WHEN `+sameTarget+`
 		                           THEN restore_tests.last_duration_ms ELSE EXCLUDED.last_duration_ms END`,
-		t.ID, t.Server, t.App, t.Accessory, t.Bucket, t.Region, t.IntervalHours, t.Enabled,
+		t.ID, t.Server, t.App, t.Accessory, t.IntervalHours, t.Enabled,
 		lastRunMs, t.LastOK, t.LastDetail, t.LastMetric, t.LastDate, t.LastDurationMs, incarnation,
 	)
 	return err
@@ -384,9 +365,9 @@ func (s *NucleusStore) SaveRestoreTest(t RestoreTest) error {
 // edits made while the run was in flight survive, and a deleted test stays
 // deleted (zero rows affected). The WHERE clause also requires the identity
 // columns to match the run's target (A24): a retargeted or recreated test
-// never inherits the old target's verification result. F037: region is part
-// of the identity, and zero affected rows are reported as applied=false
-// (dropped) rather than masquerading as success.
+// never inherits the old target's verification result. Zero affected rows
+// are reported as applied=false (dropped) rather than masquerading as
+// success.
 func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
@@ -398,10 +379,10 @@ func (s *NucleusStore) SaveRestoreTestResult(id string, result RestoreTest) (boo
 		`UPDATE restore_tests
 		 SET last_run_ms = $1, last_ok = $2, last_detail = $3,
 		     last_metric = $4, last_date = $5, last_duration_ms = $6
-		 WHERE id = $7 AND server = $8 AND app = $9 AND accessory = $10 AND bucket = $11 AND region = $12 AND incarnation = $13`,
+		 WHERE id = $7 AND server = $8 AND app = $9 AND accessory = $10 AND incarnation = $11`,
 		lastRunMs, result.LastOK, result.LastDetail, result.LastMetric,
 		result.LastDate, result.LastDurationMs, id,
-		result.Server, result.App, result.Accessory, result.Bucket, result.Region, result.Incarnation,
+		result.Server, result.App, result.Accessory, result.Incarnation,
 	)
 	if err != nil {
 		return false, err

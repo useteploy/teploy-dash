@@ -21,6 +21,9 @@ func TestAllowlistedBuilders(t *testing.T) {
 		{"template", Request{Kind: KindTemplateInstall, Server: "prod", Template: "postgres", Domain: "db.example"}, []string{"template", "install"}, 30 * time.Minute},
 		{"lifecycle", Request{Kind: KindAppLifecycle, Server: "prod", App: "web", Action: "restart"}, []string{"restart", "--host"}, 5 * time.Minute},
 		{"maintenance", Request{Kind: KindMaintenance, Server: "prod", App: "web", Action: "on"}, []string{"maintenance", "on"}, 5 * time.Minute},
+		{"redeploy", Request{Kind: KindRedeploy, Server: "prod", App: "web"}, []string{"redeploy", "--json"}, 30 * time.Minute},
+		{"backup_create", Request{Kind: KindBackupCreate, Server: "prod", App: "web"}, []string{"backup", "create"}, 30 * time.Minute},
+		{"backup_restore", Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000"}, []string{"backup", "restore"}, 60 * time.Minute},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -33,6 +36,51 @@ func TestAllowlistedBuilders(t *testing.T) {
 				t.Fatalf("command=%+v target=%q", command, target)
 			}
 		})
+	}
+}
+
+// Plan D2/D3: rollback --to, the backup accessory scoping and the backup-id
+// grammar. Only ids the surfaces handed dash may reach the CLI argv.
+func TestRollbackToAndBackupBuilders(t *testing.T) {
+	rollback, _, _, err := Build(Request{Kind: KindRollback, Server: "prod", App: "web", To: "20261019-120000"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(rollback.Args, "--to"); i < 0 || rollback.Args[i+1] != "20261019-120000" {
+		t.Fatalf("rollback --to args = %v", rollback.Args)
+	}
+	plain, _, _, err := Build(Request{Kind: KindRollback, Server: "prod", App: "web"}, testResolver)
+	if err != nil || slices.Contains(plain.Args, "--to") {
+		t.Fatalf("rollback without a target must keep today's argv: %v %v", plain.Args, err)
+	}
+
+	accessory, _, _, err := Build(Request{Kind: KindBackupCreate, Server: "prod", App: "web", Accessory: "postgres"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(accessory.Args, "--accessory"); i < 0 || accessory.Args[i+1] != "postgres" {
+		t.Fatalf("backup create accessory args = %v", accessory.Args)
+	}
+
+	restore, _, _, err := Build(Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000-0123456789abcdef", Accessory: "postgres"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(restore.Args, "20261019-120000-0123456789abcdef") || !slices.Contains(restore.Args, "--yes") {
+		t.Fatalf("restore args = %v", restore.Args)
+	}
+
+	for _, request := range []Request{
+		{Kind: KindRollback, Server: "prod", App: "web", To: "--image"},
+		{Kind: KindRollback, Server: "prod", App: "web", To: strings.Repeat("a", 129)},
+		{Kind: KindBackupCreate, Server: "prod", App: "web", Accessory: "-flag"},
+		{Kind: KindBackupRestore, Server: "prod", App: "web"},
+		{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000; rm -rf /"},
+		{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "not-a-date"},
+	} {
+		if _, _, _, err := Build(request, testResolver); err == nil {
+			t.Fatalf("Build(%+v) accepted an unsafe request", request)
+		}
 	}
 }
 

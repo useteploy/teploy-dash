@@ -179,7 +179,7 @@ func appActionCapabilities(method, path string) []string {
 
 	if method == http.MethodPost {
 		switch {
-		case action == "env", action == "kv":
+		case action == "env", action == "kv", action == "secrets":
 			return []string{caps.ExecuteMutate}
 		case action == "source/key", action == "source/host-key", action == "source/register":
 			// Git-source connect steps: config/credential writes and forge
@@ -190,11 +190,18 @@ func appActionCapabilities(method, path string) []string {
 			// enable deploys.
 			return []string{caps.ExecuteDeploy}
 		case action == "", action == "stop", action == "start", action == "restart", action == "deploy",
-			action == "rollback", action == "remove", action == "lock", action == "unlock",
-			action == "maintenance/on", action == "maintenance/off":
-			// Deploy-state changes: lifecycle, rollback, remove, lock,
-			// maintenance (the handleAppPost verbs).
+			action == "rollback", action == "redeploy", action == "remove", action == "lock", action == "unlock",
+			action == "maintenance/on", action == "maintenance/off",
+			action == "backups/create":
+			// Deploy-state changes: lifecycle, rollback (previous or chosen
+			// release), redeploy, remove, lock, maintenance (the
+			// handleAppPost verbs), and the D5 backup actions (create holds
+			// volumes; restore stops and restarts the app).
 			return []string{caps.ExecuteDeploy}
+		case action == "backups/restore":
+			// Restoring a backup overwrites live data: the same class as a
+			// restore-test run, not an ordinary deploy-state change.
+			return []string{caps.RestoreData}
 		case strings.HasPrefix(action, "accessories/"):
 			sub := strings.Split(strings.TrimPrefix(action, "accessories/"), "/")
 			if len(sub) == 2 && sub[1] == "logs" {

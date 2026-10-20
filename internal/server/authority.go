@@ -8,10 +8,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/configkeys"
 )
 
@@ -68,6 +70,87 @@ func (s *Server) configOwnedEnvKeyError(ctx context.Context, serverName, appName
 		}
 	}
 	return nil
+}
+
+// envSet performs one `env set` write through the injected runner seams
+// (same argv and stdin contract as cli.EnvSet, which stays the reference
+// implementation for non-server callers). A11/F015/R03: with the CLI's
+// stdin contract the value never touches the argv; a probe that cannot
+// answer fails closed; a verified-unsupported CLI refuses secret values
+// unless the operator opted into the legacy argv transport.
+func (s *Server) envSet(r *http.Request, serverName, appName, key, value string) (*cli.Result, error) {
+	probe := s.config.EnvStdinSupport
+	if probe == nil {
+		probe = cli.EnvStdinSupport
+	}
+	stdinSupported, err := probe()
+	if err != nil {
+		return nil, err
+	}
+	target := []string{"--host", s.serverHost(serverName), "--app", appName}
+	if u := s.serverUser(serverName); u != "" {
+		target = append(target, "--user", u)
+	}
+	actor := s.requestActorArgs(r)
+	if stdinSupported {
+		args := append([]string{"env", "set", key, "--stdin"}, target...)
+		return s.runCLIStdin(r.Context(), value, append(args, actor...)...)
+	}
+	if value != "" && !cli.LegacySecretArgVAllowed() {
+		return nil, cli.ErrLegacySecretArgV
+	}
+	args := append([]string{"env", "set", key + "=" + value}, target...)
+	result, err := s.runCLI(r.Context(), append(args, actor...)...)
+	if err != nil {
+		return result, err
+	}
+	return result, cli.CheckExit(result)
+}
+
+// envUnset performs one `env unset KEY` through the injected runner seam.
+func (s *Server) envUnset(r *http.Request, serverName, appName, key string) (*cli.Result, error) {
+	target := []string{"--host", s.serverHost(serverName), "--app", appName}
+	if u := s.serverUser(serverName); u != "" {
+		target = append(target, "--user", u)
+	}
+	args := append([]string{"env", "unset", key}, target...)
+	args = append(args, s.requestActorArgs(r)...)
+	result, err := s.runCLI(r.Context(), args...)
+	if err != nil {
+		return result, err
+	}
+	return result, cli.CheckExit(result)
+}
+
+// cliEnvGuardDeferred reports whether the installed CLI carries its own env
+// config guard (token env-config-guard-v1): when it does, dash skips its
+// local pre-check and lets the CLI refuse, surfacing the CLI's message (the
+// CLI guard also covers homes dash's local parse cannot see).
+func (s *Server) cliEnvGuardDeferred(r *http.Request) bool {
+	return s.capabilities(r.Context()).Features.EnvConfigGuard
+}
+
+// cliEnvGuardRefusalPrefix is the stable first line of the CLI's
+// env-config-guard refusal (env.go: "env operation refused (nothing
+// written):"). Classified by message text like classifyServerError.
+const cliEnvGuardRefusalPrefix = "env operation refused"
+
+// writeEnvActionError maps a failed env set/unset. The CLI's config-guard
+// refusal is an answer (409, message verbatim — it names the key and the
+// remedy); any other completed non-zero exit keeps the CLI's message as a
+// 400; transport failures are a bad gateway.
+func writeEnvActionError(w http.ResponseWriter, res *cli.Result, err error) {
+	var exited *cli.ExitStatusError
+	if errors.As(err, &exited) {
+		msg := strings.TrimSpace(err.Error())
+		if strings.HasPrefix(msg, cliEnvGuardRefusalPrefix) {
+			writeErrorStatus(w, msg, http.StatusConflict)
+			return
+		}
+		writeError(w, msg)
+		return
+	}
+	writeErrorStatus(w, err.Error(), http.StatusBadGateway)
 }
 
 func (s *Server) refuseConfigOwnedEnvEdit(w http.ResponseWriter, r *http.Request, serverName, appName, key string) bool {

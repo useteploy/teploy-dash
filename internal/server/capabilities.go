@@ -68,8 +68,17 @@ type machineFeatures struct {
 	ConfigMerge        bool `json:"config_merge"`        // config-merge-v1
 	ConfigUnprivileged bool `json:"config_unprivileged"` // config-unprivileged-v1
 	DeployHome         bool `json:"deploy_home"`         // deploy-home-v1
-	GitSource          bool `json:"git_source"`          // git-source-v1
-	TriggerPoll        bool `json:"trigger_poll"`        // trigger-poll-v1
+	// Screens features (plan D5, CLI v0.1.45): secrets, the releases list
+	// with rollback-to, redeploy, the CLI-side env guard, and backups.
+	Secrets        bool `json:"secrets"`          // secret-stdin-v1
+	Releases       bool `json:"releases"`         // releases-json-v1
+	RollbackTo     bool `json:"rollback_to"`      // rollback-json-v1
+	Redeploy       bool `json:"redeploy"`         // redeploy-v1
+	EnvConfigGuard bool `json:"env_config_guard"` // env-config-guard-v1
+	BackupTarget   bool `json:"backup_target"`    // backup-target-v1
+	Backups        bool `json:"backups"`          // backup-json-v1
+	GitSource      bool `json:"git_source"`       // git-source-v1
+	TriggerPoll    bool `json:"trigger_poll"`     // trigger-poll-v1
 }
 
 type capabilityError struct {
@@ -160,6 +169,13 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				value.Features.ConfigMerge = hasToken("config-merge-v1")
 				value.Features.ConfigUnprivileged = hasToken("config-unprivileged-v1")
 				value.Features.DeployHome = hasToken("deploy-home-v1")
+				value.Features.Secrets = hasToken("secret-stdin-v1")
+				value.Features.Releases = hasToken("releases-json-v1")
+				value.Features.RollbackTo = hasToken("rollback-json-v1")
+				value.Features.Redeploy = hasToken("redeploy-v1")
+				value.Features.EnvConfigGuard = hasToken("env-config-guard-v1")
+				value.Features.BackupTarget = hasToken("backup-target-v1")
+				value.Features.Backups = hasToken("backup-json-v1")
 				value.Features.GitSource = hasToken("git-source-v1")
 				value.Features.TriggerPoll = hasToken("trigger-poll-v1")
 			}
