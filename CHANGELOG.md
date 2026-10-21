@@ -4,6 +4,8 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-10-21
+
 ### Fixed
 - **Git sources on self-hosted forges whose SSH and HTTP ports differ.**
   Repository matching now compares host and path only, ignoring scheme
@@ -14,6 +16,7 @@ All notable changes to teploy-dash are recorded here.
   scope mismatch, leaving only the server's poll timer to deploy. The
   forge API is still derived from the credential's HTTP(S) address,
   never from an SSH port. Source IDs and webhook URLs are unchanged.
+- The image bundles teploy CLI v0.1.46.
 
 ## [0.1.18] - 2026-10-20
 

@@ -30,7 +30,7 @@ RUN apk add --no-cache ca-certificates tzdata wget tini git rsync openssh-client
 # source build uses, so the image running in production was the one NOT
 # checking what it executed.
 ARG TARGETARCH
-ARG TEPLOY_VERSION=v0.1.45
+ARG TEPLOY_VERSION=v0.1.46
 RUN set -eux; \
     archive="teploy_linux_${TARGETARCH:-amd64}.tar.gz"; \
     release_url="https://github.com/useteploy/teploy-cli/releases/download/${TEPLOY_VERSION}"; \
