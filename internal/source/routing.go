@@ -121,19 +121,18 @@ func (r *Routing) Unlink(server, app string) error {
 	return r.persist()
 }
 
-// RoutesFor returns the apps cached against one repository (canonical URL
-// match), oldest link first so relays wake the longest-connected app
+// RoutesFor returns the apps cached against one repository (host and path,
+// any transport), oldest link first so relays wake the longest-connected app
 // first when several share a repository.
 func (r *Routing) RoutesFor(repository string) []Route {
-	canonical, err := CanonicalURL(repository)
-	if err != nil {
+	if _, err := RepositoryKey(repository); err != nil {
 		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []Route
 	for _, route := range r.routes {
-		if route.Repository == canonical {
+		if SameRepository(route.Repository, repository) {
 			out = append(out, route)
 		}
 	}

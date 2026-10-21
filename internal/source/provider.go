@@ -100,9 +100,7 @@ func (p *Providers) Policy(src *Source) (Provider, error) {
 		log.Printf("[source] provider %q has a \"preview\" policy; pull request previews were removed and the key is ignored", src.CredentialRef)
 	}
 	v := entry.Provider
-	repo, e := CanonicalURL(v.Repository)
-	want, we := CanonicalURL(src.CloneURL)
-	if e != nil || we != nil || repo != want || v.Forge != src.Forge {
+	if !SameRepository(v.Repository, src.CloneURL) || v.Forge != src.Forge {
 		return Provider{}, fmt.Errorf("source provider repository or forge scope mismatch")
 	}
 	u, e := url.Parse(v.Repository)
@@ -426,8 +424,7 @@ func (p *Providers) CredentialRefFor(rawCloneURL string) (string, Provider, bool
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		repo, err := CanonicalURL(entries[name].Repository)
-		if err != nil || repo != want {
+		if !SameRepository(entries[name].Repository, want) {
 			continue
 		}
 		return name, entries[name].Provider, true

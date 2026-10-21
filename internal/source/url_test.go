@@ -155,3 +155,27 @@ func TestCanonicalURLJoinsAcrossCase(t *testing.T) {
 		t.Fatalf("canonical join key must fold case and transport: %q vs %q", a, b)
 	}
 }
+
+func TestSameRepositoryIgnoresTransport(t *testing.T) {
+	same := [][2]string{
+		{"ssh://git@forge.lan:2222/tyler/app.git", "http://forge.lan:49152/tyler/app"},
+		{"git@github.com:Owner/Repo.git", "https://github.com/owner/repo"},
+		{"https://forge.lan:8443/tyler/app/", "ssh://forge.lan/tyler/app"},
+	}
+	for _, pair := range same {
+		if !SameRepository(pair[0], pair[1]) {
+			t.Errorf("%q and %q should name one repository", pair[0], pair[1])
+		}
+	}
+	different := [][2]string{
+		{"ssh://git@forge.lan:2222/tyler/app", "http://forge.lan:49152/tyler/other"},
+		{"ssh://git@forge.lan:2222/tyler/app", "http://other.lan:49152/tyler/app"},
+		{"https://github.com/owner/repo", "https://github.com/owner/repo/sub"},
+		{"not a url", "not a url"},
+	}
+	for _, pair := range different {
+		if SameRepository(pair[0], pair[1]) {
+			t.Errorf("%q and %q must not match", pair[0], pair[1])
+		}
+	}
+}

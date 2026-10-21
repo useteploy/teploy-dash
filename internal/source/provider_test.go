@@ -530,6 +530,9 @@ func TestCredentialRefForFindsMatchingProvider(t *testing.T) {
 	if ref, _, ok := providers.CredentialRefFor("https://forge.example/other/repo/"); !ok || ref != "beta" {
 		t.Fatalf("lookup = %q %v", ref, ok)
 	}
+	if ref, _, ok := providers.CredentialRefFor("ssh://git@forge.example:2222/other/repo.git"); !ok || ref != "beta" {
+		t.Fatalf("ssh spelling on another port missed the HTTPS provider: %q %v", ref, ok)
+	}
 	if _, _, ok := providers.CredentialRefFor("https://github.com/nothing/repo"); ok {
 		t.Fatal("unrelated repository matched a provider")
 	}
@@ -539,5 +542,24 @@ func TestCredentialRefForFindsMatchingProvider(t *testing.T) {
 	os.WriteFile(path, []byte("{damage"), 0600)
 	if _, _, ok := providers.CredentialRefFor("https://github.com/owner/repo"); ok {
 		t.Fatal("damaged provider file matched")
+	}
+}
+
+func TestProviderPolicyAcceptsSSHSourceOnAnotherPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "providers.json")
+	os.WriteFile(path, []byte(`{"forge":{"forge":"forgejo","repository":"http://forge.lan:49152/tyler/app","allow_private":true,"token_env":"TOK"}}`), 0600)
+	providers := &Providers{Path: path}
+	src := &Source{Forge: ForgeForgejo, CloneURL: "https://forge.lan:2222/tyler/app", CredentialRef: "forge"}
+	policy, err := providers.Policy(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The API is reached on the HTTP port, never the SSH one.
+	if policy.APIURL != "http://forge.lan:49152/api/v1" {
+		t.Fatalf("api url = %q", policy.APIURL)
+	}
+	src.CloneURL = "https://forge.lan:2222/tyler/other"
+	if _, err := providers.Policy(src); err == nil {
+		t.Fatal("credential applied to another repository")
 	}
 }

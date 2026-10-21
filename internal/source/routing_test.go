@@ -71,3 +71,21 @@ func TestRoutingRejectsInvalidInput(t *testing.T) {
 		t.Fatal("missing app accepted")
 	}
 }
+
+func TestRoutingMatchesAcrossTransports(t *testing.T) {
+	routing, err := OpenRouting(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The app pulls over SSH on the forge's SSH port; the source was
+	// registered with the forge's HTTP clone URL on another port.
+	if err := routing.Link("infra-home", "web", "ssh://git@forge.lan:2222/tyler/app.git"); err != nil {
+		t.Fatal(err)
+	}
+	if got := routing.RoutesFor("http://forge.lan:49152/tyler/app"); len(got) != 1 || got[0].App != "web" {
+		t.Fatalf("routes = %+v", got)
+	}
+	if got := routing.RoutesFor("http://forge.lan:49152/tyler/other"); len(got) != 0 {
+		t.Fatalf("other repository woke %+v", got)
+	}
+}
