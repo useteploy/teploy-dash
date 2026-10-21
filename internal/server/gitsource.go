@@ -719,8 +719,7 @@ func (s *Server) gitAppMatch(ctx context.Context, serverName, appName, repositor
 	if err != nil || !hasGit {
 		return false, true
 	}
-	canonical, err := source.CanonicalURL(configRepo)
-	if err != nil || canonical != repository {
+	if !source.SameRepository(configRepo, repository) {
 		return false, true
 	}
 	return configBranch == branch, false

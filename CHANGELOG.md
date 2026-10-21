@@ -4,6 +4,17 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Fixed
+- **Git sources on self-hosted forges whose SSH and HTTP ports differ.**
+  Repository matching now compares host and path only, ignoring scheme
+  and port, so an app that pulls over `ssh://git@forge:2222/o/r` and a
+  forge credential or webhook source spelled `http://forge:3000/o/r`
+  name the same repository. Before, a push woke nothing ("no app is
+  connected to this repository yet") and the credential was refused as a
+  scope mismatch, leaving only the server's poll timer to deploy. The
+  forge API is still derived from the credential's HTTP(S) address,
+  never from an SSH port. Source IDs and webhook URLs are unchanged.
+
 ## [0.1.18] - 2026-10-20
 
 ### Added

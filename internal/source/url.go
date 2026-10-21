@@ -165,6 +165,30 @@ func CanonicalURL(rawCloneURL string) (string, error) {
 	return strings.ToLower(normalized), nil
 }
 
+// RepositoryKey is the repository join key: case-folded host and path,
+// without scheme or port. Transport is not identity, and a self-hosted
+// forge usually serves SSH and HTTP on different ports, so
+// ssh://git@h:2222/o/r and http://h:3000/o/r name one repository. Source
+// IDs keep the full canonical URL (IdentityKey); only matching uses this.
+func RepositoryKey(rawCloneURL string) (string, error) {
+	canonical, err := CanonicalURL(rawCloneURL)
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(canonical)
+	if err != nil {
+		return "", err
+	}
+	return u.Hostname() + u.Path, nil
+}
+
+// SameRepository reports whether two clone URLs name one repository.
+func SameRepository(a, b string) bool {
+	ka, ea := RepositoryKey(a)
+	kb, eb := RepositoryKey(b)
+	return ea == nil && eb == nil && ka == kb
+}
+
 // DeriveID returns the stable source ID — the fleet-envelope convention
 // (deterministic sha256 of the identity key, truncated to 16 hex chars).
 func DeriveID(forge Forge, rawCloneURL string) (string, error) {
