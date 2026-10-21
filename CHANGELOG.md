@@ -4,6 +4,13 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-10-21
+
+### Changed
+- The image bundles teploy CLI v0.1.47: removing an app (Remove, or
+  Remove with purge) also deletes the server-built images of its removed
+  containers instead of leaving them on disk.
+
 ## [0.1.19] - 2026-10-21
 
 ### Fixed
