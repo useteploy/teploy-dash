@@ -503,6 +503,7 @@ func TestDeleteUserSessionsScoped(t *testing.T) {
 // permissions (t.TempDir() cleanup requires the dir be writable again).
 func unwritableDir(t *testing.T, dir string) {
 	t.Helper()
+	skipIfPermissionsNotEnforced(t)
 	if err := os.Chmod(dir, 0500); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
@@ -791,5 +792,23 @@ func TestWhoamiEnvelope(t *testing.T) {
 	}
 	if me.Data.Mode != "local" || me.Data.User.Username != "dana" || me.Data.User.Role != RoleEditor {
 		t.Fatalf("authenticated envelope: %+v", me.Data)
+	}
+}
+
+// skipIfPermissionsNotEnforced skips tests whose fault injection is a chmod
+// that denies writes. A process with CAP_DAC_OVERRIDE (root in a container)
+// writes through 0500/0444 anyway, so the injected failure never happens and
+// the test would assert against a fault that was never induced.
+func skipIfPermissionsNotEnforced(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(dir, 0700)
+	f, err := os.Create(filepath.Join(dir, "probe"))
+	if err == nil {
+		f.Close()
+		t.Skip("file permissions are not enforced for this user (running as root / CAP_DAC_OVERRIDE): chmod-based write-failure injection cannot fail; run as a non-root user")
 	}
 }

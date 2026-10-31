@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A record written by the removed manifest/source pipeline, with the
@@ -14,6 +15,9 @@ import (
 func TestHistoricalManifestRecordLoadsButIsNotRetryable(t *testing.T) {
 	dir := t.TempDir()
 	id := "0123456789abcdef0123456789abcdef"
+	// Recent enough that default age retention (30d) keeps it: this test is
+	// about the removed kind, not retention, and a fixed date expires.
+	createdAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	record := `{
   "id": "` + id + `",
   "request": {
@@ -32,7 +36,7 @@ func TestHistoricalManifestRecordLoadsButIsNotRetryable(t *testing.T) {
   "target": "server:prod/app:web",
   "status": "failed",
   "error": "source manifest binding changed",
-  "created_at": "2026-10-01T00:00:00Z",
+  "created_at": "` + createdAt + `",
   "attempt": 1,
   "record_version": 2
 }

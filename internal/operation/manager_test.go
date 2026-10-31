@@ -410,6 +410,7 @@ func TestReplayAfterSequence(t *testing.T) {
 // record may exist on disk — a later restart must not execute a request the
 // caller saw rejected. (The record, not the event file, is the commit point.)
 func TestRejectedEnqueueNeverExecutesAfterRestart(t *testing.T) {
+	skipIfPermissionsNotEnforced(t)
 	dir := t.TempDir()
 	var executed atomic.Int32
 	manager := newTestManager(t, dir, 100, func(_ context.Context, command Command, _ func(Stream, string)) (int, error) {
@@ -1037,6 +1038,7 @@ func TestActorAttributionPersistedAndReloaded(t *testing.T) {
 // through Health() as degradation (it cannot change the outcome — it is
 // reported instead), and the marker clears once persistence succeeds again.
 func TestHealthReportsPersistDegradationAndRecovery(t *testing.T) {
+	skipIfPermissionsNotEnforced(t)
 	dir := t.TempDir()
 	t.Cleanup(func() {
 		_ = os.Chmod(filepath.Join(dir, "operations", "records"), 0700)
@@ -1354,6 +1356,7 @@ func TestCloneOperationIsolatesPointerFields(t *testing.T) {
 // before the next retained event — the viewer sees the hole, sequences stay
 // contiguous, and no output is manufactured.
 func TestAppendFailureProducesGapMarker(t *testing.T) {
+	skipIfPermissionsNotEnforced(t)
 	dir := t.TempDir()
 	manager, err := New(dir, Options{Resolver: testResolver, Executor: func(_ context.Context, _ Command, _ func(Stream, string)) (int, error) {
 		return 0, nil
@@ -1442,5 +1445,23 @@ func TestPrincipalAdmissionBudgetAcrossTargetsAndReplay(t *testing.T) {
 	}
 	if _, _, err := m.Enqueue(deployRequest("two", "example/web:1"), "same", b); err != nil {
 		t.Fatalf("other principal denied: %v", err)
+	}
+}
+
+// skipIfPermissionsNotEnforced skips tests whose fault injection is a chmod
+// that denies writes. A process with CAP_DAC_OVERRIDE (root in a container)
+// writes through 0500/0444 anyway, so the injected failure never happens and
+// the test would assert against a fault that was never induced.
+func skipIfPermissionsNotEnforced(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(dir, 0700)
+	f, err := os.Create(filepath.Join(dir, "probe"))
+	if err == nil {
+		f.Close()
+		t.Skip("file permissions are not enforced for this user (running as root / CAP_DAC_OVERRIDE): chmod-based write-failure injection cannot fail; run as a non-root user")
 	}
 }
