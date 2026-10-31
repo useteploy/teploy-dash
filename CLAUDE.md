@@ -21,7 +21,7 @@ partly-superseded plan (`PARITY-PLAN.md`) — verify either against source.
 | **Multi-server** | SSH-polls each server in CLI's servers.yml (60s fleet cache); NOT a peer-pull from other teploy-dash instances |
 | **Monitoring** | HTTP / TCP / ping checks with configurable intervals |
 | **Storage** | Nucleus (pgwire, preferred) or JSONL files (fallback) |
-| **Auth** | Session-cookie auth (24h TTL, bcrypt on-disk, setup mode on first run); `TEPLOY_DASH_PASSWORD` env var optional; `--no-auth` for dev. Authorization = X03 capability matrix (`internal/caps` + the route table in `internal/server/caps.go`): roles are presets; legacy accounts keep pre-matrix permissions until narrowed. |
+| **Auth** | Session-cookie auth (30-day idle-sliding sessions persisted as SHA-256 token hashes in `sessions.json` beside `users.json`, so restarts keep users signed in; bcrypt on-disk, setup mode on first run); `TEPLOY_DASH_PASSWORD` env var optional; `--no-auth` for dev. Authorization = X03 capability matrix (`internal/caps` + the route table in `internal/server/caps.go`): roles are presets; legacy accounts keep pre-matrix permissions until narrowed. |
 | **Port** | 3456 (default) |
 
 ## Architecture

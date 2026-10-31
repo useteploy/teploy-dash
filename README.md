@@ -88,6 +88,9 @@ Open `http://localhost:3456`. On first launch you'll be taken to a setup page
 to create your username and password. Credentials are stored as bcrypt hashes
 in `/var/teploy-dash/users.json` (a legacy single-user `auth.json` from older
 versions is migrated into it automatically on first load).
+Sign-in sessions last 30 days from last use (renewed at most once a day) and
+are kept in `sessions.json` beside it — stored as SHA-256 hashes of the cookie,
+never the cookie itself — so restarts and redeploys don't sign anyone out.
 
 You can also pre-set a password via environment variable (useful for Docker or
 automated deploys — the setup page is skipped when this is present):

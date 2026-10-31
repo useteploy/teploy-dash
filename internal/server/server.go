@@ -728,8 +728,11 @@ type authGate struct {
 	fails          map[string]*failInfo
 	// Sessions carry the authenticated user's identity + role so the gate can
 	// enforce RBAC and handlers can attribute actions.
-	sessMu   sync.Mutex
-	sessions map[string]*sessionInfo
+	// Keyed by SHA-256 of the cookie token (never the raw token) and
+	// mirrored to sessionsFile so restarts keep everyone signed in.
+	sessMu       sync.Mutex
+	sessions     map[string]*sessionInfo
+	sessionsFile string // sessions.json beside users.json; "" disables persistence
 	// bootstrapToken gates account creation while setupRequired is true — a
 	// fresh, remotely-reachable instance would otherwise let ANY visitor claim
 	// the first (admin) account. Generated once in newAuthGate, printed to the
@@ -786,7 +789,6 @@ type failInfo struct {
 const (
 	authMaxFails       = 5
 	authLockWindow     = time.Minute
-	sessionTTL         = 24 * time.Hour
 	sessionCookie      = "teploy_dash_session"
 	maxRequestBodySize = 1 << 20
 )
@@ -802,6 +804,10 @@ func newAuthGate(user, pass, credFile string) *authGate {
 		trustedProxies: parseTrustedProxies(os.Getenv("TEPLOY_DASH_TRUSTED_PROXY")),
 		fails:          make(map[string]*failInfo),
 		sessions:       make(map[string]*sessionInfo),
+	}
+	if credFile != "" {
+		g.sessionsFile = filepath.Join(filepath.Dir(credFile), "sessions.json")
+		g.loadSessions()
 	}
 	// Load stored users. Only a genuinely fresh install (no users.json and no
 	// legacy auth.json anywhere) with no env-var password enters setup mode.
@@ -922,7 +928,8 @@ func (g *authGate) newSessionFor(sub, user, role string, epoch uint64, local boo
 			delete(g.sessions, k)
 		}
 	}
-	g.sessions[token] = &sessionInfo{sub: sub, user: user, role: normalizeRole(role), exp: now.Add(sessionTTL), epoch: epoch, local: local}
+	g.sessions[hashSessionToken(token)] = &sessionInfo{sub: sub, user: user, role: normalizeRole(role), exp: now.Add(sessionTTL), epoch: epoch, local: local}
+	g.saveSessionsLocked()
 	return token
 }
 
@@ -933,21 +940,27 @@ func (g *authGate) lookupSession(token string) (*sessionInfo, bool) {
 	}
 	g.sessMu.Lock()
 	defer g.sessMu.Unlock()
-	si, ok := g.sessions[token]
+	key := hashSessionToken(token)
+	si, ok := g.sessions[key]
 	if !ok {
 		return nil, false
 	}
 	if time.Now().After(si.exp) {
-		delete(g.sessions, token)
+		delete(g.sessions, key)
 		return nil, false
 	}
-	return si, true
+	cp := *si
+	return &cp, true
 }
 
 func (g *authGate) deleteSession(token string) {
 	g.sessMu.Lock()
 	defer g.sessMu.Unlock()
-	delete(g.sessions, token)
+	key := hashSessionToken(token)
+	if _, ok := g.sessions[key]; ok {
+		delete(g.sessions, key)
+		g.saveSessionsLocked()
+	}
 }
 
 // deleteUserSessions invalidates every live session belonging to one
@@ -957,10 +970,15 @@ func (g *authGate) deleteSession(token string) {
 func (g *authGate) deleteUserSessions(sub string) {
 	g.sessMu.Lock()
 	defer g.sessMu.Unlock()
+	removed := false
 	for k, si := range g.sessions {
 		if si.sub == sub {
 			delete(g.sessions, k)
+			removed = true
 		}
+	}
+	if removed {
+		g.saveSessionsLocked()
 	}
 }
 
@@ -1106,6 +1124,11 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 				session = nil
 			} else {
 				session = live
+				// Idle-sliding expiry: only a session that just passed epoch
+				// revalidation is renewed, at most about once a day.
+				if g.renewSession(cookie.Value) {
+					g.setSessionCookie(w, r, cookie.Value)
+				}
 			}
 		}
 		// Login throttling keys on the client IP, so applying it before the
@@ -1333,7 +1356,10 @@ func (g *authGate) handleChangePassword(w http.ResponseWriter, r *http.Request) 
 }
 
 func (g *authGate) issueSessionCookie(w http.ResponseWriter, r *http.Request, sub, user, role string, epoch uint64, local bool) {
-	token := g.newSessionFor(sub, user, role, epoch, local)
+	g.setSessionCookie(w, r, g.newSessionFor(sub, user, role, epoch, local))
+}
+
+func (g *authGate) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
