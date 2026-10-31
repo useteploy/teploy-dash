@@ -4,6 +4,15 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-10-31
+
+### Changed
+- The image bundles teploy CLI v0.1.49 (from v0.1.47): app containers
+  receive `TEPLOY_APP`, `TEPLOY_PROCESS` and `TEPLOY_VERSION`; `runtime:`,
+  `security_opt:` and `tls.http_only` in `teploy.yml`; every `docker build`
+  pulls current base images (`--pull`, v0.1.48) and v0.1.48's SSH and
+  non-root setup fixes.
+
 ## [0.1.20] - 2026-10-21
 
 ### Changed
