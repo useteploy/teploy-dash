@@ -364,7 +364,10 @@ func TestRunCheck_RecreateDuringCheck_NoPhantomRowOrStolenBaseline(t *testing.T)
 	if base != "down" {
 		t.Fatalf("baseline after recreated check = %q, want down (its own verdict)", base)
 	}
-	if evs := al.sent(); len(evs) != 0 {
-		t.Fatalf("first check of a fresh incarnation must not alert without a prior baseline, got %d events", len(evs))
+	// Its first check is down with no inherited baseline, so it alerts once,
+	// as any new monitor that starts down does — attributed to the
+	// recreated incarnation, not the deleted one.
+	if evs := al.sent(); len(evs) != 1 || evs[0].Status != "down" {
+		t.Fatalf("fresh incarnation's first down check must alert once, got %+v", evs)
 	}
 }

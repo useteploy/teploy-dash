@@ -369,7 +369,12 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 	alerter := r.alerter
 	r.mu.Unlock()
 
-	if alerter != nil && prev != "" && prev != result.Status {
+	// A monitor with no history that comes up down alerts too: the fleet
+	// creates monitors for domains that may already be broken, and waiting
+	// for an up->down edge kept those silent forever. A first check that is
+	// up has nothing to report.
+	firstDown := prev == "" && result.Status == "down"
+	if alerter != nil && (firstDown || (prev != "" && prev != result.Status)) {
 		alerter.Send(alert.Event{
 			MonitorID:   m.ID,
 			MonitorName: m.Name,

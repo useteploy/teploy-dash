@@ -450,7 +450,10 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 		// The restore-test source label scopes the outbox's delivery-status
 		// lookups (a restore verdict must never answer for a monitor) and
 		// tells receivers what kind of alert landed (D08).
-		if !t.LastOK {
+		// Alert once per failure streak: on the first failure, or the first
+		// after a pass. Re-sending on every failed run turned a broken
+		// backup into a daily repeat of the same alert.
+		if !t.LastOK && (!hadPrev || prev) {
 			alerter.Send(alert.Event{
 				MonitorID:   t.ID,
 				MonitorName: name,
@@ -459,7 +462,7 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 				OccurredAt:  t.LastRunAt,
 				Source:      alert.SourceRestoreTest,
 			})
-		} else if hadPrev && !prev {
+		} else if t.LastOK && hadPrev && !prev {
 			alerter.Send(alert.Event{
 				MonitorID:   t.ID,
 				MonitorName: name,

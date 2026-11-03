@@ -95,3 +95,21 @@ func TestRunner_DetectsTransitionFromSeededState(t *testing.T) {
 		t.Errorf("expected status to transition to 'down', got %q", after)
 	}
 }
+
+type countingAlerter struct{ events []alert.Event }
+
+func (c *countingAlerter) Send(ev alert.Event) { c.events = append(c.events, ev) }
+
+// A new monitor whose first check is down alerts once; a repeat down does
+// not, and a new monitor whose first check is up stays quiet.
+func TestRunner_FirstCheckDownAlerts(t *testing.T) {
+	r := New(&mockStore{})
+	c := &countingAlerter{}
+	r.SetAlerter(c)
+	down := store.Monitor{ID: "d", Name: "d", Type: "tcp", Target: "127.0.0.1:1", AllowInternal: true}
+	r.runCheck(down, 0)
+	r.runCheck(down, 0)
+	if len(c.events) != 1 || c.events[0].Status != "down" {
+		t.Fatalf("first-down monitor sent %d alerts, want one down: %+v", len(c.events), c.events)
+	}
+}

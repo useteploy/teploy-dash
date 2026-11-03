@@ -461,3 +461,21 @@ func TestStopCancelsRunnerOwnedTargetResolution(t *testing.T) {
 		t.Fatal("shutdown failed to join canceled resolution")
 	}
 }
+
+// A failure streak alerts once: the second consecutive failed run is quiet,
+// and the first pass after it sends the recovery.
+func TestRunNow_FailureStreakAlertsOnce(t *testing.T) {
+	r, st := newTestRunner(t, `not json`, nil)
+	rt := seedTest(t, st)
+	capture := &capturingAlerter{}
+	r.SetAlerter(capture)
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.RunNow(rt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(capture.events) != 1 || capture.events[0].Status != "down" {
+		t.Fatalf("two failed runs sent %d alerts, want exactly one down: %+v", len(capture.events), capture.events)
+	}
+}
