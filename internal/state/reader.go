@@ -37,6 +37,10 @@ type AppState struct {
 	Domain       string `json:"domain"`
 	DeployedAt   string `json:"deployed_at"`
 	Status       string `json:"status"`
+	// IngressMode is the CLI's recorded ingress ("caddy", "host",
+	// "external", ...). "external" means teploy publishes no route: the
+	// domain is only the config's required label.
+	IngressMode string `json:"ingress_mode,omitempty"`
 }
 
 // Reader reads teploy CLI state files from the deployments directory.

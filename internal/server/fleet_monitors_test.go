@@ -29,7 +29,8 @@ func TestReconcileFleetMonitors(t *testing.T) {
 
 	sweep := []ServerObservation{
 		fleetEnv("a", "", remote.AppState{App: "akiroo", Domain: "app.acme.dev, bugs.acme.io"}),
-		fleetEnv("b", "", remote.AppState{App: "site", Domain: "site.acme.dev"}),
+		fleetEnv("b", "", remote.AppState{App: "site", Domain: "site.acme.dev"},
+			remote.AppState{App: "race", Domain: "mp.acme.dev", Ingress: "external"}),
 	}
 	added, removed, err := s.reconcileFleetMonitors(sweep)
 	if err != nil || added != 3 || removed != 0 {

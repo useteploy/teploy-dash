@@ -75,6 +75,11 @@ func desiredFleetMonitors(envelopes []ServerObservation) (want map[string]store.
 		apps := append(env.Apps[:0:0], env.Apps...)
 		sort.Slice(apps, func(i, j int) bool { return apps[i].App < apps[j].App })
 		for _, app := range apps {
+			// ingress external: teploy publishes no route, so the domain is
+			// a label that may have no DNS at all.
+			if app.Ingress == "external" {
+				continue
+			}
 			for _, h := range fleetMonitorHosts(app.Domain) {
 				id := fleetMonitorID(h)
 				if _, ok := want[id]; ok {

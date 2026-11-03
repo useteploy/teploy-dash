@@ -148,6 +148,7 @@ func readAppState(ctx context.Context, c *uissh.Client, serverName, appName stri
 		PreviousHash: parsed.PreviousHash,
 		CurrentPort:  parsed.Port,
 		Domain:       parsed.Domain,
+		Ingress:      parsed.IngressMode,
 		Containers:   []ContainerInfo{},
 	}
 	if t, err := time.Parse(time.RFC3339, parsed.DeployedAt); err == nil {
