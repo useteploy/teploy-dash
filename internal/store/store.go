@@ -48,6 +48,14 @@ type Monitor struct {
 	// case — this makes that reachability an explicit admin choice per
 	// monitor rather than a default every monitor gets.
 	AllowInternal bool `json:"allow_internal,omitempty"`
+	// Reachable judges an HTTP check up on any status below 500: the origin
+	// answered. A site's root may legitimately be a 401 or 404; what this
+	// catches is a 5xx or no answer at all (a tunnel whose origin is gone).
+	Reachable bool `json:"reachable,omitempty"`
+	// App is set only on monitors Dash derives from the fleet: the deployed
+	// app whose domain this watches. The fleet reconciler owns these and
+	// never touches a monitor without it.
+	App string `json:"app,omitempty"`
 	// Incarnation is the store-assigned revision of this configuration.
 	// Every SaveMonitor assigns the next number (monotonic across edits AND
 	// delete+recreate, so the number is never reused — no ABA). A check

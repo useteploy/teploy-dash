@@ -98,6 +98,8 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 		// (same additive pattern; pre-D08 rows read as incarnation 0 and are
 		// superseded by the first post-upgrade save).
 		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS incarnation BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS reachable BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS app TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS checks (
 			id BIGINT PRIMARY KEY,
 			monitor_id TEXT NOT NULL,
@@ -141,7 +143,7 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation FROM monitors")
+		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app FROM monitors")
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +157,7 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 		var method string
 
 		err := rows.Scan(&m.ID, &m.Name, &m.Type, &m.Target,
-			&intervalMs, &timeoutMs, &m.Enabled, &expectedStatus, &method, &m.AllowInternal, &m.Incarnation)
+			&intervalMs, &timeoutMs, &m.Enabled, &expectedStatus, &method, &m.AllowInternal, &m.Incarnation, &m.Reachable, &m.App)
 		if err != nil {
 			continue
 		}
@@ -181,9 +183,9 @@ func (s *NucleusStore) GetMonitor(id string) (*Monitor, error) {
 	var intervalMs, timeoutMs int64
 
 	err := s.pool.QueryRow(ctx,
-		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation FROM monitors WHERE id = $1", id,
+		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app FROM monitors WHERE id = $1", id,
 	).Scan(&m.ID, &m.Name, &m.Type, &m.Target,
-		&intervalMs, &timeoutMs, &m.Enabled, &m.ExpectedStatus, &m.Method, &m.AllowInternal, &m.Incarnation)
+		&intervalMs, &timeoutMs, &m.Enabled, &m.ExpectedStatus, &m.Method, &m.AllowInternal, &m.Incarnation, &m.Reachable, &m.App)
 	if err != nil {
 		return nil, err
 	}
@@ -217,17 +219,19 @@ func (s *NucleusStore) SaveMonitor(m *Monitor) error {
 	s.incarnationClock = next
 
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO monitors (id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`INSERT INTO monitors (id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 ON CONFLICT (id) DO UPDATE SET
 		   name = EXCLUDED.name, type = EXCLUDED.type, target = EXCLUDED.target,
 		   interval_ms = EXCLUDED.interval_ms, timeout_ms = EXCLUDED.timeout_ms,
 		   enabled = EXCLUDED.enabled, expected_status = EXCLUDED.expected_status,
 		   method = EXCLUDED.method, allow_internal = EXCLUDED.allow_internal,
-		   incarnation = EXCLUDED.incarnation`,
+		   incarnation = EXCLUDED.incarnation, reachable = EXCLUDED.reachable,
+		   app = EXCLUDED.app`,
 		m.ID, m.Name, m.Type, m.Target,
 		m.Interval.Milliseconds(), m.Timeout.Milliseconds(),
 		m.Enabled, m.ExpectedStatus, m.Method, m.AllowInternal, m.Incarnation,
+		m.Reachable, m.App,
 	)
 	return err
 }

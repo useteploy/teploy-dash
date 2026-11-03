@@ -197,6 +197,13 @@ reconciling.
   HTTP checks honor an optional exact expected status code (when unset,
   any 2xx/3xx is healthy). Ping is a TCP-connect probe (the target needs
   a `host:port`); raw ICMP is not used.
+- **Fleet monitors, automatic.** Every public domain a deployed app serves
+  gets an HTTP monitor on `https://<domain>/` within five minutes of Dash
+  seeing it, judged up on any answer below 500 (a root that returns 401 is a
+  live site; a 5xx or no answer is not). Retired when no app serves the
+  domain any more, and only after a sweep that reached every server.
+  Placeholder, IP-literal and wildcard domains are skipped. Disable one to
+  silence it; deleting it brings it back on the next sweep.
 - 24-hour stats (uptime %, total / up / down checks, average response time).
 - Storage: Nucleus over pgwire (preferred) or rolling JSONL files
   (fallback). Daily cleanup for the file store keeps 7 days of checks.

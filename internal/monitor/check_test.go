@@ -84,3 +84,20 @@ func TestCheckHTTP_PerMonitorTimeout(t *testing.T) {
 		t.Errorf("expected timeout -> down, got %q (%s)", got.Status, got.Message)
 	}
 }
+
+// Reachable: any answer below 500 is up (a root that 401s is a live site);
+// a 5xx — a tunnel whose origin is gone answers 502 — is down.
+func TestCheckHTTP_Reachable(t *testing.T) {
+	for code, want := range map[int]string{200: "up", 401: "up", 404: "up", 502: "down", 530: "down"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+		}))
+		got := New(&mockStore{}).checkHTTP(store.Monitor{
+			ID: "m", Type: "http", Target: srv.URL, Reachable: true, AllowInternal: true,
+		})
+		srv.Close()
+		if got.Status != want {
+			t.Errorf("status %d: got %q want %q (%s)", code, got.Status, want, got.Message)
+		}
+	}
+}

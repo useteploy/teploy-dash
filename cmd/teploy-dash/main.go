@@ -323,6 +323,14 @@ func run() error {
 		}
 	}()
 
+	// Fleet monitors: every public domain a deployed app serves gets an
+	// uptime monitor automatically. Same cancel/join as cleanup.
+	cleanupWG.Add(1)
+	go func() {
+		defer cleanupWG.Done()
+		srv.RunFleetMonitors(cleanupCtx)
+	}()
+
 	// Start the HTTP server on the pre-bound listener. A LATER failure
 	// (accept error, TLS misconfiguration) funnels through the same shutdown
 	// epilogue as a signal — it no longer bypasses runner joins and the

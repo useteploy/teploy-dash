@@ -433,6 +433,8 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 			result.Status = "down"
 			result.Message = fmt.Sprintf("expected %d, got %d", m.ExpectedStatus, resp.StatusCode)
 		}
+	case m.Reachable && resp.StatusCode < 500:
+		result.Status = "up"
 	case resp.StatusCode >= 200 && resp.StatusCode < 400:
 		result.Status = "up"
 	default:
