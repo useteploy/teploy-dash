@@ -12,7 +12,7 @@ func fleetEnv(server, errMsg string, apps ...remote.AppState) ServerObservation 
 }
 
 func TestFleetMonitorHostsFiltersUnprobeable(t *testing.T) {
-	got := fleetMonitorHosts(" App.Acme.dev, bugs.acme.io ,dash.example.com,x.local,100.1.2.3,*.wild.org,host:8080,localhost,")
+	got := fleetMonitorHosts(" App.Acme.dev, bugs.acme.io ,dash.example.com,x.local,omni-api.internal,box.tail1.ts.net,100.1.2.3,*.wild.org,host:8080,localhost,")
 	want := []string{"app.acme.dev", "bugs.acme.io"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("hosts = %v, want %v", got, want)

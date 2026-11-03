@@ -39,13 +39,25 @@ func fleetMonitorHosts(domain string) []string {
 	var hosts []string
 	for _, d := range strings.Split(domain, ",") {
 		h := strings.ToLower(strings.TrimSpace(d))
-		if h == "" || isPlaceholderDomain(h) || net.ParseIP(h) != nil ||
+		if h == "" || isPlaceholderDomain(h) || isPrivateSuffix(h) || net.ParseIP(h) != nil ||
 			strings.ContainsAny(h, "*:/ ") || !strings.Contains(h, ".") {
 			continue
 		}
 		hosts = append(hosts, h)
 	}
 	return hosts
+}
+
+// isPrivateSuffix reports names that only resolve inside a network (the
+// ICANN-reserved .internal, home/LAN suffixes, tailnet MagicDNS): a public
+// probe can never reach them, so a monitor would only ever read down.
+func isPrivateSuffix(h string) bool {
+	for _, suffix := range []string{".internal", ".lan", ".home.arpa", ".ts.net", ".intranet", ".corp"} {
+		if strings.HasSuffix(h, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // desiredFleetMonitors derives the monitor set from one fleet sweep. complete

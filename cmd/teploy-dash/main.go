@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/outbox"
 	"github.com/useteploy/teploy-dash/internal/restoretest"
@@ -283,10 +284,12 @@ func run() error {
 	// R14: an unreadable/corrupt config is loud at startup — it previously
 	// read as "not configured" and a later partial save destroyed secrets.
 	rst.SetAlerter(alertOutbox)
-	if _, notifErr := server.LoadNotificationsConfig(); notifErr != nil {
+	if notifCfg, notifErr := server.LoadNotificationsConfig(); notifErr != nil {
 		log.Printf("Warning: %v (alerts disabled until the config is repaired; saving from Settings is refused in this state)", notifErr)
+	} else if channels := alert.ConfiguredChannels(notifCfg); len(channels) == 0 {
+		log.Printf("Warning: no alert channel configured — monitors record up/down but notify nobody (Settings > Notifications)")
 	} else {
-		log.Printf("Alerts configured")
+		log.Printf("Alerts configured: %s", strings.Join(channels, ", "))
 	}
 
 	// Start monitor checks + restore-test schedules, then the alert outbox
