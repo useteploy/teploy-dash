@@ -210,9 +210,11 @@ reconciling.
   (fallback). Daily cleanup for the file store keeps 7 days of checks.
 - Manual "test now" runs a check immediately without saving.
 - **Push / heartbeat monitors.** Type `push` gets a secret URL
-  (`/api/push/<token>`, no login, rate-limited). A backup job or cron task
-  requests it when it finishes (`?status=down&msg=...` reports a failure);
-  the monitor goes down when no ping arrives within the interval + grace.
+  (`/api/push/<token>`, no login, rate-limited), shown on the monitor page
+  to users who can edit monitors. A backup job or cron task requests it when
+  it finishes (`?status=down&msg=...` reports a failure); the monitor goes
+  down when no ping arrives within the interval + grace (default 10% of the
+  interval, at least 5 minutes).
 - Alerts: see [Alerting](#alerting).
 
 ### Alerting
@@ -220,7 +222,9 @@ reconciling.
 **Incidents, not flips.** A monitor opens an incident after `fail_after`
 consecutive failed checks (default 3; push monitors 1) and recovers after
 `recover_after` passing checks (default 2; push 1). The streak is restored
-from check history after a restart. Each incident has a stable
+from check history after a restart. On the first start with incident
+tracking (no `incidents.json`), outages that already exist are announced as
+one summary, not one alert per monitor. Each incident has a stable
 `incident_id`, is sent once when it opens and once when it recovers (a
 recovery only if the open was sent), and optionally repeats every
 `repeat_every`. Deleting or disabling a monitor, or the fleet reconciler
@@ -236,7 +240,9 @@ deploy lock, or has a queued/running Dash operation (and for 2 minutes
 after), opens are held: failures keep counting and, if the monitor is still
 failing when the hold ends, the incident opens then. An operation holds at
 most 2 minutes + its timeout from its start (deploy 30 min), so a hung
-deploy cannot hide an outage; a lock alone at most 32 minutes. Maintenance
+deploy cannot hide an outage; a lock alone at most 32 minutes, maintenance
+at most 24 hours. A held monitor that is still failing when its hold ends
+opens within a minute. Maintenance
 and lock flags come from the fleet cache (refreshed by page loads and the
 5-minute fleet sweep). **Silences** (everything, one app, or one monitor;
 1 minute to 30 days) hold the same way and close the open incidents they
@@ -254,6 +260,13 @@ cover with reason `suppressed_end`. Held alerts are recorded as
 | `email` | SMTP with required STARTTLS unless plaintext is allowed for a LAN relay. |
 | `webhook` | The signed Event v2 JSON body (below). |
 | `ship` | The signed Event v2 body to a Teploy Ship intake URL with its own secret. |
+
+Channel and heartbeat URLs go through the same network guard as monitors:
+loopback, private, Tailscale (CGNAT) and metadata addresses are refused
+unless the channel or receiver allows an internal address. Delivery errors
+never show a URL path, secret or token. A pending open whose incident
+recovers first is marked `superseded` instead of being sent after the
+recovery.
 
 Each channel can be limited to some kinds (opened / reminders /
 recovered), has **Send test** (`kind: "test"`), and shows its delivery
@@ -514,7 +527,8 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / POST | `/api/alerts/silences` | Active silences / create `{scope: all\|app\|monitor, target, reason, duration_minutes}`. POST is `execute.mutate`. |
 | DELETE | `/api/alerts/silences/{id}` | End a silence. `execute.mutate`. |
 | GET | `/api/audit` | Audit trail of alerting changes (channels, tests, heartbeats, silences). `administer.credentials`. |
-| GET / POST / HEAD | `/api/push/{token}` | Push monitor ping (no session; the token is the credential; 60/min per address, 12/min per token). `?status=down&msg=...` records a failure. |
+| GET / POST / HEAD | `/api/push/{token}` | Push monitor ping (no session; the token is the credential; 12/min per token, and 30 unknown-token misses/min per address). `?status=down&msg=...` records a failure. |
+| GET | `/api/monitors/{id}/push-url` | A push monitor's secret ping path (audited). `execute.mutate`; the monitor list and detail omit `push_token` for readers without it. |
 | GET / POST | `/api/sources` | List / register git sources (D04): `{forge, clone_url, default_branch?, credential_ref?, display_name?}` — `forge` is `github`/`forgejo`/`gitea`/`gitlab`/`generic`; the clone URL is canonicalized (credentials stripped, scp/ssh forms folded onto https, `.git` dropped) and identity is forge + URL, so same-named repos on two forges never collide. Create returns the webhook secret exactly once. |
 | GET / PATCH / DELETE | `/api/sources/{id}` | Detail (with recent webhook deliveries and their dispositions) / update display name, default branch, credential reference / delete. Identity fields are immutable. |
 | POST | `/api/sources/{id}/verify` | Run the credential verifier; a failure marks the source degraded with the exact reason (visible everywhere, deliveries are then recorded-and-refused, never silently dropped). Answers 501 when no verifier is configured. |

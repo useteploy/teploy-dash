@@ -35,9 +35,12 @@ All notable changes to teploy-dash are recorded here.
   list (ids `webhook` / `email`, pending deliveries replay unchanged). The
   legacy flat fields are still accepted by `POST /api/notifications`.
 - Fleet monitors record the server their app runs on.
-- Upgrading with channels configured and monitors already down sends one
-  `incident_opened` per such monitor (v1 had no incident state to carry
-  over).
+- On the first start after the upgrade, monitors and restore tests that are
+  already failing are announced as one summary (human channels) plus one
+  open each for webhook/Ship channels, not one alert per monitor.
+- Alert channels and heartbeat pings use the monitor network guard
+  (internal addresses need the channel's or receiver's allow-internal
+  option); heartbeat pings no longer follow redirects.
 
 ### Fixed
 - The generic webhook field no longer suggests a Slack URL (Slack needs its
@@ -45,6 +48,8 @@ All notable changes to teploy-dash are recorded here.
 - Monitor delivery status was never shown in production: the server now
   receives the alert outbox.
 - Editing a fleet monitor in the UI no longer drops its app ownership.
+- Delivery errors no longer expose credential URLs (Slack/Discord/ntfy
+  paths, heartbeat ping URLs); stored errors are scrubbed when served.
 
 ## [0.1.21] - 2026-10-31
 

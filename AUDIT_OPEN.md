@@ -34,13 +34,21 @@ operation-failure incidents. Open:
 - **Hold freshness.** Maintenance and deploy-lock flags come from the fleet
   cache (page loads + the 5-minute fleet sweep), so a flag flip can take up
   to one sweep to hold or release. Operation holds are live.
-- **Push token visibility.** `GET /api/monitors[/id]` returns `push_token`
-  to `view.metadata` readers (the UI needs it to show the push URL). A
-  leaked token lets someone fake pings for that one monitor; narrowing it
-  to editors is a follow-up.
-- **Upgrade re-open.** v1 kept no incident state, so on upgrade a monitor
-  already down (and failing `fail_after` checks) opens one fresh
-  `incident_opened` on installs that already had a channel.
+- **Review fixes (same branch).** Credential URLs redacted from delivery
+  and heartbeat errors (at the sender and when served); `push_token` hidden
+  from non-editors (`GET /api/monitors/{id}/push-url`, execute.mutate); the
+  first start adopts existing outages into one summary; held rules open on
+  a 1-minute release pass; channel delete, restore-test disable and orphans
+  at startup retire their incidents; push limiter counts only unknown-token
+  misses per address; alerts are enqueued under the tracker lock and a
+  pending open is superseded by its recovery; maintenance hold capped at
+  24h; corrupt incidents/silences/audit files are set aside; channel and
+  heartbeat URLs use the monitor network guard.
+- **Restore-test retire race.** A restore run finishing after its test was
+  deleted is dropped by the store CAS (SaveRestoreTestResult applied=false),
+  so it cannot recreate the incident; a run finishing after a DISABLE
+  (test still stored) can reopen it until the next sweep of orphans at
+  restart. Low impact; not fixed.
 - **Monitor fields in Nucleus.** The new monitor fields (server,
   fail_after, recover_after, repeat_every, grace, push_token) were added as
   additive columns on the existing `monitors` table, the established
