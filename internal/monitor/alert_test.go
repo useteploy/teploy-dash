@@ -100,13 +100,13 @@ type countingAlerter struct{ events []alert.Event }
 
 func (c *countingAlerter) Send(ev alert.Event) { c.events = append(c.events, ev) }
 
-// A new monitor whose first check is down alerts once; a repeat down does
-// not, and a new monitor whose first check is up stays quiet.
+// A new monitor whose first check is down alerts once (fail_after 1); a
+// repeat down does not.
 func TestRunner_FirstCheckDownAlerts(t *testing.T) {
 	r := New(&mockStore{})
 	c := &countingAlerter{}
 	r.SetAlerter(c)
-	down := store.Monitor{ID: "d", Name: "d", Type: "tcp", Target: "127.0.0.1:1", AllowInternal: true}
+	down := store.Monitor{ID: "d", Name: "d", Type: "tcp", Target: "127.0.0.1:1", AllowInternal: true, FailAfter: 1}
 	r.runCheck(down, 0)
 	r.runCheck(down, 0)
 	if len(c.events) != 1 || c.events[0].Status != "down" {

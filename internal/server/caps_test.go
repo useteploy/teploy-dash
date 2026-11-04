@@ -228,6 +228,24 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"POST", "/api/registries", []string{caps.AdministerCredentials}},
 		{"GET", "/api/notifications", []string{caps.AdministerCredentials}},
 		{"PATCH", "/api/notifications", []string{caps.AdministerCredentials}},
+		// Alerts v2: channels, test-send and heartbeat receivers manage
+		// credentials; silences are dashboard-config mutations; incidents
+		// and delivery history are metadata; push pings are token-scoped.
+		{"PUT", "/api/notifications/channels/ops", []string{caps.AdministerCredentials}},
+		{"DELETE", "/api/notifications/channels/ops", []string{caps.AdministerCredentials}},
+		{"POST", "/api/notifications/channels/ops/test", []string{caps.AdministerCredentials}},
+		{"PUT", "/api/notifications/heartbeats/hc", []string{caps.AdministerCredentials}},
+		{"POST", "/api/notifications/heartbeats/hc/test", []string{caps.AdministerCredentials}},
+		{"GET", "/api/audit", []string{caps.AdministerCredentials}},
+		{"GET", "/api/alerts/silences", []string{caps.ViewMetadata}},
+		{"POST", "/api/alerts/silences", []string{caps.ExecuteMutate}},
+		{"DELETE", "/api/alerts/silences/sil_1", []string{caps.ExecuteMutate}},
+		{"GET", "/api/alerts/incidents", []string{caps.ViewMetadata}},
+		{"GET", "/api/alerts/deliveries", []string{caps.ViewMetadata}},
+		{"GET", "/api/push/abc", nil},
+		{"GET", "/api/monitors/p1/push-url", []string{caps.ExecuteMutate}},
+		{"GET", "/api/monitors/p1", []string{caps.ViewMetadata}},
+		{"POST", "/api/push/abc", nil},
 		// D04 sources carry webhook secrets and credential references —
 		// the same credential-administration class as registries.
 		{"GET", "/api/sources", []string{caps.AdministerCredentials}},

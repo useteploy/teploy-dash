@@ -4,6 +4,53 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+- **Alerts v2.** Monitors alert on incidents, not on every flip: per-monitor
+  `fail_after` (default 3) / `recover_after` (default 2) / optional
+  `repeat_every`, one incident per outage with a stable `incident_id`,
+  recovery only when the open was sent, streaks restored from history after
+  a restart, and `incident_recovered` reason `retired` when a monitor is
+  deleted, disabled or retired by the fleet reconciler. Restore tests and
+  failed app operations (deploy, redeploy, rollback, backup, restore,
+  maintenance) use the same incident kinds.
+- Alerts are held, not dropped, during maintenance, deploy locks and
+  queued/running Dash operations (+2 min grace, capped at grace + the
+  operation's timeout), and during silences (all / app / monitor, with
+  expiry, audited). Held alerts appear as `suppressed` in delivery history.
+- Event v2 wire contract (`version: 2`, `kind`, `reason`, `incident_id`,
+  `rule_id`, `service`, `app`, `server`, `target`, `severity`, `started_at`,
+  `duration_s`, `consecutive_failures`, `url`) with `X-Teploy-Delivery` and
+  `X-Teploy-Event-Version: 2` headers; v1 fields unchanged.
+- Channel list: ntfy, Slack-compatible, Discord, email, signed webhook and
+  Teploy Ship, each with kind filters, Send test, and delivery health; a
+  dead-lettering channel is reported through the others; `Retry-After` is
+  honored. First channel sends one summary of what is already down.
+- Public Dash URL setting (links in alerts), Dash self-heartbeat to external
+  dead-man receivers, push/heartbeat monitor type (`/api/push/<token>`),
+  open incidents and maintenance on the public status page, and an audit
+  trail (`GET /api/audit`).
+
+### Changed
+- `notifications.json` migrates from `webhook_url` / `smtp_*` to a channel
+  list (ids `webhook` / `email`, pending deliveries replay unchanged). The
+  legacy flat fields are still accepted by `POST /api/notifications`.
+- Fleet monitors record the server their app runs on.
+- On the first start after the upgrade, monitors and restore tests that are
+  already failing are announced as one summary (human channels) plus one
+  open each for webhook/Ship channels, not one alert per monitor.
+- Alert channels and heartbeat pings use the monitor network guard
+  (internal addresses need the channel's or receiver's allow-internal
+  option); heartbeat pings no longer follow redirects.
+
+### Fixed
+- The generic webhook field no longer suggests a Slack URL (Slack needs its
+  own channel type).
+- Monitor delivery status was never shown in production: the server now
+  receives the alert outbox.
+- Editing a fleet monitor in the UI no longer drops its app ownership.
+- Delivery errors no longer expose credential URLs (Slack/Discord/ntfy
+  paths, heartbeat ping URLs); stored errors are scrubbed when served.
+
 ## [0.1.21] - 2026-10-31
 
 ### Changed

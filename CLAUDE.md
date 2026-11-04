@@ -34,9 +34,9 @@ teploy-dash (single Go binary)
 |     60s fleet cache so the page doesn't SSH on every refresh
 |
 +-- Uptime monitoring (Nucleus or JSONL)
-|     HTTP / TCP / ping checks on configurable intervals
-|     Status history (no incident tracking)
-|     Webhook + SMTP alerts on state transitions
+|     HTTP / TCP / ping checks + push (heartbeat) monitors
+|     Alerts v2: internal/incident policy (debounce, holds, silences)
+|     -> internal/outbox -> channels (ntfy/slack/discord/email/webhook/ship)
 |
 +-- Delegates actions to CLI (deploy, rollback, env, etc.)
 |     shells out to `teploy` binary; the CLI stays the source of truth
@@ -80,7 +80,10 @@ teploy-dash/
 │   │   ├── store.go             Store interface
 │   │   ├── nucleus.go           Nucleus implementation (pgwire)
 │   │   └── file.go              JSONL file fallback
-│   ├── alert/alert.go           webhook + SMTP alert dispatcher
+│   ├── alert/                   Event v2 wire contract, channel list, senders
+│   ├── incident/incident.go     Alerts v2 incident state machine
+│   ├── outbox/outbox.go         durable per-channel alert delivery
+│   ├── heartbeat/heartbeat.go   Dash self-heartbeat pings
 │   ├── remote/remote.go         SSH-based fleet querying (ListApps per server)
 │   ├── ssh/client.go            SSH client wrapper used by remote/
 │   └── cli/delegate.go          shells out to `teploy` CLI

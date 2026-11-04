@@ -479,3 +479,44 @@ func TestRunNow_FailureStreakAlertsOnce(t *testing.T) {
 		t.Fatalf("two failed runs sent %d alerts, want exactly one down: %+v", len(capture.events), capture.events)
 	}
 }
+
+// Alerts v2: restore tests use the incident kinds — open once, recover on
+// the next pass, and a removed test retires its open incident.
+func TestRunNow_IncidentKinds(t *testing.T) {
+	r, st := newTestRunner(t, `not json`, nil)
+	rt := seedTest(t, st)
+	capture := &capturingAlerter{}
+	r.SetAlerter(capture)
+	r.RunNow(rt)
+	r.RunNow(rt)
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
+		return `{"ok":true,"date":"2026-11-03","metric":"rows=10"}`, "", nil, nil
+	}
+	r.RunNow(rt)
+	if len(capture.events) != 2 || capture.events[0].Kind != alert.KindOpened || capture.events[1].Kind != alert.KindRecovered ||
+		capture.events[0].IncidentID != capture.events[1].IncidentID || capture.events[0].Server != "prod" || capture.events[0].App != "myapp" {
+		t.Fatalf("events = %+v", capture.events)
+	}
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
+		return `not json`, "", nil, nil
+	}
+	r.RunNow(rt)
+	r.Remove(rt.ID)
+	if len(capture.events) != 4 || capture.events[3].Reason != alert.ReasonRetired {
+		t.Fatalf("remove did not retire: %+v", capture.events)
+	}
+}
+
+// Disabling a restore test retires its open incident.
+func TestReloadDisabledRetires(t *testing.T) {
+	r, st := newTestRunner(t, `not json`, nil)
+	rt := seedTest(t, st)
+	capture := &capturingAlerter{}
+	r.SetAlerter(capture)
+	r.RunNow(rt)
+	rt.Enabled = false
+	r.Reload(rt)
+	if len(capture.events) != 2 || capture.events[1].Reason != alert.ReasonRetired {
+		t.Fatalf("events = %+v", capture.events)
+	}
+}

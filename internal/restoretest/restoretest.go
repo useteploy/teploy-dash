@@ -19,6 +19,7 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/incident"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
 
@@ -60,7 +61,7 @@ type Runner struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	store   store.Store
-	alerter Alerter
+	tracker *incident.Tracker
 	// resolveTarget resolves a server ALIAS to one registered host/user
 	// snapshot, FAILING when the alias is unknown or discovery is broken
 	// (R01). It replaces the old host/user callbacks, whose silent
@@ -119,12 +120,30 @@ func New(st store.Store) *Runner {
 	}
 }
 
-// SetAlerter configures the fail/recover notifier (a dispatcher for direct
-// best-effort delivery, or the durable alert outbox — D08).
-func (r *Runner) SetAlerter(d Alerter) {
+// SetTracker routes verdicts into the Alerts v2 incident tracker.
+func (r *Runner) SetTracker(t *incident.Tracker) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.alerter = d
+	r.tracker = t
+}
+
+// SetAlerter is the convenience wiring without a shared tracker: an
+// in-memory tracker sending through d.
+func (r *Runner) SetAlerter(d Alerter) {
+	t, _ := incident.New(incident.Options{Alerter: d})
+	r.SetTracker(t)
+}
+
+// RuleKey is a restore test's incident key.
+func RuleKey(id string) string { return alert.SourceRestoreTest + ":" + id }
+
+// RuleFor describes a restore test as an incident rule: a verification run
+// is hourly-to-daily, so one failed run opens and one passing run recovers.
+func RuleFor(t store.RestoreTest) incident.Rule {
+	return incident.Rule{Key: RuleKey(t.ID), Source: alert.SourceRestoreTest, ID: t.ID,
+		Name: fmt.Sprintf("restore-test %s/%s on %s", t.App, t.Accessory, t.Server),
+		App:  t.App, Server: t.Server, Target: t.App + "/" + t.Accessory, Severity: alert.SeverityWarning,
+		Path: "/restore-tests", Policy: incident.Policy{FailAfter: 1, RecoverAfter: 1}}
 }
 
 // SetTargetResolver installs the fail-closed server-alias -> host/user
@@ -194,19 +213,36 @@ func (r *Runner) Stop(ctx context.Context) {
 }
 
 // Reload reloads a single test (stop + start with new config).
+//
+// Disabling a test retires its open incident: nothing will run it again,
+// so nothing would ever close the receiver's card.
 func (r *Runner) Reload(t store.RestoreTest) {
 	r.stopTest(t.ID)
 	if t.Enabled {
 		r.startTest(t)
+		return
+	}
+	r.mu.Lock()
+	tracker := r.tracker
+	r.mu.Unlock()
+	if tracker != nil {
+		tracker.Retire(RuleKey(t.ID), "restore test disabled")
 	}
 }
 
 // Remove stops a test's schedule and clears its last-known outcome.
+//
+// An open incident for the test is retired (incident_recovered reason
+// "retired").
 func (r *Runner) Remove(id string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.teardownLocked(id)
 	delete(r.lastOK, id)
+	t := r.tracker
+	r.mu.Unlock()
+	if t != nil {
+		t.Retire(RuleKey(id), "restore test removed")
+	}
 }
 
 func (r *Runner) startTest(t store.RestoreTest) {
@@ -222,6 +258,11 @@ func (r *Runner) startTest(t store.RestoreTest) {
 	// that predates a dash restart still alerts on recovery (and vice versa).
 	if !t.LastRunAt.IsZero() {
 		r.lastOK[t.ID] = t.LastOK
+		// First run after the upgrade: a test whose last run failed is an
+		// outage that already existed — adopt it into the one summary.
+		if !t.LastOK && r.tracker != nil && r.tracker.Adopting() {
+			r.tracker.AdoptOpen(RuleFor(t), t.LastRunAt, 1, t.LastDetail)
+		}
 	}
 
 	interval := time.Duration(t.IntervalHours) * time.Hour
@@ -438,40 +479,21 @@ func (r *Runner) RunNow(t store.RestoreTest) (store.RestoreTest, error) {
 		return t, nil
 	}
 
-	// Alert on failure, and on recovery after a known failure.
+	// Alerts v2: the verdict feeds the incident policy — one failed run
+	// opens one incident (not a repeat per run), a passing run recovers it,
+	// and a recovery is sent only if the open was. Open incidents persist,
+	// so a restart neither re-alerts nor loses the open.
 	r.mu.Lock()
-	prev, hadPrev := r.lastOK[t.ID]
 	r.lastOK[t.ID] = t.LastOK
-	alerter := r.alerter
+	tracker := r.tracker
 	r.mu.Unlock()
 
-	if alerter != nil {
-		name := fmt.Sprintf("restore-test %s/%s on %s", t.App, t.Accessory, t.Server)
-		// The restore-test source label scopes the outbox's delivery-status
-		// lookups (a restore verdict must never answer for a monitor) and
-		// tells receivers what kind of alert landed (D08).
-		// Alert once per failure streak: on the first failure, or the first
-		// after a pass. Re-sending on every failed run turned a broken
-		// backup into a daily repeat of the same alert.
-		if !t.LastOK && (!hadPrev || prev) {
-			alerter.Send(alert.Event{
-				MonitorID:   t.ID,
-				MonitorName: name,
-				Status:      "down",
-				Message:     t.LastDetail,
-				OccurredAt:  t.LastRunAt,
-				Source:      alert.SourceRestoreTest,
-			})
-		} else if t.LastOK && hadPrev && !prev {
-			alerter.Send(alert.Event{
-				MonitorID:   t.ID,
-				MonitorName: name,
-				Status:      "up",
-				Message:     fmt.Sprintf("backup %s verified (%s)", t.LastDate, t.LastMetric),
-				OccurredAt:  t.LastRunAt,
-				Source:      alert.SourceRestoreTest,
-			})
+	if tracker != nil {
+		msg := t.LastDetail
+		if t.LastOK {
+			msg = fmt.Sprintf("backup %s verified (%s)", t.LastDate, t.LastMetric)
 		}
+		tracker.Observe(RuleFor(t), t.LastOK, t.LastRunAt, msg)
 	}
 
 	return t, nil

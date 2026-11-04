@@ -2721,7 +2721,6 @@ document.addEventListener('alpine:init', () => {
     tab: 'servers',
     servers: {},
     groups: [],
-    notifications: {},
     registries: [],
     loading: true,
     // Add server form
@@ -2734,14 +2733,6 @@ document.addEventListener('alpine:init', () => {
     newGroupName: '',
     // Change password form
     pw: { current: '', next: '', confirm: '', saving: false, error: '' },
-    // Secret drafts + three-state modes for notifications (A56): keep
-    // (omit the field entirely), replace (send the draft), or clear (send
-    // an explicit empty string). Before this, a stored secret could never
-    // be removed through the form.
-    smtpPasswordDraft: '',
-    smtpPasswordMode: 'keep',
-    webhookSecretDraft: '',
-    webhookSecretMode: 'keep',
     // MCP tokens
     mcpTokens: [],
     newMcpToken: { name: '', readOnly: 'false' },
@@ -2771,10 +2762,10 @@ document.addEventListener('alpine:init', () => {
         // Admin-only endpoints are only fetched for admins — non-admins would
         // just get 403s. Groups (editor-writable) and the current user load for
         // everyone.
-        const [servers, groups, notifications, registries, mcpTokens, users, sso] = await Promise.all([
+        // Notifications load in their own component (alertsSettings).
+        const [servers, groups, registries, mcpTokens, users, sso] = await Promise.all([
           admin ? api.get('/api/config/servers').catch(() => ({})) : Promise.resolve({}),
           api.get('/api/groups').catch(() => []),
-          admin ? api.get('/api/notifications').catch(() => ({})) : Promise.resolve({}),
           admin ? api.get('/api/registries').catch(() => []) : Promise.resolve([]),
           admin ? api.get('/api/mcp-tokens').catch(() => []) : Promise.resolve([]),
           admin ? api.get('/api/users').catch(() => []) : Promise.resolve([]),
@@ -2782,7 +2773,6 @@ document.addEventListener('alpine:init', () => {
         ]);
         this.servers = servers || {};
         this.groups = groups || [];
-        this.notifications = notifications || {};
         this.registries = registries || [];
         this.mcpTokens = mcpTokens || [];
         this.users = users || [];
@@ -3052,40 +3042,6 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async saveNotifications() {
-      // Patch semantics (A34): send only editable fields. Secrets are sent
-      // only when the operator typed a new one (the GET never reveals them);
-      // absent means preserve, present-but-empty means clear deliberately.
-      const n = this.notifications || {};
-      const body = {
-        webhook_url: n.webhook_url || '',
-        smtp_host: n.smtp_host || '',
-        smtp_port: Number(n.smtp_port) || 0,
-        smtp_user: n.smtp_user || '',
-        email_to: n.email_to || '',
-        email_from: n.email_from || '',
-      };
-      const applySecret = (field, mode, draft) => {
-        if (mode === 'clear') { body[field] = ''; return; }
-        if (mode === 'replace') {
-          if (draft === '') throw new Error('Enter a replacement secret or switch back to Keep');
-          body[field] = draft;
-        }
-      };
-      try {
-        applySecret('smtp_pass', this.smtpPasswordMode, this.smtpPasswordDraft);
-        applySecret('webhook_secret', this.webhookSecretMode, this.webhookSecretDraft);
-        await api.post('/api/notifications', body);
-        this.smtpPasswordDraft = ''; this.smtpPasswordMode = 'keep';
-        this.webhookSecretDraft = ''; this.webhookSecretMode = 'keep';
-        showToast('Notifications saved', 'success');
-        const n = await api.get('/api/notifications').catch(() => null);
-        if (n) this.notifications = n;
-      } catch (e) {
-        showToast(e.message, 'error');
-      }
-    },
-
     async addRegistry() {
       if (!this.newReg.server || !this.newReg.username) return;
       try {
@@ -3281,6 +3237,277 @@ document.addEventListener('alpine:init', () => {
     },
   }));
 
+
+  // Secret fields in the alert settings follow the A56 three-state pattern:
+  // keep (omit the field entirely), replace (send the draft), or clear (send
+  // an explicit empty string). GET never returns a secret, so "keep" is the
+  // only way an edit preserves one.
+  function applySecretMode(body, field, mode, draft) {
+    if (mode === 'clear') { body[field] = ''; return; }
+    if (mode === 'replace') {
+      if (draft === '') throw new Error('Enter a replacement secret or switch back to Keep');
+      body[field] = draft;
+    }
+  }
+
+  const CHANNEL_TYPES = {
+    ntfy: { label: 'ntfy', url: 'Topic URL', placeholder: 'https://ntfy.sh/your-private-topic',
+      help: 'Server and topic, for example https://ntfy.sh/your-topic or your own ntfy server. Pick an unguessable topic name.' },
+    slack: { label: 'Slack-compatible', url: 'Incoming webhook URL', placeholder: 'https://hooks.slack.com/services/T000/B000/XXXX',
+      help: 'A Slack incoming webhook. Mattermost, Rocket.Chat and Google Chat incoming webhooks accept the same {"text": ...} body.' },
+    discord: { label: 'Discord', url: 'Webhook URL', placeholder: 'https://discord.com/api/webhooks/123/abc',
+      help: 'Channel settings > Integrations > Webhooks > New webhook > Copy URL.' },
+    webhook: { label: 'Webhook', url: 'Receiver URL', placeholder: 'https://receiver.example.com/teploy',
+      help: 'Receives the signed Event v2 JSON (X-Teploy-Signature, X-Teploy-Delivery). Slack and Discord URLs will not work here; use their channel types.' },
+    ship: { label: 'Teploy Ship', url: 'Ship intake URL', placeholder: 'https://ship.example.com/api/incidents/intake/dash',
+      help: 'Ship opens and closes incidents from these alerts. Use the same secret as SHIP_DASH_INTAKE_SECRET.' },
+    email: { label: 'Email', url: '', placeholder: '', help: '' },
+  };
+
+  const HEARTBEAT_PRESETS = [
+    { id: 'healthchecks', label: 'healthchecks.io', placeholder: 'https://hc-ping.com/your-check-uuid',
+      help: 'Create a check with a period matching the ping interval; self-hosted Healthchecks uses https://your-instance/ping/<uuid>.' },
+    { id: 'kuma', label: 'Uptime Kuma (push)', placeholder: 'https://kuma.example.com/api/push/<token>?status=up&msg=OK',
+      help: 'Add a Push monitor in Uptime Kuma and paste its push URL. Run Kuma on a different host than Dash.' },
+    { id: 'betterstack', label: 'Better Stack heartbeat', placeholder: 'https://uptime.betterstack.com/api/v1/heartbeat/<token>',
+      help: 'Create a heartbeat in Better Stack Uptime with a period matching the ping interval.' },
+    { id: 'cronitor', label: 'Cronitor', placeholder: 'https://cronitor.link/p/<api-key>/<monitor-key>',
+      help: 'Create a heartbeat monitor in Cronitor and use its telemetry URL.' },
+    { id: 'observe', label: 'Teploy Observe cron check-in', placeholder: 'https://observe.example.com/api/v1/checkin/<site-id>/<slug>',
+      help: 'Only useful when Observe runs on a different host than Dash.' },
+    { id: 'dash', label: 'Another Dash (push monitor)', placeholder: 'https://other-dash.example.com/api/push/<token>',
+      help: 'Create a push monitor on the other Dash and paste its push URL: two Dash instances watch each other.' },
+    { id: 'custom', label: 'Other URL', placeholder: 'https://...', help: 'Any receiver that alerts when GET requests stop arriving.' },
+  ];
+
+  // ── Settings > Notifications (Alerts v2) ──
+  Alpine.data('alertsSettings', () => ({
+    channels: [], heartbeats: [], publicURL: '', heartbeatInterval: 5,
+    loadError: null, editor: null, saving: false, testing: '', testResults: {},
+    newType: 'ntfy', hbPreset: 'healthchecks', hbDraft: { url: '', allow_internal: false },
+    allKinds: ['incident_opened', 'incident_repeat', 'incident_recovered'],
+    heartbeatPresets: HEARTBEAT_PRESETS,
+
+    async init() { await this.load(); },
+
+    async load() {
+      try {
+        const n = await api.get('/api/notifications');
+        this.channels = n.channels || [];
+        this.heartbeats = n.heartbeats || [];
+        this.publicURL = n.public_url || '';
+        this.heartbeatInterval = n.heartbeat_interval_minutes || 5;
+        this.loadError = null;
+      } catch (e) {
+        this.loadError = `Could not load notification settings: ${e.message}`;
+      }
+    },
+
+    typeLabel(t) { return (CHANNEL_TYPES[t] || { label: t }).label; },
+    urlLabel(t) { return (CHANNEL_TYPES[t] || {}).url || 'URL'; },
+    urlPlaceholder(t) { return (CHANNEL_TYPES[t] || {}).placeholder || ''; },
+    urlHelp(t) { return (CHANNEL_TYPES[t] || {}).help || ''; },
+    credentialURL(t) { return t === 'slack' || t === 'discord'; },
+    kindLabel(k) { return { incident_opened: 'opened', incident_repeat: 'reminders', incident_recovered: 'recovered' }[k] || k; },
+    formatDate(d) { return d ? new Date(d).toLocaleString() : ''; },
+
+    channelHealthText(ch) {
+      const h = ch.health;
+      if (h && h.dead_lettered) return h.dead_lettered + ' failed';
+      if (h && h.pending) return 'retrying';
+      if (h && h.delivered) return 'delivering';
+      return 'no deliveries yet';
+    },
+    channelHealthClass(ch) {
+      const h = ch.health;
+      if (h && h.dead_lettered) return 'red';
+      if (h && h.pending) return 'yellow';
+      if (h && h.delivered) return 'green';
+      return '';
+    },
+
+    newChannel(type) {
+      const suffix = Math.random().toString(16).slice(2, 8);
+      this.editor = { isNew: true, id: `${type}-${suffix}`, type, name: '', url: '', urlSet: false, urlHint: '',
+        secretSet: false, secretMode: 'replace', secretDraft: '', tokenSet: false, tokenMode: 'replace', tokenDraft: '',
+        passSet: false, passMode: 'replace', passDraft: '', kinds: [], allow_internal: false,
+        smtp_host: '', smtp_port: 587, smtp_user: '', email_to: '', email_from: '', smtp_allow_insecure: false };
+    },
+
+    editChannel(ch) {
+      this.editor = { isNew: false, id: ch.id, type: ch.type, name: ch.name || '',
+        url: this.credentialURL(ch.type) ? '' : (ch.url || ''), urlSet: !!ch.url_set, urlHint: ch.url_hint || '',
+        secretSet: !!ch.secret_set, secretMode: ch.secret_set ? 'keep' : 'replace', secretDraft: '',
+        tokenSet: !!ch.token_set, tokenMode: ch.token_set ? 'keep' : 'replace', tokenDraft: '',
+        passSet: !!ch.smtp_pass_set, passMode: ch.smtp_pass_set ? 'keep' : 'replace', passDraft: '',
+        kinds: [...(ch.kinds || [])], allow_internal: !!ch.allow_internal,
+        smtp_host: ch.smtp_host || '', smtp_port: ch.smtp_port || 587, smtp_user: ch.smtp_user || '',
+        email_to: ch.email_to || '', email_from: ch.email_from || '', smtp_allow_insecure: !!ch.smtp_allow_insecure };
+    },
+
+    toggleKind(k) {
+      const e = this.editor;
+      let kinds = e.kinds.length === 0 ? [...this.allKinds] : [...e.kinds];
+      kinds = kinds.includes(k) ? kinds.filter(x => x !== k) : [...kinds, k];
+      e.kinds = kinds.length === this.allKinds.length ? [] : kinds;
+    },
+
+    channelBody() {
+      const e = this.editor;
+      const body = { name: e.name, kinds: [...e.kinds] };
+      if (e.type !== 'email') body.allow_internal = !!e.allow_internal;
+      if (e.isNew) body.type = e.type;
+      if (e.type === 'email') {
+        Object.assign(body, { smtp_host: e.smtp_host, smtp_port: Number(e.smtp_port) || 0, smtp_user: e.smtp_user,
+          email_to: e.email_to, email_from: e.email_from, smtp_allow_insecure: !!e.smtp_allow_insecure });
+        applySecretMode(body, 'smtp_pass', e.passMode === 'replace' && e.passDraft === '' && !e.passSet ? 'keep' : e.passMode, e.passDraft);
+        return body;
+      }
+      // A credential URL (Slack, Discord) left blank on edit keeps the stored one.
+      if (e.url !== '' || !e.urlSet || !this.credentialURL(e.type)) body.url = e.url;
+      if (e.type === 'webhook' || e.type === 'ship') {
+        applySecretMode(body, 'secret', e.secretMode === 'replace' && e.secretDraft === '' && !e.secretSet && e.type === 'webhook' ? 'keep' : e.secretMode, e.secretDraft);
+      }
+      if (e.type === 'ntfy') {
+        applySecretMode(body, 'token', e.tokenMode === 'replace' && e.tokenDraft === '' && !e.tokenSet ? 'keep' : e.tokenMode, e.tokenDraft);
+      }
+      return body;
+    },
+
+    async saveChannel() {
+      if (!this.editor || this.saving) return;
+      this.saving = true;
+      try {
+        const body = this.channelBody();
+        await api.put(`/api/notifications/channels/${encodeURIComponent(this.editor.id)}`, body);
+        const first = this.channels.filter(c => c.usable).length === 0;
+        this.editor = null;
+        showToast(first ? 'Channel saved. Anything already down is summarized in one message.' : 'Channel saved', 'success');
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async deleteChannel(id) {
+      if (!confirm('Delete this alert channel?')) return;
+      try {
+        await api.del(`/api/notifications/channels/${encodeURIComponent(id)}`);
+        showToast('Channel deleted', 'success');
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+
+    async testChannel(id) {
+      this.testing = id;
+      try {
+        const res = await api.post(`/api/notifications/channels/${encodeURIComponent(id)}/test`, {});
+        this.testResults = { ...this.testResults, [id]: res };
+        showToast(res.ok ? 'Test notification delivered' : 'Test failed: ' + res.error, res.ok ? 'success' : 'error');
+      } catch (e) { showToast(e.message, 'error'); }
+      finally { this.testing = ''; }
+    },
+
+    async saveSettings() {
+      try {
+        await api.post('/api/notifications', { public_url: this.publicURL || '', heartbeat_interval_minutes: Number(this.heartbeatInterval) || 0 });
+        showToast('Saved', 'success');
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+
+    preset() { return HEARTBEAT_PRESETS.find(p => p.id === this.hbPreset) || HEARTBEAT_PRESETS.at(-1); },
+    presetPlaceholder() { return this.preset().placeholder; },
+    presetHelp() { return this.preset().help; },
+    applyPreset() { this.hbDraft.url = ''; },
+
+    async addHeartbeat() {
+      const url = (this.hbDraft.url || '').trim();
+      if (!url) return;
+      const id = `${this.hbPreset}-${Math.random().toString(16).slice(2, 8)}`;
+      try {
+        const saved = await api.put(`/api/notifications/heartbeats/${encodeURIComponent(id)}`, { name: this.preset().label, url, allow_internal: !!this.hbDraft.allow_internal });
+        this.hbDraft = { url: '', allow_internal: false };
+        if (saved && saved.warning) showToast(saved.warning, 'error');
+        else showToast('Heartbeat receiver added', 'success');
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+
+    async deleteHeartbeat(id) {
+      if (!confirm('Remove this heartbeat receiver? It will alert when the pings stop, so pause or delete the check there too.')) return;
+      try {
+        await api.del(`/api/notifications/heartbeats/${encodeURIComponent(id)}`);
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+
+    async testHeartbeat(id) {
+      try {
+        const res = await api.post(`/api/notifications/heartbeats/${encodeURIComponent(id)}/test`, {});
+        showToast(res.ok ? 'Ping delivered' : 'Ping failed: ' + (res.error || 'HTTP ' + res.status), res.ok ? 'success' : 'error');
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+  }));
+
+  // ── Monitors > Alerts panel (Alerts v2) ──
+  Alpine.data('alertsPanel', () => ({
+    incidents: { open: [], held: [] }, silences: [], deliveries: [], error: null,
+    draft: { scope: 'all', target: '', reason: '', duration_minutes: 60 },
+    refresh: null,
+
+    async init() {
+      await this.load();
+      this.refresh = setInterval(() => this.load(), 30000);
+    },
+    destroy() { if (this.refresh) clearInterval(this.refresh); },
+
+    async load() {
+      try {
+        const [incidents, silences, deliveries] = await Promise.all([
+          api.get('/api/alerts/incidents'),
+          api.get('/api/alerts/silences'),
+          api.get('/api/alerts/deliveries'),
+        ]);
+        this.incidents = { open: incidents.open || [], held: incidents.held || [] };
+        this.silences = silences || [];
+        this.deliveries = deliveries.deliveries || [];
+        this.error = null;
+      } catch (e) {
+        this.error = `Could not load alert state: ${e.message}`;
+      }
+    },
+
+    silenceLabel(sl) {
+      if (sl.scope === 'all') return 'Everything';
+      return (sl.scope === 'app' ? 'App ' : 'Monitor ') + sl.target;
+    },
+    kindText(k) { return { incident_opened: 'Opened', incident_repeat: 'Reminder', incident_recovered: 'Recovered', summary: 'Summary', test: 'Test' }[k] || k; },
+    deliveryClass(st) { return { delivered: 'green', pending: 'yellow', dead_lettered: 'red' }[st] || ''; },
+    formatDate(d) { return d ? new Date(d).toLocaleString() : ''; },
+
+    async addSilence() {
+      const body = { scope: this.draft.scope, target: this.draft.scope === 'all' ? '' : (this.draft.target || '').trim(),
+        reason: (this.draft.reason || '').trim(), duration_minutes: Number(this.draft.duration_minutes) || 60 };
+      try {
+        await api.post('/api/alerts/silences', body);
+        this.draft = { scope: 'all', target: '', reason: '', duration_minutes: 60 };
+        showToast('Silenced', 'success');
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+
+    async removeSilence(id) {
+      try {
+        await api.del(`/api/alerts/silences/${encodeURIComponent(id)}`);
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+  }));
+
   // ── Monitors Page ──
   Alpine.data('monitorsPage', () => withAsyncLoad({
     monitors: [],
@@ -3311,7 +3538,13 @@ document.addEventListener('alpine:init', () => {
       timeout: '10000',
       expected_status: '', // blank = any 2xx/3xx is healthy; a value = exact match
       allow_internal: false, // opt-in: allow this monitor to reach loopback/private/link-local/cloud-metadata targets
+      // Alerts v2 policy: blank = the default (3 failures / 2 passes; push 1/1).
+      fail_after: '', recover_after: '', repeat_every: '0',
+      push_interval: '86400000', grace: '0',
     },
+    // The push URL is fetched from the execute.mutate-gated endpoint; the
+    // monitor list and detail never carry the token for viewers.
+    pushPath: '',
 
     routeIdentity() { const r = Alpine.store('router'); return r.page === 'monitor-detail' ? (r.params.id || '') : ''; },
 
@@ -3347,6 +3580,7 @@ document.addEventListener('alpine:init', () => {
       this.selectedMonitor = null;
       this.detailError = null;
       this.testResult = null; // a test flash belongs to the monitor it ran on
+      this.pushPath = ''; // a revealed push URL belongs to the monitor it was read for
       if (this.detailId) await this.loadDetail();
     },
 
@@ -3407,19 +3641,28 @@ document.addEventListener('alpine:init', () => {
       this.creating = true;
       try {
         const id = this.editingId || randomID();
+        const push = this.newMonitor.type === 'push';
         const body = {
           id,
           name: this.newMonitor.name,
           type: this.newMonitor.type,
           method: this.newMonitor.type === 'http' ? this.newMonitor.method : '',
-          target: this.newMonitor.target,
-          interval: parseInt(this.newMonitor.interval) * 1000000,
-          timeout: parseInt(this.newMonitor.timeout) * 1000000,
+          target: push ? '' : this.newMonitor.target,
+          interval: parseInt(push ? this.newMonitor.push_interval : this.newMonitor.interval) * 1000000,
+          timeout: push ? 0 : parseInt(this.newMonitor.timeout) * 1000000,
           // Preserve the current enabled state on edit — saving an edit used
           // to silently re-enable a disabled monitor (A44).
           enabled: !!this.newMonitor.enabled,
-          expected_status: parseInt(this.newMonitor.expected_status) || 0,
-          allow_internal: !!this.newMonitor.allow_internal,
+          expected_status: push ? 0 : (parseInt(this.newMonitor.expected_status) || 0),
+          allow_internal: !push && !!this.newMonitor.allow_internal,
+          fail_after: parseInt(this.newMonitor.fail_after) || 0,
+          recover_after: parseInt(this.newMonitor.recover_after) || 0,
+          repeat_every: (parseInt(this.newMonitor.repeat_every) || 0) * 1000000,
+          grace: push ? (parseInt(this.newMonitor.grace) || 0) * 1000000 : 0,
+          // Fleet ownership fields round-trip so an edit keeps them.
+          app: this.newMonitor.app || '',
+          server: this.newMonitor.server || '',
+          reachable: !!this.newMonitor.reachable,
         };
         await rawFetch.post('/api/monitors', body);
         const wasEdit = !!this.editingId;
@@ -3503,7 +3746,14 @@ document.addEventListener('alpine:init', () => {
         expected_status: m.expected_status || '',
         allow_internal: !!m.allow_internal,
         enabled: !!m.enabled,
+        fail_after: m.fail_after || '',
+        recover_after: m.recover_after || '',
+        repeat_every: String((m.repeat_every || 0) / 1000000),
+        push_interval: m.type === 'push' ? String(m.interval / 1000000) : '86400000',
+        grace: m.type === 'push' ? String((m.grace || 0) / 1000000) : '0',
+        app: m.app || '', server: m.server || '', reachable: !!m.reachable,
       };
+      if (m.type === 'push') { this.newMonitor.interval = '60000'; this.newMonitor.timeout = '10000'; }
       this.showCreateDialog = true;
     },
 
@@ -3511,8 +3761,41 @@ document.addEventListener('alpine:init', () => {
       this.newMonitor = {
         name: '', type: 'http', method: 'GET', target: '',
         interval: '60000', timeout: '10000', expected_status: '', allow_internal: false,
-        enabled: true,
+        enabled: true, fail_after: '', recover_after: '', repeat_every: '0',
+        push_interval: '86400000', grace: '0',
       };
+    },
+
+    // Push monitors: the ping URL is Dash's own origin + the secret path,
+    // revealed on request by GET /api/monitors/{id}/push-url (editors only).
+    pushURL() {
+      return this.pushPath ? (location.origin || '') + this.pushPath : '';
+    },
+
+    async revealPushURL(m) {
+      try {
+        const res = await rawFetch.get('/api/monitors/' + encodeURIComponent(m.id) + '/push-url');
+        this.pushPath = res.path || '';
+      } catch (e) {
+        showToast(e.message || 'You need edit access to see the push URL', 'error');
+      }
+    },
+
+    async copyPushURL() {
+      try { await navigator.clipboard.writeText(this.pushURL()); showToast('Push URL copied', 'success'); }
+      catch { showToast('Copy failed; select the URL instead', 'error'); }
+    },
+
+    policyText(m) {
+      const push = m.type === 'push';
+      const fail = m.fail_after || (push ? 1 : 3), rec = m.recover_after || (push ? 1 : 2);
+      let text = push
+        ? `Expected every ${this.formatInterval(m.interval)} (grace ${this.formatInterval(m.grace || 0)}). `
+        : '';
+      text += `Alerts after ${fail} consecutive failure${fail === 1 ? '' : 's'}, recovers after ${rec} pass${rec === 1 ? '' : 'es'}`;
+      if (m.repeat_every) text += `, reminds every ${this.formatInterval(m.repeat_every)}`;
+      if (m.app) text += `. Fleet monitor for ${m.app}${m.server ? ' on ' + m.server : ''}`;
+      return text + '.';
     },
 
     getMonitorDot(m) {
@@ -3540,6 +3823,8 @@ document.addEventListener('alpine:init', () => {
 
     formatInterval(ns) {
       const ms = ns / 1000000;
+      if (ms >= 86400000 && ms % 86400000 === 0) return (ms / 86400000) + 'd';
+      if (ms >= 3600000 && ms % 3600000 === 0) return (ms / 3600000) + 'h';
       if (ms >= 60000) return (ms / 60000) + 'm';
       return (ms / 1000) + 's';
     },

@@ -9,9 +9,10 @@ reads those files (read-only) and shells out to `teploy` for actions
 (deploy, rollback, env edits, logs). Same source of truth whether you
 deploy from the terminal, the UI, or a webhook — no SSH-vs-UI desync.
 
-Optional uptime monitoring runs HTTP / TCP checks on configurable
-intervals, stores history in Nucleus or a local JSONL file, and fires
-webhook / SMTP alerts on state transitions.
+Optional uptime monitoring runs HTTP / TCP checks and push (heartbeat)
+monitors, stores history in Nucleus or a local JSONL file, and turns
+failures into debounced incidents delivered to ntfy, Slack-compatible chat,
+Discord, email, a signed webhook or Teploy Ship.
 
 One binary. ~17MB. Default port 3456.
 
@@ -208,9 +209,106 @@ reconciling.
 - Storage: Nucleus over pgwire (preferred) or rolling JSONL files
   (fallback). Daily cleanup for the file store keeps 7 days of checks.
 - Manual "test now" runs a check immediately without saving.
-- Webhook + SMTP alerts on state transitions (up → down, recovered).
-- Notification config persisted to `~/.teploy/notifications.json`
-  and reloadable from the UI without restart.
+- **Push / heartbeat monitors.** Type `push` gets a secret URL
+  (`/api/push/<token>`, no login, rate-limited), shown on the monitor page
+  to users who can edit monitors. A backup job or cron task requests it when
+  it finishes (`?status=down&msg=...` reports a failure); the monitor goes
+  down when no ping arrives within the interval + grace (default 10% of the
+  interval, at least 5 minutes).
+- Alerts: see [Alerting](#alerting).
+
+### Alerting
+
+**Incidents, not flips.** A monitor opens an incident after `fail_after`
+consecutive failed checks (default 3; push monitors 1) and recovers after
+`recover_after` passing checks (default 2; push 1). The streak is restored
+from check history after a restart. On the first start with incident
+tracking (no `incidents.json`), outages that already exist are announced as
+one summary, not one alert per monitor. Each incident has a stable
+`incident_id`, is sent once when it opens and once when it recovers (a
+recovery only if the open was sent), and optionally repeats every
+`repeat_every`. Deleting or disabling a monitor, or the fleet reconciler
+retiring one, closes its incident with reason `retired`. Restore tests open
+on a failed run and recover on the next pass. Failed app operations
+(deploy, redeploy, rollback, backup, backup restore, maintenance) open a
+`source: "operation"` incident per operation kind on an app; the next
+success of that kind recovers it, otherwise it closes with reason `retired`
+after 24 hours so receivers never keep a stale card.
+
+**Held, not dropped.** While a monitor's app is in maintenance, holds a
+deploy lock, or has a queued/running Dash operation (and for 2 minutes
+after), opens are held: failures keep counting and, if the monitor is still
+failing when the hold ends, the incident opens then. An operation holds at
+most 2 minutes + its timeout from its start (deploy 30 min), so a hung
+deploy cannot hide an outage; a lock alone at most 32 minutes, maintenance
+at most 24 hours. A held monitor that is still failing when its hold ends
+opens within a minute. Maintenance
+and lock flags come from the fleet cache (refreshed by page loads and the
+5-minute fleet sweep). **Silences** (everything, one app, or one monitor;
+1 minute to 30 days) hold the same way and close the open incidents they
+cover with reason `suppressed_end`. Held alerts are recorded as
+`suppressed` in the delivery history.
+
+**Channels** (Settings > Notifications, stored in
+`~/.teploy/notifications.json`, mode 0600; secrets are never returned):
+
+| Type | Delivers |
+|---|---|
+| `ntfy` | POST to `<server>/<topic>` with `Title`, `Priority` (urgent for critical down, high for warning, default for recovered), plain-word `Tags`, `Click` (the public Dash URL), optional bearer token. |
+| `slack` | `{"text": ...}` — Slack incoming webhooks; Mattermost, Rocket.Chat and Google Chat accept the same body. |
+| `discord` | One embed, held to 2000 characters; 429 `retry_after` honored. |
+| `email` | SMTP with required STARTTLS unless plaintext is allowed for a LAN relay. |
+| `webhook` | The signed Event v2 JSON body (below). |
+| `ship` | The signed Event v2 body to a Teploy Ship intake URL with its own secret. |
+
+Channel and heartbeat URLs go through the same network guard as monitors:
+loopback, private, Tailscale (CGNAT) and metadata addresses are refused
+unless the channel or receiver allows an internal address. Delivery errors
+never show a URL path, secret or token. A pending open whose incident
+recovers first is marked `superseded` instead of being sent after the
+recovery.
+
+Each channel can be limited to some kinds (opened / reminders /
+recovered), has **Send test** (`kind: "test"`), and shows its delivery
+health; when a channel dead-letters a delivery and another channel exists,
+Dash alerts through the other one. Receivers' `Retry-After` is honored.
+When the **first** channel is configured, Dash sends one summary of
+everything already down instead of one alert per monitor (machine channels
+still receive each incident's open so they can resolve it later). A
+pre-v2 file with `webhook_url` / `smtp_*` migrates to channels with ids
+`webhook` and `email`; pending deliveries replay unchanged.
+
+**Event v2 (webhook, ship).** Every v1 field keeps its meaning and
+`status` is always `down` or `up`:
+
+```json
+{"monitor_id":"fleet-8f1c","monitor_name":"shop.example","status":"down","message":"unexpected status 502",
+ "occurred_at":"2026-11-03T22:31:00Z","source":"monitor","delivery_id":"9c2e...","version":2,
+ "kind":"incident_opened","reason":"","incident_id":"inc_3f9a...","rule_id":"fleet-8f1c","service":"shop",
+ "app":"shop","server":"deploy-1","target":"https://shop.example/","severity":"critical",
+ "started_at":"2026-11-03T22:28:00Z","duration_s":0,"consecutive_failures":3,
+ "url":"https://dash.example.com/monitors/fleet-8f1c"}
+```
+
+`kind` is `incident_opened | incident_repeat | incident_recovered | test`;
+`reason` on recovery is `""` (healthy), `retired` or `suppressed_end`;
+`source` is `monitor | heartbeat | restore-test | operation | audit` (audit
+= Dash's own alert-channel health). Headers: `X-Teploy-Timestamp`,
+`X-Teploy-Signature: sha256=<hex HMAC-SHA256(secret, timestamp + "." +
+body)>` when a secret is set, `X-Teploy-Delivery: <delivery_id>`,
+`X-Teploy-Event-Version: 2`. Dedupe on `X-Teploy-Delivery`, group on
+`incident_id` (fallback `monitor_id`).
+
+**Dash heartbeat.** Dash cannot report its own death, so Settings holds
+one or more ping URLs that Dash GETs every N minutes (default 5, timeout
+10s): healthchecks.io (hosted or self-hosted), an Uptime Kuma push monitor,
+Better Stack or Cronitor heartbeats, a Teploy Observe cron check-in, or
+another Dash's push monitor. Dash warns when a receiver resolves to its own
+host. ntfy is not a receiver (it cannot notice silence).
+
+Set the **public Dash URL** so alerts link back to the monitor or
+operation. Every channel, heartbeat and silence change is recorded in the
+audit trail (`GET /api/audit`).
 
 ### Service links
 - **Settings → Links** holds shortcuts to whatever else you run — Forgejo,
@@ -272,9 +370,11 @@ hashed in the dash data dir; revocation is immediate.
 
 `--public-status` (or `TEPLOY_DASH_PUBLIC_STATUS=1`) serves a customer-facing
 status page at `/status` — no login required. It shows, for each **enabled**
-monitor, only its **name**, current **up/down** state, and **24-hour uptime %**.
+monitor, only its **name**, current **up/down** state, and **24-hour uptime %**,
+plus open monitor incidents and maintenance (app maintenance mode or an
+active silence) listed by monitor name with their start / expiry times.
 It deliberately never exposes monitor targets/IPs, server names, response
-bodies, or any config. Off by default; when off, `/status` and `/api/status`
+bodies, silence reasons, or any config. Off by default; when off, `/status` and `/api/status`
 return 404.
 
 ## Environment variables
@@ -418,7 +518,18 @@ so the direct role claim is available here and takes precedence over groups.
 | GET / POST | `/api/restore-tests` | List / create scheduled backup verifications. |
 | GET / DELETE | `/api/restore-tests/{id}` | Detail / delete. |
 | POST | `/api/restore-tests/{id}/run` | Verify the latest backup now (restores into a scratch container via `teploy accessory verify-backup`). Returns HTTP 409 when a run for this test is already in flight — retry when it completes. |
-| GET / POST | `/api/notifications` | Read / write alert config. |
+| GET / POST | `/api/notifications` | Alert settings: channel list (secrets as `*_set` flags, credential URLs as hints), public Dash URL, heartbeat receivers + interval with their last ping and self-host warning. POST patches `public_url`, `heartbeat_interval_minutes` and the legacy flat `webhook_*` / `smtp_*` fields (which edit channels `webhook` / `email`). `administer.credentials`. |
+| PUT / DELETE | `/api/notifications/channels/{id}` | Create or patch one channel (`type` on create only; absent secret = keep, `""` = clear) / delete. `administer.credentials`. |
+| POST | `/api/notifications/channels/{id}/test` | Send a `kind: "test"` event now; answers `{ok, error}`. `administer.credentials`. |
+| PUT / DELETE | `/api/notifications/heartbeats/{id}` | Save / remove a self-heartbeat receiver `{name, url}`. `administer.credentials`. |
+| POST | `/api/notifications/heartbeats/{id}/test` | Ping the receiver now. `administer.credentials`. |
+| GET | `/api/alerts/incidents` | Open incidents and held (suppressed) rules. `view.metadata`. |
+| GET | `/api/alerts/deliveries` | Recent alert deliveries (delivered, pending, dead-lettered, suppressed) and per-channel health. `view.metadata`. |
+| GET / POST | `/api/alerts/silences` | Active silences / create `{scope: all\|app\|monitor, target, reason, duration_minutes}`. POST is `execute.mutate`. |
+| DELETE | `/api/alerts/silences/{id}` | End a silence. `execute.mutate`. |
+| GET | `/api/audit` | Audit trail of alerting changes (channels, tests, heartbeats, silences). `administer.credentials`. |
+| GET / POST / HEAD | `/api/push/{token}` | Push monitor ping (no session; the token is the credential; 12/min per token, and 30 unknown-token misses/min per address). `?status=down&msg=...` records a failure. |
+| GET | `/api/monitors/{id}/push-url` | A push monitor's secret ping path (audited). `execute.mutate`; the monitor list and detail omit `push_token` for readers without it. |
 | GET / POST | `/api/sources` | List / register git sources (D04): `{forge, clone_url, default_branch?, credential_ref?, display_name?}` — `forge` is `github`/`forgejo`/`gitea`/`gitlab`/`generic`; the clone URL is canonicalized (credentials stripped, scp/ssh forms folded onto https, `.git` dropped) and identity is forge + URL, so same-named repos on two forges never collide. Create returns the webhook secret exactly once. |
 | GET / PATCH / DELETE | `/api/sources/{id}` | Detail (with recent webhook deliveries and their dispositions) / update display name, default branch, credential reference / delete. Identity fields are immutable. |
 | POST | `/api/sources/{id}/verify` | Run the credential verifier; a failure marks the source degraded with the exact reason (visible everywhere, deliveries are then recorded-and-refused, never silently dropped). Answers 501 when no verifier is configured. |

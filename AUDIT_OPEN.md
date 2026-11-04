@@ -10,6 +10,64 @@ Open items: 0 P2 improvements, deferred findings (design/architecture)
 listed per pass below, 2 upstream (teploy-cli) items (both already fixed and
 adopted), plus recorded residuals inside partially-fixed findings.
 
+## 2026-11-03 Slice 3 (Alerts v2) — deferred and recorded residuals
+
+Branch `slice3-alerts-v2` (plan `_internal/DASH_AUTOCONFIG_PLAN_2026-11-03.md`
+P3 Dash items 1-10). Built: incident policy, holds + silences, Event v2,
+channel list + senders, test-send, public URL, first-enable summary,
+channel health, self-heartbeat, push monitors, status-page incidents,
+operation-failure incidents. Open:
+
+- **Secrets encryption (plan principle 7) deferred.** Channel secrets, ntfy
+  tokens, SMTP passwords and heartbeat ping URLs stay in plaintext
+  `~/.teploy/notifications.json`, mode 0600 (as before). The age-encrypted
+  Dash secrets file is its own change.
+- **CLI `internal/notify` emoji tags (plan P3 item 10) not touched** — it is
+  teploy-cli's code; owed there.
+- **Release order (plan 2.4).** Dash now emits `source` `operation`,
+  `heartbeat` and `audit` and the v2 kinds. Akiroo (dedupe on incident id)
+  and Ship intake must be live before this ships to a Dash whose channels
+  point at them.
+- **Backup and domain sources** (plan P3.1 "same kinds for backups, domain
+  checks") do not exist in Dash yet (Slices 4/5); they should feed
+  `internal/incident` with their own rules.
+- **Hold freshness.** Maintenance and deploy-lock flags come from the fleet
+  cache (page loads + the 5-minute fleet sweep), so a flag flip can take up
+  to one sweep to hold or release. Operation holds are live.
+- **Review fixes (same branch).** Credential URLs redacted from delivery
+  and heartbeat errors (at the sender and when served); `push_token` hidden
+  from non-editors (`GET /api/monitors/{id}/push-url`, execute.mutate); the
+  first start adopts existing outages into one summary; held rules open on
+  a 1-minute release pass; channel delete, restore-test disable and orphans
+  at startup retire their incidents; push limiter counts only unknown-token
+  misses per address; alerts are enqueued under the tracker lock and a
+  pending open is superseded by its recovery; maintenance hold capped at
+  24h; corrupt incidents/silences/audit files are set aside; channel and
+  heartbeat URLs use the monitor network guard.
+- **Restore-test retire race.** A restore run finishing after its test was
+  deleted is dropped by the store CAS (SaveRestoreTestResult applied=false),
+  so it cannot recreate the incident; a run finishing after a DISABLE
+  (test still stored) can reopen it until the next sweep of orphans at
+  restart. Low impact; not fixed.
+- **Monitor fields in Nucleus.** The new monitor fields (server,
+  fail_after, recover_after, repeat_every, grace, push_token) were added as
+  additive columns on the existing `monitors` table, the established
+  app/reachable pattern — no new table. Every NEW record type (incidents,
+  silences, audit) is file-store only.
+- **Audit trail scope.** `audit.jsonl` records Alerts v2 actions only
+  (channels, tests, heartbeats, silences, settings); there is no UI viewer
+  yet (`GET /api/audit`). Older actions (users, tokens, servers) are not
+  audited there.
+- **Heartbeat results are in memory.** The last ping per receiver resets on
+  restart ("not yet" until the next round, at most one interval).
+- **Channel health window.** Health counts come from the retained outbox
+  records (newest 250), not an all-time counter.
+- **Operation incidents choice.** One-shot failures map to a rule per
+  operation kind on an app: open on failure, recover on the next success of
+  the same kind, otherwise auto-close after 24h with reason `retired`
+  (not `""`: nothing proved the app healthy). Interrupted/canceled
+  operations do not alert.
+
 ## 2026-10-20 manifest store + D04 deploy pipeline removed
 
 **Removed 2026-10-20, superseded by server-authority P3** (branch

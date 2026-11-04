@@ -292,7 +292,7 @@ func TestRunCheck_RecreateDuringCheck_NoPhantomRowOrStolenBaseline(t *testing.T)
 	r := New(ms)
 	r.SetAlerter(al)
 
-	old := store.Monitor{ID: "m1", Name: "t", Type: "http", Target: "http://127.0.0.1:1", Interval: time.Minute, Timeout: time.Second, AllowInternal: true}
+	old := store.Monitor{ID: "m1", Name: "t", Type: "http", Target: "http://127.0.0.1:1", Interval: time.Minute, Timeout: time.Second, AllowInternal: true, FailAfter: 1}
 	if err := ms.SaveMonitor(&old); err != nil {
 		t.Fatalf("save monitor: %v", err)
 	}

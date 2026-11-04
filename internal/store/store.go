@@ -56,6 +56,22 @@ type Monitor struct {
 	// app whose domain this watches. The fleet reconciler owns these and
 	// never touches a monitor without it.
 	App string `json:"app,omitempty"`
+	// Server is the server the fleet app runs on (set by the fleet
+	// reconciler; Alerts v2 suppression and the Event v2 "server" field).
+	Server string `json:"server,omitempty"`
+	// Alerts v2 policy (plan P3.1): consecutive failed checks before an
+	// incident opens (0 = default: 3, push monitors 1), consecutive passing
+	// checks before it recovers (0 = default: 2, push monitors 1), and an
+	// optional reminder interval while it stays open (0 = off).
+	FailAfter    int           `json:"fail_after,omitempty"`
+	RecoverAfter int           `json:"recover_after,omitempty"`
+	RepeatEvery  time.Duration `json:"repeat_every,omitempty"`
+	// Push monitors (type "push", plan P3.8): Grace is the lateness allowed
+	// past Interval before a missing ping reads as down; PushToken is the
+	// secret path segment of the monitor's /api/push/<token> URL. The
+	// server assigns the token; a client-supplied value is never trusted.
+	Grace     time.Duration `json:"grace,omitempty"`
+	PushToken string        `json:"push_token,omitempty"`
 	// Incarnation is the store-assigned revision of this configuration.
 	// Every SaveMonitor assigns the next number (monotonic across edits AND
 	// delete+recreate, so the number is never reused — no ABA). A check

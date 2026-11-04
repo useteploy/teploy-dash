@@ -241,8 +241,8 @@ func TestBuildEmailMessage_BenignInput(t *testing.T) {
 	event := testEvent()
 	got := buildEmailMessage("alerts@example.com", "ops@example.com", event)
 
-	subject := "[teploy] api is down"
-	body := "Monitor: api\nStatus: down\nMessage: connection refused\nTime: 2026-05-30T12:00:00Z"
+	subject := "[teploy] Down: api"
+	body := "connection refused\nSource: monitor\nTime: 2026-05-30T12:00:00Z"
 	want := "From: alerts@example.com\r\nTo: ops@example.com\r\nSubject: " + subject + "\r\n\r\n" + body
 
 	if got != want {

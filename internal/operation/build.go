@@ -122,7 +122,7 @@ func BuildDeploy(req Request, resolve Resolver) (Command, Server, string, error)
 	default:
 		return Command{}, Server{}, "", fmt.Errorf("home must be teploy or empty")
 	}
-	return Command{Args: args, Timeout: 30 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: args, Timeout: KindTimeout(KindDeploy)}, srv, appTarget(req), nil
 }
 
 func BuildRollback(req Request, resolve Resolver) (Command, Server, string, error) {
@@ -140,7 +140,7 @@ func BuildRollback(req Request, resolve Resolver) (Command, Server, string, erro
 	if req.To != "" {
 		args = append(args, "--to", req.To)
 	}
-	return Command{Args: addUser(args, srv.User), Timeout: 10 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindRollback)}, srv, appTarget(req), nil
 }
 
 func BuildRemove(req Request, resolve Resolver) (Command, Server, string, error) {
@@ -155,7 +155,7 @@ func BuildRemove(req Request, resolve Resolver) (Command, Server, string, error)
 	if req.Redirect != "" {
 		args = append(args, "--redirect", req.Redirect)
 	}
-	return Command{Args: addUser(args, srv.User), Timeout: 10 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindRemove)}, srv, appTarget(req), nil
 
 }
 
@@ -224,7 +224,7 @@ func BuildTemplateInstall(req Request, resolve Resolver, varStdin bool) (Command
 			}
 		}
 	}
-	command := Command{Args: args, Timeout: 30 * time.Minute, Secrets: secrets}
+	command := Command{Args: args, Timeout: KindTimeout(KindTemplateInstall), Secrets: secrets}
 	if stdinVars != nil {
 		command.Stdin = string(stdinVars)
 	}
@@ -242,7 +242,7 @@ func BuildAppLifecycle(req Request, resolve Resolver) (Command, Server, string, 
 		return Command{}, Server{}, "", fmt.Errorf("unsupported app lifecycle action %q", req.Action)
 	}
 	args := []string{req.Action, "--host", srv.Host, "--app", req.App}
-	return Command{Args: addUser(args, srv.User), Timeout: 5 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindAppLifecycle)}, srv, appTarget(req), nil
 }
 
 func BuildMaintenance(req Request, resolve Resolver) (Command, Server, string, error) {
@@ -254,7 +254,7 @@ func BuildMaintenance(req Request, resolve Resolver) (Command, Server, string, e
 		return Command{}, Server{}, "", fmt.Errorf("maintenance action must be on or off")
 	}
 	args := []string{"maintenance", req.Action, "--host", srv.Host, "--app", req.App}
-	return Command{Args: addUser(args, srv.User), Timeout: 5 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindMaintenance)}, srv, appTarget(req), nil
 }
 
 // BuildRedeploy renders `teploy redeploy --app X --host S --json` (plan D2,
@@ -266,7 +266,7 @@ func BuildRedeploy(req Request, resolve Resolver) (Command, Server, string, erro
 		return Command{}, Server{}, "", err
 	}
 	args := []string{"redeploy", "--json", "--host", srv.Host, "--app", req.App}
-	return Command{Args: addUser(args, srv.User), Timeout: 30 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindRedeploy)}, srv, appTarget(req), nil
 }
 
 // BuildBackupCreate renders `teploy backup create --json` (plan D3, token
@@ -284,7 +284,7 @@ func BuildBackupCreate(req Request, resolve Resolver) (Command, Server, string, 
 	if req.Accessory != "" {
 		args = append(args, "--accessory", req.Accessory)
 	}
-	return Command{Args: addUser(args, srv.User), Timeout: 30 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindBackupCreate)}, srv, appTarget(req), nil
 }
 
 // BuildBackupRestore renders `teploy backup restore <id> --yes --json`: the
@@ -306,7 +306,25 @@ func BuildBackupRestore(req Request, resolve Resolver) (Command, Server, string,
 	if req.Accessory != "" {
 		args = append(args, "--accessory", req.Accessory)
 	}
-	return Command{Args: addUser(args, srv.User), Timeout: 60 * time.Minute}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindBackupRestore)}, srv, appTarget(req), nil
+}
+
+// KindTimeout is the execution ceiling of an operation kind — the one table
+// both Build and Alerts v2 suppression read (a hung deploy may hide an
+// outage for at most grace + this, plan P3.2).
+func KindTimeout(kind Kind) time.Duration {
+	switch kind {
+	case KindDeploy, KindRedeploy, KindTemplateInstall, KindBackupCreate:
+		return 30 * time.Minute
+	case KindRollback, KindRemove:
+		return 10 * time.Minute
+	case KindAppLifecycle, KindMaintenance:
+		return 5 * time.Minute
+	case KindBackupRestore:
+		return 60 * time.Minute
+	default:
+		return 30 * time.Minute
+	}
 }
 
 func resolveRequest(req Request, resolve Resolver, appRequired bool) (Server, error) {

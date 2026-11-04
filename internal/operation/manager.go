@@ -126,6 +126,10 @@ type Options struct {
 	// <id>`), or nil when the installed CLI cannot take them. Appended at
 	// execution, so a record admitted under an older CLI still runs.
 	ActorArgs func(op *Operation) []string
+	// OnFinish is called with a copy of every operation that reaches a
+	// terminal state (outside the manager lock). Alerts v2 turns failures
+	// of app operations into incidents (plan P3, source "operation").
+	OnFinish func(op *Operation)
 }
 
 // job is one admitted operation waiting for or receiving execution on its
@@ -217,6 +221,7 @@ type Manager struct {
 	actorArgs       func(op *Operation) []string
 	// receiptReader is Options.ReceiptReader (nil = cannot reconcile).
 	receiptReader ReceiptReader
+	onFinish      func(op *Operation)
 	// readOnly is non-empty when stored records carry a schema version
 	// newer than this build supports (X02 §5 row 6): reads work, every
 	// mutation refuses with this reason. Set once at New; never cleared.
@@ -322,6 +327,7 @@ func New(dataDir string, options Options) (*Manager, error) {
 		resolverByID:        options.ResolverByID,
 		executor:            options.Executor,
 		receiptReader:       options.ReceiptReader,
+		onFinish:            options.OnFinish,
 		actorArgs:           options.ActorArgs,
 		maxEvents:           options.MaxEvents,
 		maxHistoryAge:       options.MaxHistoryAge,
@@ -1000,7 +1006,11 @@ func (m *Manager) finishReconciled(id string, status Status, exitCode int, messa
 	}
 	m.closeSubscribersLocked(id)
 	over := m.maxOperations > 0 && len(m.operations) > m.maxOperations
+	finished := cloneOperation(op)
 	m.mu.Unlock()
+	if m.onFinish != nil {
+		m.onFinish(finished)
+	}
 	// The journal handle is no longer needed; release it so long histories
 	// do not pin file descriptors. Retention runs asynchronously so a sweep
 	// never delays the next queued operation on this target.
@@ -1084,6 +1094,21 @@ func (m *Manager) Get(id string) (*Operation, error) {
 		return nil, ErrNotFound
 	}
 	return cloneOperation(op), nil
+}
+
+// ListLive returns copies of the operations that are not terminal or that
+// finished at or after since — the small set an alert-hold check needs,
+// without cloning the whole retained history under the manager lock.
+func (m *Manager) ListLive(since time.Time) []*Operation {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*Operation
+	for _, op := range m.operations {
+		if !op.Status.Terminal() || (op.FinishedAt != nil && !op.FinishedAt.Before(since)) {
+			out = append(out, cloneOperation(op))
+		}
+	}
+	return out
 }
 
 func (m *Manager) List(status Status, target string, limit int) []*Operation {
