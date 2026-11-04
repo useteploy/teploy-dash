@@ -2,19 +2,38 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {harness,response} from './identity_harness.mjs';
 
-test('D17: absent and cleared webhook secrets allow replacement and send only chosen semantics',async()=>{
- const h=harness('/settings'),page=h.page('settingsPage');
- const select=h.readHTML().match(/<select[^>]*x-model="webhookSecretMode"[^>]*>/)[0];
- assert.ok(!select.includes(':disabled='),'initial secret selector must allow Replace');
- h.respond((url,options)=>response(options.method==='POST'?{saved:true}:{webhook_secret_set:false}));
- page.notifications={webhook_secret_set:false};
+test('D17: channel secrets keep, replace and clear with only the chosen semantics',async()=>{
+ const h=harness('/settings'),page=h.page('alertsSettings');
+ const select=h.readHTML().match(/<select[^>]*x-model="editor.secretMode"[^>]*>/)[0];
+ assert.ok(!select.includes(':disabled='),'secret selector must allow Replace');
+ h.respond((url,options)=>response(options.method==='PUT'?{id:'hook'}:{channels:[]}));
  for(const [mode,draft,expected] of [['keep','',undefined],['replace','fixture-signing-value','fixture-signing-value'],['clear','','']]){
-  page.webhookSecretMode=mode;page.webhookSecretDraft=draft;
-  await page.saveNotifications();
-  const body=h.requests.filter(r=>r.method==='POST').at(-1).body;
-  assert.equal(body.webhook_secret,expected);
-  assert.equal('webhook_secret_set' in body,false);
+  page.editChannel({id:'hook',type:'webhook',url:'https://h.example',url_set:true,secret_set:true,kinds:[]});
+  page.editor.secretMode=mode;page.editor.secretDraft=draft;
+  await page.saveChannel();
+  const body=h.requests.filter(r=>r.method==='PUT').at(-1).body;
+  assert.equal(body.secret,expected);
+  assert.equal('secret_set' in body,false);
+  assert.equal('type' in body,false,'an edit never resends the type');
  }
+});
+
+test('Alerts v2: credential URLs are kept when left blank, and the Slack placeholder is not offered to generic webhooks',async()=>{
+ const h=harness('/settings'),page=h.page('alertsSettings');
+ h.respond((url,options)=>response(options.method==='PUT'?{id:'chat'}:{channels:[]}));
+ page.editChannel({id:'chat',type:'slack',url_set:true,url_hint:'https://hooks.slack.com/...',kinds:['incident_opened']});
+ await page.saveChannel();
+ let body=h.requests.filter(r=>r.method==='PUT').at(-1).body;
+ assert.equal('url' in body,false,'blank credential URL must be omitted (keep)');
+ assert.deepEqual(body.kinds,['incident_opened']);
+ page.newChannel('ship');page.editor.url='https://ship.example/api/intake/dash';
+ await page.saveChannel();
+ assert.ok(page.editor,'ship without a secret must not save');
+ assert.ok(!page.urlPlaceholder('webhook').includes('slack'),'webhook placeholder must not suggest Slack');
+ page.newChannel('ntfy');page.editor.url='https://ntfy.sh/t';
+ await page.saveChannel();
+ body=h.requests.filter(r=>r.method==='PUT').at(-1).body;
+ assert.equal(body.type,'ntfy');assert.equal('token' in body,false);
 });
 
 test('D20: conflicted deletions preserve the refreshed list and matching ETag for both editors',async()=>{

@@ -1695,6 +1695,96 @@
             </div>
           </template>
 
+          <!-- Alerts v2: open incidents, held alerts, silences and the
+               recent delivery history (suppressed and dead-lettered too). -->
+          <template x-if="!loading">
+            <div x-data="alertsPanel" class="section" style="margin-top: 24px;">
+              <h2>Alerts</h2>
+              <template x-if="error"><div role="alert" class="card-meta" x-text="error"></div></template>
+              <div class="table-wrap" style="padding: 12px 16px; margin-bottom: 12px;">
+                <strong>Open incidents</strong>
+                <template x-if="incidents.open.length === 0"><p class="card-meta" style="margin: 6px 0 0;">None.</p></template>
+                <template x-for="inc in incidents.open" :key="inc.key">
+                  <div style="margin-top: 6px; font-size: 13px;">
+                    <span class="badge" :class="inc.severity === 'critical' ? 'red' : 'yellow'" x-text="inc.source"></span>
+                    <span x-text="inc.name"></span>
+                    <span class="card-meta" x-text="' since ' + formatDate(inc.started_at) + (inc.notified ? '' : ' (not announced: no channel was configured)')"></span>
+                    <div class="card-meta" style="margin: 2px 0 0; font-family: var(--mono);" x-show="inc.message" x-text="inc.message"></div>
+                  </div>
+                </template>
+                <template x-if="incidents.held.length > 0">
+                  <div style="margin-top: 10px;">
+                    <strong>Held</strong>
+                    <template x-for="h in incidents.held" :key="h.key">
+                      <div class="card-meta" style="margin: 4px 0 0;" x-text="h.name + ': ' + h.reason + ' (' + h.consecutive_failures + ' failed checks)'"></div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+
+              <div class="table-wrap" style="padding: 12px 16px; margin-bottom: 12px;">
+                <strong>Silences</strong>
+                <p class="card-meta" style="margin: 4px 0 8px;">A silence holds new alerts until it expires and closes open incidents it covers. Anything still failing when it ends alerts then.</p>
+                <template x-for="sl in silences" :key="sl.id">
+                  <div style="display: flex; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 4px;">
+                    <span x-text="silenceLabel(sl)"></span>
+                    <span class="card-meta" style="margin: 0;" x-text="'until ' + formatDate(sl.expires_at) + (sl.reason ? ' - ' + sl.reason : '') + (sl.created_by ? ' (' + sl.created_by + ')' : '')"></span>
+                    <button class="btn btn-sm" @click="removeSilence(sl.id)">End</button>
+                  </div>
+                </template>
+                <div class="form-row" style="gap: 8px; align-items: flex-end;">
+                  <div class="form-group">
+                    <label class="form-label">Scope</label>
+                    <select class="form-input" x-model="draft.scope">
+                      <option value="all">Everything</option>
+                      <option value="app">One app</option>
+                      <option value="monitor">One monitor</option>
+                    </select>
+                  </div>
+                  <div class="form-group" x-show="draft.scope === 'app'">
+                    <label class="form-label">App</label>
+                    <input class="form-input" x-model="draft.target" placeholder="app name">
+                  </div>
+                  <div class="form-group" x-show="draft.scope === 'monitor'">
+                    <label class="form-label">Monitor</label>
+                    <select class="form-input" x-model="draft.target">
+                      <template x-for="m in monitors" :key="m.id"><option :value="m.id" x-text="m.name"></option></template>
+                    </select>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">For</label>
+                    <select class="form-input" x-model.number="draft.duration_minutes">
+                      <option value="30">30 minutes</option>
+                      <option value="60">1 hour</option>
+                      <option value="240">4 hours</option>
+                      <option value="1440">1 day</option>
+                      <option value="10080">7 days</option>
+                    </select>
+                  </div>
+                  <div class="form-group" style="flex: 2;">
+                    <label class="form-label">Reason</label>
+                    <input class="form-input" x-model="draft.reason" placeholder="database migration">
+                  </div>
+                  <button class="btn" @click="addSilence()">Silence</button>
+                </div>
+              </div>
+
+              <div class="table-wrap" style="padding: 12px 16px;">
+                <strong>Recent alert deliveries</strong>
+                <template x-if="deliveries.length === 0"><p class="card-meta" style="margin: 6px 0 0;">No alerts yet.</p></template>
+                <template x-for="d in deliveries.slice(0, 20)" :key="d.id">
+                  <div style="margin-top: 6px; font-size: 13px;">
+                    <span class="badge" :class="deliveryClass(d.status)" x-text="d.status"></span>
+                    <span x-text="kindText(d.kind) + ': ' + (d.rule_name || d.rule_id)"></span>
+                    <span class="card-meta" x-text="' ' + formatDate(d.created_at)"></span>
+                    <div class="card-meta" style="margin: 2px 0 0;" x-show="d.note" x-text="d.note"></div>
+                    <div class="card-meta" style="margin: 2px 0 0; font-family: var(--mono); word-break: break-word;" x-show="d.status !== 'delivered' && d.last_error" x-text="d.last_error"></div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
           <!-- Empty State -->
           <template x-if="!loading && !loadFailed && monitors.length === 0">
             <div class="empty-state">
@@ -1745,6 +1835,17 @@
               <button class="btn btn-danger" @click="deleteMonitor(selectedMonitor.monitor.id)">Delete</button>
             </div>
           </div>
+
+          <!-- Push monitor URL and alert policy (Alerts v2). -->
+          <template x-if="selectedMonitor.monitor.type === 'push' && selectedMonitor.monitor.push_token">
+            <div class="table-wrap" style="padding: 12px 16px; margin-bottom: 16px;">
+              <strong>Push URL</strong>
+              <p class="card-meta" style="margin: 4px 0;">Request this URL when the job succeeds; add <code>?status=down&amp;msg=...</code> on failure. Treat it as a secret.</p>
+              <code style="word-break: break-all;" x-text="pushURL(selectedMonitor.monitor)"></code>
+              <button class="btn btn-sm" style="margin-left: 8px;" @click="copyPushURL(selectedMonitor.monitor)">Copy</button>
+            </div>
+          </template>
+          <p class="card-meta" style="margin: 0 0 12px;" x-text="policyText(selectedMonitor.monitor)"></p>
 
           <!-- Test result flash -->
           <template x-if="testResult">
@@ -1846,14 +1947,24 @@
                 <option value="http">HTTP</option>
                 <option value="tcp">TCP</option>
                 <option value="ping">TCP ping (reachability)</option>
+                <option value="push">Push / heartbeat (a job pings Dash)</option>
               </select>
             </div>
-            <div class="field">
+            <template x-if="newMonitor.type === 'push'">
+              <div class="field">
+                <p style="opacity:0.7;font-size:0.85em;margin:0">
+                  Dash gives this monitor a secret URL after saving. Have the job (a backup, a cron task)
+                  request it when it finishes: <code>curl -fsS -m 10 URL</code>. Add <code>?status=down&amp;msg=...</code>
+                  to report a failure. The monitor goes down when no ping arrives within the interval plus grace.
+                </p>
+              </div>
+            </template>
+            <div class="field" x-show="newMonitor.type !== 'push'">
               <label for="monitor-target">Target</label>
               <input type="text" id="monitor-target" x-model="newMonitor.target"
-                :placeholder="newMonitor.type === 'http' ? 'https://example.com' : 'example.com:5432 (host:port)'" required>
+                :placeholder="newMonitor.type === 'http' ? 'https://example.com' : 'example.com:5432 (host:port)'" :required="newMonitor.type !== 'push'">
             </div>
-            <div class="field">
+            <div class="field" x-show="newMonitor.type !== 'push'">
               <label><input type="checkbox" x-model="newMonitor.allow_internal"> Allow internal targets</label>
               <p style="opacity:0.6;font-size:0.85em;margin-top:4px">
                 Off by default: loopback, private-network (RFC1918), link-local, and cloud
@@ -1861,7 +1972,27 @@
                 targeting your own infrastructure (e.g. over Tailscale).
               </p>
             </div>
-            <div class="field-row">
+            <div class="field-row" x-show="newMonitor.type === 'push'">
+              <div class="field">
+                <label for="monitor-push-interval">Expected every</label>
+                <select id="monitor-push-interval" x-model="newMonitor.push_interval">
+                  <option value="300000">5 minutes</option>
+                  <option value="3600000">1 hour</option>
+                  <option value="86400000">1 day</option>
+                  <option value="604800000">1 week</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="monitor-grace">Grace</label>
+                <select id="monitor-grace" x-model="newMonitor.grace">
+                  <option value="60000">1 minute</option>
+                  <option value="600000">10 minutes</option>
+                  <option value="3600000">1 hour</option>
+                  <option value="10800000">3 hours</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row" x-show="newMonitor.type !== 'push'">
               <div class="field">
                 <label for="monitor-interval">Check Interval</label>
                 <select id="monitor-interval" x-model="newMonitor.interval">
@@ -1892,6 +2023,25 @@
               <div class="field">
                 <label for="monitor-status">Expected Status <span style="opacity:0.6">(optional)</span></label>
                 <input type="number" id="monitor-status" x-model="newMonitor.expected_status" placeholder="any 2xx/3xx">
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="monitor-fail-after">Alert after</label>
+                <input type="number" id="monitor-fail-after" min="0" max="20" x-model="newMonitor.fail_after" :placeholder="(newMonitor.type === 'push' ? 1 : 3) + ' failures (default)'">
+              </div>
+              <div class="field">
+                <label for="monitor-recover-after">Recover after</label>
+                <input type="number" id="monitor-recover-after" min="0" max="20" x-model="newMonitor.recover_after" :placeholder="(newMonitor.type === 'push' ? 1 : 2) + ' passes (default)'">
+              </div>
+              <div class="field">
+                <label for="monitor-repeat">Remind while down</label>
+                <select id="monitor-repeat" x-model="newMonitor.repeat_every">
+                  <option value="0">Off</option>
+                  <option value="3600000">Every hour</option>
+                  <option value="14400000">Every 4 hours</option>
+                  <option value="86400000">Every day</option>
+                </select>
               </div>
             </div>
             <div class="dialog-actions">
@@ -2699,73 +2849,199 @@
         </div>
       </template>
 
-      <!-- Notifications Tab -->
+      <!-- Notifications Tab (Alerts v2): channel list, public URL, Dash
+           self-heartbeat, silences, open incidents and delivery history.
+           Secrets are never shown: each secret field is Keep / Replace /
+           Clear against a write-only draft. -->
       <template x-if="!loading && tab === 'notifications'">
-        <div>
-          <p class="subtitle" style="margin-bottom: 16px;">Alerts fire on monitor state changes (up→down, down→up). Configure at least one channel.</p>
+        <div x-data="alertsSettings">
+          <p class="subtitle" style="margin-bottom: 16px;">An incident opens after a monitor fails its configured number of consecutive checks (default 3) and recovers after its passing checks (default 2). Each incident is sent once when it opens and once when it recovers. Deploys, maintenance, deploy locks and silences hold alerts rather than dropping them.</p>
+          <template x-if="loadError"><div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div></template>
 
-          <h3 class="section-title" style="font-size: 14px; margin-top: 8px;">Webhook</h3>
-          <div class="form-group">
-            <label class="form-label">Webhook URL</label>
-            <input class="form-input" x-model="notifications.webhook_url" placeholder="https://hooks.slack.com/services/...">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Webhook Signing Secret</label>
-            <div class="form-row" style="align-items:center; gap:8px;">
-              <input class="form-input" type="password" x-model="webhookSecretDraft"
-                     :disabled="webhookSecretMode === 'keep'"
-                     :placeholder="webhookSecretMode === 'keep' ? (notifications.webhook_secret_set ? '(set — unchanged)' : '(not set)') : 'replacement secret'">
-              <select class="form-input" style="max-width:130px;" aria-label="Webhook secret: keep, replace, or clear" x-model="webhookSecretMode">
-                <option value="keep" :disabled="!notifications.webhook_secret_set">Keep</option>
-                <option value="replace">Replace</option>
-                <option value="clear" :disabled="!notifications.webhook_secret_set">Clear</option>
-              </select>
+          <h3 class="section-title" style="font-size: 14px; margin-top: 8px;">Channels</h3>
+          <template x-if="channels.length === 0">
+            <div class="empty-state"><p>No alert channel configured: monitors record up/down but notify nobody. When you add the first channel, Dash sends one summary of anything already down.</p></div>
+          </template>
+          <template x-if="channels.length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Name</th><th>Type</th><th>Receives</th><th>Health</th><th></th></tr></thead>
+                <tbody>
+                  <template x-for="ch in channels" :key="ch.id">
+                    <tr>
+                      <td><span x-text="ch.name || ch.id"></span> <span class="card-meta" x-show="!ch.usable">(incomplete)</span></td>
+                      <td x-text="typeLabel(ch.type)"></td>
+                      <td x-text="(ch.kinds && ch.kinds.length) ? ch.kinds.map(kindLabel).join(', ') : 'all'"></td>
+                      <td>
+                        <span class="badge" :class="channelHealthClass(ch)" x-text="channelHealthText(ch)"></span>
+                        <div class="card-meta" style="margin: 2px 0 0; font-family: var(--mono); word-break: break-word;" x-show="ch.health && ch.health.dead_lettered && ch.health.last_error" x-text="'last failure: ' + (ch.health ? ch.health.last_error : '')"></div>
+                        <div class="card-meta" style="margin: 2px 0 0;" x-show="testResults[ch.id]" x-text="testResults[ch.id] ? (testResults[ch.id].ok ? 'test delivered' : 'test failed: ' + testResults[ch.id].error) : ''"></div>
+                      </td>
+                      <td style="display: flex; gap: 6px; justify-content: flex-end;">
+                        <button class="btn btn-sm" @click="testChannel(ch.id)" :disabled="testing === ch.id" x-text="testing === ch.id ? 'Sending...' : 'Send test'"></button>
+                        <button class="btn btn-sm" @click="editChannel(ch)">Edit</button>
+                        <button class="btn btn-sm btn-danger" @click="deleteChannel(ch.id)">Delete</button>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
             </div>
+          </template>
+          <div style="display: flex; gap: 8px; align-items: center; margin-top: 12px;" x-show="!editor">
+            <select class="form-input" style="max-width: 260px;" aria-label="New channel type" x-model="newType">
+              <option value="ntfy">ntfy (phone push)</option>
+              <option value="slack">Slack-compatible (Slack, Mattermost, Rocket.Chat, Google Chat)</option>
+              <option value="discord">Discord</option>
+              <option value="email">Email (SMTP)</option>
+              <option value="webhook">Webhook (signed JSON, Event v2)</option>
+              <option value="ship">Teploy Ship intake</option>
+            </select>
+            <button class="btn btn-primary" @click="newChannel(newType)">Add channel</button>
           </div>
 
-          <h3 class="section-title" style="font-size: 14px; margin-top: 24px;">Email (SMTP)</h3>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">SMTP Host</label>
-              <input class="form-input" x-model="notifications.smtp_host" placeholder="smtp.gmail.com">
-            </div>
-            <div class="form-group">
-              <label class="form-label">SMTP Port</label>
-              <input class="form-input" type="number" x-model.number="notifications.smtp_port" placeholder="587">
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">SMTP User</label>
-              <input class="form-input" x-model="notifications.smtp_user" placeholder="alerts@example.com">
-            </div>
-            <div class="form-group">
-              <label class="form-label">SMTP Password</label>
-              <div class="form-row" style="align-items:center; gap:8px;">
-                <input class="form-input" type="password" x-model="smtpPasswordDraft"
-                       :disabled="smtpPasswordMode === 'keep'"
-                       :placeholder="smtpPasswordMode === 'keep' ? (notifications.smtp_pass_set ? '(set — unchanged)' : '(not set)') : 'new password'">
-                <select class="form-input" style="max-width:130px;" aria-label="SMTP password: keep, replace, or clear" x-model="smtpPasswordMode">
-                  <option value="keep" :disabled="!notifications.smtp_pass_set">Keep</option>
-                  <option value="replace">Replace</option>
-                  <option value="clear" :disabled="!notifications.smtp_pass_set">Clear</option>
-                </select>
+          <template x-if="editor">
+            <div class="table-wrap" style="padding: 16px; margin-top: 12px;">
+              <h3 class="section-title" style="font-size: 14px; margin-top: 0;" x-text="(editor.isNew ? 'New ' : 'Edit ') + typeLabel(editor.type) + ' channel'"></h3>
+              <div class="form-group">
+                <label class="form-label">Name</label>
+                <input class="form-input" x-model="editor.name" placeholder="Ops phone">
+              </div>
+              <template x-if="editor.type !== 'email'">
+                <div class="form-group">
+                  <label class="form-label" x-text="urlLabel(editor.type)"></label>
+                  <input class="form-input" x-model="editor.url" :placeholder="editor.urlSet && credentialURL(editor.type) ? ('(set: ' + (editor.urlHint || 'hidden') + ') - leave blank to keep') : urlPlaceholder(editor.type)">
+                  <p class="card-meta" style="margin: 4px 0 0;" x-text="urlHelp(editor.type)"></p>
+                </div>
+              </template>
+              <template x-if="editor.type === 'webhook' || editor.type === 'ship'">
+                <div class="form-group">
+                  <label class="form-label" x-text="editor.type === 'ship' ? 'Intake signing secret (SHIP_DASH_INTAKE_SECRET)' : 'Signing secret (optional)'"></label>
+                  <div class="form-row" style="align-items:center; gap:8px;">
+                    <input class="form-input" type="password" x-model="editor.secretDraft" :disabled="editor.secretMode === 'keep'"
+                           :placeholder="editor.secretMode === 'keep' ? (editor.secretSet ? '(set - unchanged)' : '(not set)') : 'secret'">
+                    <select class="form-input" style="max-width:130px;" aria-label="Signing secret: keep, replace, or clear" x-model="editor.secretMode">
+                      <option value="keep" :disabled="!editor.secretSet">Keep</option>
+                      <option value="replace">Replace</option>
+                      <option value="clear" :disabled="!editor.secretSet">Clear</option>
+                    </select>
+                  </div>
+                </div>
+              </template>
+              <template x-if="editor.type === 'ntfy'">
+                <div class="form-group">
+                  <label class="form-label">Access token (optional, for protected topics)</label>
+                  <div class="form-row" style="align-items:center; gap:8px;">
+                    <input class="form-input" type="password" x-model="editor.tokenDraft" :disabled="editor.tokenMode === 'keep'"
+                           :placeholder="editor.tokenMode === 'keep' ? (editor.tokenSet ? '(set - unchanged)' : '(not set)') : 'tk_...'">
+                    <select class="form-input" style="max-width:130px;" aria-label="ntfy token: keep, replace, or clear" x-model="editor.tokenMode">
+                      <option value="keep" :disabled="!editor.tokenSet">Keep</option>
+                      <option value="replace">Replace</option>
+                      <option value="clear" :disabled="!editor.tokenSet">Clear</option>
+                    </select>
+                  </div>
+                </div>
+              </template>
+              <template x-if="editor.type === 'email'">
+                <div>
+                  <div class="form-row">
+                    <div class="form-group"><label class="form-label">SMTP Host</label><input class="form-input" x-model="editor.smtp_host" placeholder="smtp.example.com"></div>
+                    <div class="form-group"><label class="form-label">SMTP Port</label><input class="form-input" type="number" x-model.number="editor.smtp_port" placeholder="587"></div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group"><label class="form-label">SMTP User</label><input class="form-input" x-model="editor.smtp_user" placeholder="alerts@example.com"></div>
+                    <div class="form-group">
+                      <label class="form-label">SMTP Password</label>
+                      <div class="form-row" style="align-items:center; gap:8px;">
+                        <input class="form-input" type="password" x-model="editor.passDraft" :disabled="editor.passMode === 'keep'"
+                               :placeholder="editor.passMode === 'keep' ? (editor.passSet ? '(set - unchanged)' : '(not set)') : 'new password'">
+                        <select class="form-input" style="max-width:130px;" aria-label="SMTP password: keep, replace, or clear" x-model="editor.passMode">
+                          <option value="keep" :disabled="!editor.passSet">Keep</option>
+                          <option value="replace">Replace</option>
+                          <option value="clear" :disabled="!editor.passSet">Clear</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group"><label class="form-label">From</label><input class="form-input" x-model="editor.email_from" placeholder="alerts@example.com"></div>
+                    <div class="form-group"><label class="form-label">To</label><input class="form-input" x-model="editor.email_to" placeholder="team@example.com"></div>
+                  </div>
+                  <label style="font-size: 13px;"><input type="checkbox" x-model="editor.smtp_allow_insecure"> Allow plaintext SMTP (trusted LAN relay only)</label>
+                </div>
+              </template>
+              <div class="form-group" style="margin-top: 12px;">
+                <label class="form-label">Receives</label>
+                <div style="display: flex; gap: 14px; font-size: 13px; flex-wrap: wrap;">
+                  <template x-for="k in allKinds" :key="k">
+                    <label><input type="checkbox" :checked="editor.kinds.length === 0 || editor.kinds.includes(k)" @change="toggleKind(k)"> <span x-text="kindLabel(k)"></span></label>
+                  </template>
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: 12px;">
+                <button class="btn btn-primary" @click="saveChannel()" :disabled="saving">Save channel</button>
+                <button class="btn" @click="editor = null">Cancel</button>
               </div>
             </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">From</label>
-              <input class="form-input" x-model="notifications.email_from" placeholder="alerts@example.com">
-            </div>
-            <div class="form-group">
-              <label class="form-label">To</label>
-              <input class="form-input" x-model="notifications.email_to" placeholder="team@example.com">
+          </template>
+
+          <h3 class="section-title" style="font-size: 14px; margin-top: 24px;">Dash URL</h3>
+          <div class="form-group">
+            <label class="form-label">Public Dash URL (used for links in alerts)</label>
+            <div class="form-row" style="gap: 8px;">
+              <input class="form-input" x-model="publicURL" placeholder="https://dash.example.com">
+              <button class="btn" @click="saveSettings()">Save</button>
             </div>
           </div>
 
-          <div style="display: flex; gap: 8px; margin-top: 16px;">
-            <button class="btn btn-primary" @click="saveNotifications()">Save</button>
+          <h3 class="section-title" style="font-size: 14px; margin-top: 24px;">Dash heartbeat</h3>
+          <p class="card-meta" style="margin: 0 0 8px;">Dash cannot report its own death. Every few minutes it pings these URLs; a dead-man receiver alerts you when the pings stop. Use a receiver on a different host or a hosted service. ntfy cannot do this (it delivers messages, it does not notice missing ones).</p>
+          <template x-if="heartbeats.length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Receiver</th><th>URL</th><th>Last ping</th><th></th></tr></thead>
+                <tbody>
+                  <template x-for="hb in heartbeats" :key="hb.id">
+                    <tr>
+                      <td>
+                        <span x-text="hb.name || hb.id"></span>
+                        <div class="card-meta" style="margin: 2px 0 0; color: var(--red);" x-show="hb.warning" x-text="hb.warning"></div>
+                      </td>
+                      <td class="card-meta" x-text="hb.url_hint"></td>
+                      <td>
+                        <span class="badge" :class="hb.last ? (hb.last.ok ? 'green' : 'red') : ''" x-text="hb.last ? (hb.last.ok ? 'ok' : 'failed') : 'not yet'"></span>
+                        <div class="card-meta" style="margin: 2px 0 0;" x-show="hb.last" x-text="hb.last ? (formatDate(hb.last.at) + (hb.last.error ? ' - ' + hb.last.error : '')) : ''"></div>
+                      </td>
+                      <td style="display: flex; gap: 6px; justify-content: flex-end;">
+                        <button class="btn btn-sm" @click="testHeartbeat(hb.id)">Ping now</button>
+                        <button class="btn btn-sm btn-danger" @click="deleteHeartbeat(hb.id)">Delete</button>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <div class="form-row" style="gap: 8px; margin-top: 8px; align-items: flex-end;">
+            <div class="form-group">
+              <label class="form-label">Preset</label>
+              <select class="form-input" x-model="hbPreset" @change="applyPreset()">
+                <template x-for="p in heartbeatPresets" :key="p.id"><option :value="p.id" x-text="p.label"></option></template>
+              </select>
+            </div>
+            <div class="form-group" style="flex: 2;">
+              <label class="form-label">Ping URL</label>
+              <input class="form-input" x-model="hbDraft.url" :placeholder="presetPlaceholder()">
+            </div>
+            <button class="btn btn-primary" @click="addHeartbeat()">Add receiver</button>
+          </div>
+          <p class="card-meta" style="margin: 4px 0 0;" x-text="presetHelp()"></p>
+          <div class="form-group" style="max-width: 260px; margin-top: 8px;">
+            <label class="form-label">Ping every (minutes)</label>
+            <div class="form-row" style="gap: 8px;">
+              <input class="form-input" type="number" min="1" max="60" x-model.number="heartbeatInterval">
+              <button class="btn" @click="saveSettings()">Save</button>
+            </div>
           </div>
         </div>
       </template>
