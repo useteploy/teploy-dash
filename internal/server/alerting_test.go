@@ -516,4 +516,3 @@ func TestHeartbeatReceiverCRUD(t *testing.T) {
 		t.Fatalf("delete: %d", code)
 	}
 }
-
