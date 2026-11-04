@@ -497,7 +497,9 @@ func TestRunNow_IncidentKinds(t *testing.T) {
 		capture.events[0].IncidentID != capture.events[1].IncidentID || capture.events[0].Server != "prod" || capture.events[0].App != "myapp" {
 		t.Fatalf("events = %+v", capture.events)
 	}
-	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) { return `not json`, "", nil, nil }
+	r.runCLI = func(server, user, app, accessory string) (string, string, error, error) {
+		return `not json`, "", nil, nil
+	}
 	r.RunNow(rt)
 	r.Remove(rt.ID)
 	if len(capture.events) != 4 || capture.events[3].Reason != alert.ReasonRetired {
