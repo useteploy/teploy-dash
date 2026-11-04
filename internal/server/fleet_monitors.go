@@ -81,6 +81,9 @@ func desiredFleetMonitors(envelopes []ServerObservation) (want map[string]store.
 				continue
 			}
 			for _, h := range fleetMonitorHosts(app.Domain) {
+				if app.Server == "" {
+					app.Server = env.Server
+				}
 				id := fleetMonitorID(h)
 				if _, ok := want[id]; ok {
 					continue
@@ -95,6 +98,7 @@ func desiredFleetMonitors(envelopes []ServerObservation) (want map[string]store.
 					Enabled:   true,
 					Reachable: true,
 					App:       app.App,
+					Server:    app.Server,
 				}
 			}
 		}
@@ -116,10 +120,26 @@ func (s *Server) reconcileFleetMonitors(envelopes []ServerObservation) (added, r
 	have := make(map[string]bool, len(existing))
 	for _, m := range existing {
 		have[m.ID] = true
-		if m.App == "" || !complete {
+		if m.App == "" {
 			continue
 		}
-		if _, ok := want[m.ID]; ok {
+		if w, ok := want[m.ID]; ok {
+			// Alerts v2: the owning server is derived state the reconciler
+			// owns (suppression and the Event v2 "server" field read it);
+			// backfill it without touching anything a person may have
+			// edited.
+			if w.Server != "" && (m.Server != w.Server || m.App != w.App) {
+				m.Server, m.App = w.Server, w.App
+				if err := s.store.SaveMonitor(&m); err != nil {
+					return added, removed, err
+				}
+				if s.monitor != nil {
+					s.monitor.Reload(m)
+				}
+			}
+			continue
+		}
+		if !complete {
 			continue
 		}
 		if s.monitor != nil {

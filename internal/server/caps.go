@@ -71,8 +71,11 @@ var administerCredentialsPrefixes = []string{
 	"/api/mcp-tokens",
 	"/api/config/servers",
 	"/api/registries",
-	"/api/notifications",
+	"/api/notifications", // Alerts v2: channels, test-send, public URL, heartbeat receivers
 	"/api/sources",
+	// The audit trail records credential and alerting changes (who
+	// configured which channel, who silenced what).
+	"/api/audit",
 }
 
 // requiredCapabilities returns the capability(s) a route requires. It fails
@@ -85,6 +88,26 @@ func requiredCapabilities(method, path string) []string {
 		// The SPA shell and pre-auth pages carry no capability requirement;
 		// every piece of data they render comes from the API routes below.
 		return nil
+	}
+	// Push/heartbeat monitor pings are token-scoped, not capability-scoped:
+	// the gate passes them without a session and the monitor's secret
+	// token is the credential (a backup or cron job has no account).
+	if strings.HasPrefix(path, "/api/push/") {
+		return nil
+	}
+	// Alerts v2: silences change who gets alerted (execute.mutate, audited);
+	// incidents and delivery history are metadata.
+	if path == "/api/alerts/silences" || strings.HasPrefix(path, "/api/alerts/silences/") {
+		if method == http.MethodGet {
+			return []string{caps.ViewMetadata}
+		}
+		return []string{caps.ExecuteMutate}
+	}
+	if strings.HasPrefix(path, "/api/alerts/") {
+		if method == http.MethodGet {
+			return []string{caps.ViewMetadata}
+		}
+		return []string{caps.ExecuteMutate}
 	}
 	// Self-service identity is available to every authenticated principal —
 	// gating "who am I" on a capability would brick sessions.

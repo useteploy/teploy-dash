@@ -27,10 +27,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/useteploy/teploy-dash/internal/alert"
 	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/cli"
-	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/mcp"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
@@ -353,6 +351,9 @@ type Server struct {
 
 	// homepageMu serializes the homepage load-compare-save sequence (R13).
 	homepageMu sync.Mutex
+
+	// alerts is the Alerts v2 state (alerting.go).
+	alerts alertingState
 }
 
 // New creates a new server.
@@ -368,6 +369,7 @@ func New(config Config) *Server {
 		frontend: config.Frontend,
 		outbox:   config.Outbox,
 	}
+	s.initAlerting(config.DataDir)
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
 		s.runCLI = cli.RunContext
@@ -490,6 +492,9 @@ func New(config Config) *Server {
 			}
 			return dashActorArgs(op.Actor, op.ID)
 		},
+		// Alerts v2: app operation failures become incidents (source
+		// "operation"); the next success of the same kind recovers them.
+		OnFinish: s.onOperationFinished,
 	})
 	if s.operationInitErr != nil {
 		log.Printf("operations: disabled: %v", s.operationInitErr)
@@ -1083,6 +1088,12 @@ func (g *authGate) wrap(next http.Handler) http.Handler {
 		// the MCP endpoint's bearer auth. Non-browser deliveries carry no
 		// Origin header and pass the mutation guard; a browser page can't
 		// forge the signature.
+		// Alerts v2 push monitors: the path token is the credential (a
+		// backup job or cron job has no session), like the forge hook below.
+		if strings.HasPrefix(r.URL.Path, "/api/push/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/hooks/sources/") {
 			if isMutating(r.Method) && !sameOrigin(r) {
 				http.Error(w, "cross-origin request blocked", http.StatusForbidden)
@@ -1664,6 +1675,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/config/servers", s.handleConfigServers)
 	s.mux.HandleFunc("/api/config/servers/", s.handleConfigServerAction)
 	s.mux.HandleFunc("/api/notifications", s.handleNotifications)
+	s.mux.HandleFunc("/api/notifications/", s.handleNotificationAction)
+	// Alerts v2: open incidents, delivery history, silences, audit trail.
+	s.mux.HandleFunc("/api/alerts/incidents", s.handleAlertIncidents)
+	s.mux.HandleFunc("/api/alerts/deliveries", s.handleAlertDeliveries)
+	s.mux.HandleFunc("/api/alerts/silences", s.handleSilences)
+	s.mux.HandleFunc("/api/alerts/silences/", s.handleSilences)
+	s.mux.HandleFunc("/api/audit", s.handleAudit)
+	// Push/heartbeat monitors ping here; authenticated by the token alone.
+	s.mux.HandleFunc("/api/push/", s.handlePush)
 	s.mux.HandleFunc("/api/registries", s.handleRegistries)
 	s.mux.HandleFunc("/api/registries/", s.handleRegistryAction)
 	s.mux.HandleFunc("/api/groups", s.handleGroups)
@@ -3517,162 +3537,6 @@ func (s *Server) handleConfigServerAction(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func notificationsFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".teploy", "notifications.json")
-}
-
-// LoadNotificationsConfig reads alert configuration from ~/.teploy/notifications.json.
-// R14: an unreadable or corrupt file is an ERROR, not "notifications not
-// configured" — the caller decides how to degrade; a silent empty config
-// let a later partial overwrite destroy stored secrets.
-func LoadNotificationsConfig() (alert.Config, error) {
-	return loadNotificationsConfig()
-}
-
-func loadNotificationsConfig() (alert.Config, error) {
-	raw, err := os.ReadFile(notificationsFilePath())
-	if errors.Is(err, os.ErrNotExist) {
-		return alert.Config{}, nil
-	}
-	if err != nil {
-		return alert.Config{}, fmt.Errorf("read notifications config: %w", err)
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return alert.Config{}, nil
-	}
-	var cfg alert.Config
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return alert.Config{}, fmt.Errorf("decode notifications config: %w", err)
-	}
-	return cfg, nil
-}
-
-func saveNotificationsConfig(cfg alert.Config) error {
-	path := notificationsFilePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	// 0600 + atomic: the file holds the SMTP password, and a partial write
-	// must never replace a complete config (A32).
-	return atomicFileWrite(path, raw, 0600)
-}
-
-// notificationsMu serializes the notification config's read-merge-validate-
-// save-publication sequence (R14): concurrent patches previously overwrote
-// one another because each read the file outside any lock.
-var notificationsMu sync.Mutex
-
-// atomicFileWrite writes data to path via a same-directory temp file + rename
-// so a failed or partial write cannot replace the previous complete file.
-// R15: the replacement shares the audited durable semantics (unique temp,
-// file sync, rename, PARENT-DIRECTORY sync after the rename) used by the
-// credential and token stores — a rename without the dir sync is not
-// crash-durable on filesystems that need explicit directory synchronization.
-func atomicFileWrite(path string, data []byte, mode os.FileMode) error {
-	return durable.Replace(path, data, mode)
-}
-
-func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
-	noStore(w)
-	switch r.Method {
-	case "GET":
-		cfg, err := loadNotificationsConfig()
-		if err != nil {
-			// R14: corrupt/unreadable state is a configuration error, not a
-			// silently empty one.
-			writeErrorStatus(w, "notification configuration unavailable: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		// Never return secrets to the client; expose only whether one is
-		// configured.
-		writeData(w, map[string]any{
-			"webhook_url":         cfg.WebhookURL,
-			"webhook_secret_set":  cfg.WebhookSecret != "",
-			"smtp_host":           cfg.SMTPHost,
-			"smtp_port":           cfg.SMTPPort,
-			"smtp_user":           cfg.SMTPUser,
-			"smtp_pass_set":       cfg.SMTPPass != "",
-			"email_to":            cfg.EmailTo,
-			"email_from":          cfg.EmailFrom,
-			"smtp_allow_insecure": cfg.SMTPAllowInsecure,
-		})
-	case "POST":
-		// Patch DTO (A34): the GET response contains read-only view flags
-		// (smtp_pass_set, webhook_secret_set) that the old POST body could not
-		// round-trip — strict decoding rejected the UI's own save. Secret
-		// fields are pointers: absent = preserve the stored value; present =
-		// replace (empty string clears it deliberately).
-		var patch struct {
-			WebhookURL        *string `json:"webhook_url"`
-			WebhookSecret     *string `json:"webhook_secret"`
-			SMTPHost          *string `json:"smtp_host"`
-			SMTPPort          *int    `json:"smtp_port"`
-			SMTPUser          *string `json:"smtp_user"`
-			SMTPPass          *string `json:"smtp_pass"`
-			EmailTo           *string `json:"email_to"`
-			EmailFrom         *string `json:"email_from"`
-			SMTPAllowInsecure *bool   `json:"smtp_allow_insecure"`
-		}
-		if err := strictDecode(r, &patch); err != nil {
-			writeError(w, "invalid request body")
-			return
-		}
-		notificationsMu.Lock()
-		defer notificationsMu.Unlock()
-		// R14: refuse patches against unreadable/corrupt state — merging
-		// into a fabricated empty config destroyed the secrets the request
-		// deliberately omitted. The whole read-merge-save sequence runs
-		// under one lock so concurrent patches cannot overwrite one another.
-		cfg, err := loadNotificationsConfig()
-		if err != nil {
-			writeErrorStatus(w, "notification configuration unavailable: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		if patch.WebhookURL != nil {
-			cfg.WebhookURL = strings.TrimSpace(*patch.WebhookURL)
-		}
-		if patch.WebhookSecret != nil {
-			cfg.WebhookSecret = strings.TrimSpace(*patch.WebhookSecret)
-		}
-		if patch.SMTPHost != nil {
-			cfg.SMTPHost = strings.TrimSpace(*patch.SMTPHost)
-		}
-		if patch.SMTPPort != nil {
-			cfg.SMTPPort = *patch.SMTPPort
-		}
-		if patch.SMTPUser != nil {
-			cfg.SMTPUser = *patch.SMTPUser
-		}
-		if patch.SMTPPass != nil {
-			cfg.SMTPPass = *patch.SMTPPass
-		}
-		if patch.EmailTo != nil {
-			cfg.EmailTo = *patch.EmailTo
-		}
-		if patch.EmailFrom != nil {
-			cfg.EmailFrom = *patch.EmailFrom
-		}
-		if patch.SMTPAllowInsecure != nil {
-			cfg.SMTPAllowInsecure = *patch.SMTPAllowInsecure
-		}
-		if err := saveNotificationsConfig(cfg); err != nil {
-			writeError(w, err.Error())
-			return
-		}
-		// Both runners retain the durable outbox, which loads current
-		// notification configuration for every attempt, including retries.
-
-		writeData(w, map[string]bool{"saved": true})
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
 func (s *Server) handleRegistries(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	switch r.Method {
@@ -3744,6 +3608,13 @@ const (
 func validateMonitor(m *store.Monitor) error {
 	m.Name = strings.TrimSpace(m.Name)
 	m.Target = strings.TrimSpace(m.Target)
+	if err := validateAlertPolicy(m); err != nil {
+		return err
+	}
+	if m.Type == "push" {
+		return validatePushMonitor(m)
+	}
+	m.Grace = 0
 	if m.Target == "" {
 		return fmt.Errorf("monitor target is required")
 	}
@@ -3753,7 +3624,7 @@ func validateMonitor(m *store.Monitor) error {
 	switch m.Type {
 	case "http", "tcp", "ping":
 	default:
-		return fmt.Errorf("monitor type must be http, tcp, or ping")
+		return fmt.Errorf("monitor type must be http, tcp, ping, or push")
 	}
 	// A monitor should only ever issue a safe HTTP method — never a
 	// destructive verb against the monitored endpoint. Normalize to upper so
@@ -3812,6 +3683,49 @@ func validateMonitor(m *store.Monitor) error {
 			}
 		}
 	}
+	return nil
+}
+
+// Alerts v2 policy bounds (plan P3.1).
+const (
+	monitorMaxFailAfter   = 20
+	monitorMinRepeatEvery = 5 * time.Minute
+	monitorMaxRepeatEvery = 7 * 24 * time.Hour
+	pushMinInterval       = 30 * time.Second
+	pushMaxInterval       = 31 * 24 * time.Hour
+	pushDefaultGrace      = time.Minute
+	pushMaxGrace          = 24 * time.Hour
+)
+
+func validateAlertPolicy(m *store.Monitor) error {
+	if m.FailAfter < 0 || m.FailAfter > monitorMaxFailAfter || m.RecoverAfter < 0 || m.RecoverAfter > monitorMaxFailAfter {
+		return fmt.Errorf("fail_after and recover_after must be between 1 and %d (0 = default)", monitorMaxFailAfter)
+	}
+	if m.RepeatEvery != 0 && (m.RepeatEvery < monitorMinRepeatEvery || m.RepeatEvery > monitorMaxRepeatEvery) {
+		return fmt.Errorf("repeat_every must be off or between %s and %s", monitorMinRepeatEvery, monitorMaxRepeatEvery)
+	}
+	return nil
+}
+
+// validatePushMonitor bounds a push/heartbeat monitor: no probe target (the
+// job pings Dash), an expected interval up to a month (weekly and monthly
+// jobs), and a lateness grace.
+func validatePushMonitor(m *store.Monitor) error {
+	m.Target = "push"
+	m.Method, m.ExpectedStatus, m.AllowInternal, m.Reachable = "", 0, false, false
+	if m.Interval <= 0 {
+		m.Interval = 24 * time.Hour
+	}
+	if m.Interval < pushMinInterval || m.Interval > pushMaxInterval {
+		return fmt.Errorf("push interval must be between %s and 31 days", pushMinInterval)
+	}
+	if m.Grace == 0 {
+		m.Grace = pushDefaultGrace
+	}
+	if m.Grace < 0 || m.Grace > pushMaxGrace {
+		return fmt.Errorf("grace must be between 0 and 24h")
+	}
+	m.Timeout = 0
 	return nil
 }
 
@@ -3896,6 +3810,20 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "disabling internal-network monitoring requires an admin", http.StatusForbidden)
 				return
 			}
+		}
+		// The push token is server-assigned: kept across edits, minted for a
+		// new push monitor, never taken from the request.
+		prevToken := ""
+		if prev, err := s.store.GetMonitor(m.ID); err == nil && prev != nil {
+			prevToken = prev.PushToken
+		}
+		switch {
+		case m.Type != "push":
+			m.PushToken = ""
+		case prevToken != "":
+			m.PushToken = prevToken
+		default:
+			m.PushToken = newPushToken()
 		}
 		if err := s.store.SaveMonitor(&m); err != nil {
 			http.Error(w, err.Error(), 500)

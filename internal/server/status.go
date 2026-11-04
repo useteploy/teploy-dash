@@ -3,6 +3,9 @@ package server
 import (
 	"net/http"
 	"time"
+
+	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/store"
 )
 
 // The public status page is an unauthenticated, customer-facing view of the
@@ -11,17 +14,34 @@ import (
 // when on it deliberately leaks nothing sensitive: only each monitor's Name,
 // current up/down state, and 24h uptime %% — never the target URL/IP, server
 // name, response bodies, or any config. Disabled monitors are omitted.
+//
+// Alerts v2 (plan P3.9): open incidents and active maintenance/silences are
+// listed by MONITOR NAME only (the name the page already shows), with their
+// start/expiry times — never a target, app, server, rule source or reason.
 
 type statusMonitor struct {
 	Name          string  `json:"name"`
 	Status        string  `json:"status"` // "up", "down", "unknown"
 	UptimePercent float64 `json:"uptime_percent"`
+	Maintenance   bool    `json:"maintenance,omitempty"`
+}
+
+type statusIncident struct {
+	Name  string    `json:"name"`
+	Since time.Time `json:"since"`
+}
+
+type statusMaintenance struct {
+	Name  string     `json:"name"`
+	Until *time.Time `json:"until,omitempty"`
 }
 
 type statusResponse struct {
-	Status    string          `json:"status"` // "operational", "degraded", "down"
-	UpdatedAt time.Time       `json:"updated_at"`
-	Monitors  []statusMonitor `json:"monitors"`
+	Status      string              `json:"status"` // "operational", "degraded", "down"
+	UpdatedAt   time.Time           `json:"updated_at"`
+	Monitors    []statusMonitor     `json:"monitors"`
+	Incidents   []statusIncident    `json:"incidents"`
+	Maintenance []statusMaintenance `json:"maintenance"`
 }
 
 // handleStatusAPI serves the public status JSON. Returns 404 when the public
@@ -47,6 +67,8 @@ func (s *Server) handleStatusAPI(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	since := now.Add(-24 * time.Hour)
 	out := make([]statusMonitor, 0, len(monitors))
+	maintenance := []statusMaintenance{}
+	enabledNames := map[string]string{}
 	upCount, downCount, unknownCount := 0, 0, 0
 
 	for _, m := range monitors {
@@ -90,7 +112,33 @@ func (s *Server) handleStatusAPI(w http.ResponseWriter, r *http.Request) {
 			uptime = stats.UptimePercent
 		}
 
-		out = append(out, statusMonitor{Name: m.Name, Status: status, UptimePercent: uptime})
+		row := statusMonitor{Name: m.Name, Status: status, UptimePercent: uptime}
+		if mt, ok := s.statusMaintenanceFor(m, now); ok {
+			row.Maintenance = true
+			maintenance = append(maintenance, mt)
+		}
+		out = append(out, row)
+		enabledNames[m.ID] = m.Name
+	}
+	incidents := []statusIncident{}
+	if s.alerts.tracker != nil {
+		for _, inc := range s.alerts.tracker.Open() {
+			if inc.Source != alert.SourceMonitor && inc.Source != alert.SourceHeartbeat {
+				continue // restore tests, operations, channels are internal
+			}
+			if name, ok := enabledNames[inc.RuleID]; ok {
+				incidents = append(incidents, statusIncident{Name: name, Since: inc.StartedAt})
+			}
+		}
+	}
+	if s.alerts.silences != nil {
+		for _, sl := range s.alerts.silences.Active(now) {
+			if sl.Scope == silenceAll {
+				until := sl.ExpiresAt
+				maintenance = append([]statusMaintenance{{Name: "All services", Until: &until}}, maintenance...)
+				break
+			}
+		}
 	}
 
 	overall := "unknown"
@@ -108,10 +156,34 @@ func (s *Server) handleStatusAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, statusResponse{
-		Status:    overall,
-		UpdatedAt: now.UTC(),
-		Monitors:  out,
+		Status:      overall,
+		UpdatedAt:   now.UTC(),
+		Monitors:    out,
+		Incidents:   incidents,
+		Maintenance: maintenance,
 	})
+}
+
+// statusMaintenanceFor reports a monitor under maintenance: its app's
+// maintenance flag (fleet cache) or a silence covering it (its expiry is
+// the "until").
+func (s *Server) statusMaintenanceFor(m store.Monitor, now time.Time) (statusMaintenance, bool) {
+	if s.alerts.silences != nil {
+		for _, sl := range s.alerts.silences.Active(now) {
+			if sl.Scope != silenceAll && sl.covers(m.ID, m.App) {
+				until := sl.ExpiresAt
+				return statusMaintenance{Name: m.Name, Until: &until}, true
+			}
+		}
+	}
+	if m.App != "" && s.fleet != nil {
+		for _, app := range s.fleet.snapshot() {
+			if app.App == m.App && (m.Server == "" || app.Server == m.Server) && app.Maintenance {
+				return statusMaintenance{Name: m.Name}, true
+			}
+		}
+	}
+	return statusMaintenance{}, false
 }
 
 // handleStatusPage serves the self-contained public status HTML. Returns 404
@@ -162,12 +234,18 @@ const statusPageHTML = `<!DOCTYPE html>
   .uptime { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
   .foot { color: var(--muted); font-size: 12px; margin-top: 20px; text-align: center; }
   .empty { padding: 24px 20px; color: var(--muted); text-align: center; }
+  .notice { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 14px 20px; margin: 0 0 16px; }
+  .notice h2 { font-size: 14px; margin: 0 0 6px; }
+  .notice ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .notice.incidents h2 { color: var(--down); }
+  .maint { color: var(--muted); font-size: 12px; margin-left: 6px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Service status</h1>
   <div id="overall" class="overall"><span>Loading…</span></div>
+  <div id="notices"></div>
   <div id="list" class="list"><div class="empty">Loading…</div></div>
   <div class="foot" id="foot"></div>
 </div>
@@ -184,9 +262,22 @@ const statusPageHTML = `<!DOCTYPE html>
     } else {
       list.innerHTML = d.monitors.map(function (m) {
         return '<div class="row"><div class="name"><span class="dot ' + m.status + '"></span>' +
-          escapeHtml(m.name) + '</div><div class="uptime">' + pct(m.uptime_percent) + ' uptime (24h)</div></div>';
+          escapeHtml(m.name) + (m.maintenance ? '<span class="maint">maintenance</span>' : '') +
+          '</div><div class="uptime">' + pct(m.uptime_percent) + ' uptime (24h)</div></div>';
       }).join("");
     }
+    var notices = "";
+    if (d.incidents && d.incidents.length) {
+      notices += '<div class="notice incidents"><h2>Open incidents</h2><ul>' + d.incidents.map(function (i) {
+        return "<li>" + escapeHtml(i.name) + " - since " + escapeHtml(new Date(i.since).toLocaleString()) + "</li>";
+      }).join("") + "</ul></div>";
+    }
+    if (d.maintenance && d.maintenance.length) {
+      notices += '<div class="notice"><h2>Maintenance</h2><ul>' + d.maintenance.map(function (m) {
+        return "<li>" + escapeHtml(m.name) + (m.until ? " - until " + escapeHtml(new Date(m.until).toLocaleString()) : "") + "</li>";
+      }).join("") + "</ul></div>";
+    }
+    document.getElementById("notices").innerHTML = notices;
     document.getElementById("foot").textContent = "Updated " + new Date(d.updated_at).toLocaleString();
   }
   function escapeHtml(s) {

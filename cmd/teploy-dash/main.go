@@ -267,23 +267,32 @@ func run() error {
 	// delivered ones. An unwritable journal is a broken persistence
 	// contract — refuse to start rather than silently degrade to
 	// best-effort (A32 discipline).
+	// Alerts v2: open incidents, silences and the audit trail live in the
+	// data dir; an unreadable file refuses startup like the outbox journal.
+	if err := srv.AlertingInitErr(); err != nil {
+		st.Close()
+		return fmt.Errorf("alerting state: %w", err)
+	}
 	alertOutbox, err := outbox.New(*dataDir, outbox.Options{
 		ConfigFn: server.LoadNotificationsConfig,
+		// Channel health (plan P3.6): a dead-lettered channel is reported
+		// through the other channels.
+		OnDeadLetter: srv.OnChannelDeadLetter,
+		OnDelivered:  srv.OnChannelDelivered,
 	})
 	if err != nil {
 		st.Close()
 		return fmt.Errorf("alert outbox: %w", err)
 	}
-	mon.SetAlerter(alertOutbox)
-	// D08: restore-test alerts ride the same durable outbox (retries,
-	// dead-letter, restart resume, per-channel accounting) under their own
-	// source label. The outbox no-ops when no channel is configured AND the
-	// config is readable — the same condition the old direct-dispatcher
-	// wiring checked — and enqueues (failing loudly on retry) when the
-	// config is unreadable, which used to be silent.
+	// Monitors, restore tests and operations feed ONE incident tracker
+	// (debounce, one incident per outage, holds, silences), which sends
+	// through the durable outbox. The server reads delivery state from the
+	// same outbox.
+	srv.SetOutbox(alertOutbox)
+	mon.SetTracker(srv.AlertTracker())
+	rst.SetTracker(srv.AlertTracker())
 	// R14: an unreadable/corrupt config is loud at startup — it previously
 	// read as "not configured" and a later partial save destroyed secrets.
-	rst.SetAlerter(alertOutbox)
 	if notifCfg, notifErr := server.LoadNotificationsConfig(); notifErr != nil {
 		log.Printf("Warning: %v (alerts disabled until the config is repaired; saving from Settings is refused in this state)", notifErr)
 	} else if channels := alert.ConfiguredChannels(notifCfg); len(channels) == 0 {
@@ -324,6 +333,14 @@ func run() error {
 				}
 			}
 		}
+	}()
+
+	// Alerts v2: legacy config migration, first-enable announcement, the
+	// Dash self-heartbeat and one-shot incident sweeps.
+	cleanupWG.Add(1)
+	go func() {
+		defer cleanupWG.Done()
+		srv.RunAlerting(cleanupCtx)
 	}()
 
 	// Fleet monitors: every public domain a deployed app serves gets an

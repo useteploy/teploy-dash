@@ -1,8 +1,13 @@
 package server
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/incident"
+	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/remote"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
@@ -78,5 +83,50 @@ func TestReconcileFleetMonitors(t *testing.T) {
 	}
 	if len(list) != 2 || !ids["manual"] || !ids[fleetMonitorID("app.acme.dev")] {
 		t.Fatalf("remaining monitors = %v", ids)
+	}
+}
+
+// Alerts v2: fleet monitors carry the server the app runs on; a monitor
+// created before the field existed is backfilled without touching the
+// person-owned fields; retiring a monitor with an open incident sends
+// incident_recovered reason "retired".
+func TestReconcileFleetMonitorsServerAndRetire(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	runner := monitor.New(st)
+	sink := &captureSink{}
+	tr, _ := incident.New(incident.Options{Alerter: sink})
+	runner.SetTracker(tr)
+	defer runner.Stop(context.Background())
+	s := &Server{store: st, monitor: runner}
+	legacy := store.Monitor{ID: fleetMonitorID("app.acme.dev"), Name: "app.acme.dev", Type: "http", Target: "https://app.acme.dev/",
+		Interval: time.Hour, Timeout: time.Second, Enabled: false, App: "akiroo", FailAfter: 7}
+	if err := st.SaveMonitor(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	sweep := []ServerObservation{fleetEnv("deploy-a", "", remote.AppState{App: "akiroo", Domain: "app.acme.dev, bugs.acme.io"})}
+	if _, _, err := s.reconcileFleetMonitors(sweep); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"app.acme.dev", "bugs.acme.io"} {
+		m, _ := st.GetMonitor(fleetMonitorID(host))
+		if m == nil || m.Server != "deploy-a" {
+			t.Fatalf("%s server = %+v", host, m)
+		}
+	}
+	if m, _ := st.GetMonitor(legacy.ID); m.Enabled || m.FailAfter != 7 {
+		t.Fatalf("backfill touched person-owned fields: %+v", m)
+	}
+
+	// Open an incident on bugs.acme.io, then retire it with a complete sweep.
+	bugs, _ := st.GetMonitor(fleetMonitorID("bugs.acme.io"))
+	rule := monitor.RuleFor(*bugs)
+	rule.Policy.FailAfter = 1
+	tr.Observe(rule, false, time.Now(), "502")
+	if _, removed, _ := s.reconcileFleetMonitors([]ServerObservation{fleetEnv("deploy-a", "", remote.AppState{App: "akiroo", Domain: "app.acme.dev"})}); removed != 1 {
+		t.Fatalf("removed %d", removed)
+	}
+	evs := sink.events()
+	if len(evs) != 2 || evs[1].Kind != alert.KindRecovered || evs[1].Reason != alert.ReasonRetired || evs[1].Server != "deploy-a" {
+		t.Fatalf("events = %+v", evs)
 	}
 }
