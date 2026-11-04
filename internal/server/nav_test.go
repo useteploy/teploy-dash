@@ -102,3 +102,18 @@ func TestNavSurvivesStaleFleetCache(t *testing.T) {
 		t.Fatalf("observe url = %q, want it to survive an expired cache", got)
 	}
 }
+
+// Teploy Cloud is hosted, so it joins the switcher only by explicit URL: an
+// app on the fleet that happens to be named "cloud" is never linked as it.
+func TestNavCloudIsOptInByURL(t *testing.T) {
+	s := navServer(t, []remote.AppState{
+		{App: "cloud", Server: "infra", Domain: "cloud.acme.com", CurrentPort: 3000, Status: "running"},
+	})
+	if got := navURL(s.teployNav("dash"), "cloud"); got != "<absent>" {
+		t.Fatalf("cloud without TEPLOY_NAV_CLOUD_URL = %q, want absent", got)
+	}
+	t.Setenv("TEPLOY_NAV_CLOUD_URL", "https://cloud.teploy.com")
+	if got := navURL(s.teployNav("dash"), "cloud"); got != "https://cloud.teploy.com" {
+		t.Fatalf("cloud url = %q, want the configured URL", got)
+	}
+}
