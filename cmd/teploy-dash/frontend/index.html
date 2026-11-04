@@ -1837,12 +1837,19 @@
           </div>
 
           <!-- Push monitor URL and alert policy (Alerts v2). -->
-          <template x-if="selectedMonitor.monitor.type === 'push' && selectedMonitor.monitor.push_token">
+          <template x-if="selectedMonitor.monitor.type === 'push'">
             <div class="table-wrap" style="padding: 12px 16px; margin-bottom: 16px;">
               <strong>Push URL</strong>
               <p class="card-meta" style="margin: 4px 0;">Request this URL when the job succeeds; add <code>?status=down&amp;msg=...</code> on failure. Treat it as a secret.</p>
-              <code style="word-break: break-all;" x-text="pushURL(selectedMonitor.monitor)"></code>
-              <button class="btn btn-sm" style="margin-left: 8px;" @click="copyPushURL(selectedMonitor.monitor)">Copy</button>
+              <template x-if="!pushPath">
+                <button class="btn btn-sm" @click="revealPushURL(selectedMonitor.monitor)">Show push URL</button>
+              </template>
+              <template x-if="pushPath">
+                <div>
+                  <code style="word-break: break-all;" x-text="pushURL()"></code>
+                  <button class="btn btn-sm" style="margin-left: 8px;" @click="copyPushURL()">Copy</button>
+                </div>
+              </template>
             </div>
           </template>
           <p class="card-meta" style="margin: 0 0 12px;" x-text="policyText(selectedMonitor.monitor)"></p>
@@ -1985,7 +1992,8 @@
               <div class="field">
                 <label for="monitor-grace">Grace</label>
                 <select id="monitor-grace" x-model="newMonitor.grace">
-                  <option value="60000">1 minute</option>
+                  <option value="0">Default (10% of interval, at least 5 minutes)</option>
+                  <option value="300000">5 minutes</option>
                   <option value="600000">10 minutes</option>
                   <option value="3600000">1 hour</option>
                   <option value="10800000">3 hours</option>
@@ -2970,6 +2978,9 @@
                   <label style="font-size: 13px;"><input type="checkbox" x-model="editor.smtp_allow_insecure"> Allow plaintext SMTP (trusted LAN relay only)</label>
                 </div>
               </template>
+              <template x-if="editor.type !== 'email'">
+                <label style="font-size: 13px; display: block; margin-top: 8px;"><input type="checkbox" x-model="editor.allow_internal"> Allow an internal address (loopback, private network, Tailscale). Off by default: such targets are refused, as for monitors.</label>
+              </template>
               <div class="form-group" style="margin-top: 12px;">
                 <label class="form-label">Receives</label>
                 <div style="display: flex; gap: 14px; font-size: 13px; flex-wrap: wrap;">
@@ -3036,6 +3047,7 @@
             <button class="btn btn-primary" @click="addHeartbeat()">Add receiver</button>
           </div>
           <p class="card-meta" style="margin: 4px 0 0;" x-text="presetHelp()"></p>
+          <label style="font-size: 13px; display: block; margin-top: 4px;"><input type="checkbox" x-model="hbDraft.allow_internal"> Receiver is on an internal address (private network or Tailscale)</label>
           <div class="form-group" style="max-width: 260px; margin-top: 8px;">
             <label class="form-label">Ping every (minutes)</label>
             <div class="form-row" style="gap: 8px;">

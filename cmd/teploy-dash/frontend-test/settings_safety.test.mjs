@@ -62,3 +62,20 @@ test('D06 tail: capability editor saves an explicit custom set and retains faile
  page.editCapabilities(user);h.respond(()=>response({error:'unavailable'},{raw:true,status:503}));
  await page.saveCapabilities();assert.ok(page.capabilityEditor);assert.equal(page.capabilityEditor.saving,false);
 });
+
+test('Alerts v2: Ship placeholder names the incidents intake; allow_internal is sent for URL channels',async()=>{
+ const h=harness('/settings'),page=h.page('alertsSettings');
+ assert.ok(page.urlPlaceholder('ship').endsWith('/api/incidents/intake/dash'));
+ h.respond((url,options)=>response(options.method==='PUT'?{id:'akiroo'}:{channels:[]}));
+ page.newChannel('webhook');page.editor.url='https://100.64.0.9/hooks/dash';page.editor.allow_internal=true;
+ await page.saveChannel();
+ assert.equal(h.requests.filter(r=>r.method==='PUT').at(-1).body.allow_internal,true);
+});
+
+test('Alerts v2: the push URL is read from the gated endpoint, not the monitor record',async()=>{
+ const h=harness('/monitors/p1'),page=h.page('monitorsPage');
+ h.respond(url=>response({path:'/api/push/'+'ab'.repeat(32)},{raw:true}));
+ await page.revealPushURL({id:'p1',type:'push'});
+ assert.equal(h.requests.at(-1).url,'/api/monitors/p1/push-url');
+ assert.ok(page.pushURL().endsWith('/api/push/'+'ab'.repeat(32)));
+});

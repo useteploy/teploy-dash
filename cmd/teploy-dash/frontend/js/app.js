@@ -3259,7 +3259,7 @@ document.addEventListener('alpine:init', () => {
       help: 'Channel settings > Integrations > Webhooks > New webhook > Copy URL.' },
     webhook: { label: 'Webhook', url: 'Receiver URL', placeholder: 'https://receiver.example.com/teploy',
       help: 'Receives the signed Event v2 JSON (X-Teploy-Signature, X-Teploy-Delivery). Slack and Discord URLs will not work here; use their channel types.' },
-    ship: { label: 'Teploy Ship', url: 'Ship intake URL', placeholder: 'https://ship.example.com/api/intake/dash',
+    ship: { label: 'Teploy Ship', url: 'Ship intake URL', placeholder: 'https://ship.example.com/api/incidents/intake/dash',
       help: 'Ship opens and closes incidents from these alerts. Use the same secret as SHIP_DASH_INTAKE_SECRET.' },
     email: { label: 'Email', url: '', placeholder: '', help: '' },
   };
@@ -3284,7 +3284,7 @@ document.addEventListener('alpine:init', () => {
   Alpine.data('alertsSettings', () => ({
     channels: [], heartbeats: [], publicURL: '', heartbeatInterval: 5,
     loadError: null, editor: null, saving: false, testing: '', testResults: {},
-    newType: 'ntfy', hbPreset: 'healthchecks', hbDraft: { url: '' },
+    newType: 'ntfy', hbPreset: 'healthchecks', hbDraft: { url: '', allow_internal: false },
     allKinds: ['incident_opened', 'incident_repeat', 'incident_recovered'],
     heartbeatPresets: HEARTBEAT_PRESETS,
 
@@ -3330,7 +3330,7 @@ document.addEventListener('alpine:init', () => {
       const suffix = Math.random().toString(16).slice(2, 8);
       this.editor = { isNew: true, id: `${type}-${suffix}`, type, name: '', url: '', urlSet: false, urlHint: '',
         secretSet: false, secretMode: 'replace', secretDraft: '', tokenSet: false, tokenMode: 'replace', tokenDraft: '',
-        passSet: false, passMode: 'replace', passDraft: '', kinds: [],
+        passSet: false, passMode: 'replace', passDraft: '', kinds: [], allow_internal: false,
         smtp_host: '', smtp_port: 587, smtp_user: '', email_to: '', email_from: '', smtp_allow_insecure: false };
     },
 
@@ -3340,7 +3340,7 @@ document.addEventListener('alpine:init', () => {
         secretSet: !!ch.secret_set, secretMode: ch.secret_set ? 'keep' : 'replace', secretDraft: '',
         tokenSet: !!ch.token_set, tokenMode: ch.token_set ? 'keep' : 'replace', tokenDraft: '',
         passSet: !!ch.smtp_pass_set, passMode: ch.smtp_pass_set ? 'keep' : 'replace', passDraft: '',
-        kinds: [...(ch.kinds || [])],
+        kinds: [...(ch.kinds || [])], allow_internal: !!ch.allow_internal,
         smtp_host: ch.smtp_host || '', smtp_port: ch.smtp_port || 587, smtp_user: ch.smtp_user || '',
         email_to: ch.email_to || '', email_from: ch.email_from || '', smtp_allow_insecure: !!ch.smtp_allow_insecure };
     },
@@ -3355,6 +3355,7 @@ document.addEventListener('alpine:init', () => {
     channelBody() {
       const e = this.editor;
       const body = { name: e.name, kinds: [...e.kinds] };
+      if (e.type !== 'email') body.allow_internal = !!e.allow_internal;
       if (e.isNew) body.type = e.type;
       if (e.type === 'email') {
         Object.assign(body, { smtp_host: e.smtp_host, smtp_port: Number(e.smtp_port) || 0, smtp_user: e.smtp_user,
@@ -3427,8 +3428,8 @@ document.addEventListener('alpine:init', () => {
       if (!url) return;
       const id = `${this.hbPreset}-${Math.random().toString(16).slice(2, 8)}`;
       try {
-        const saved = await api.put(`/api/notifications/heartbeats/${encodeURIComponent(id)}`, { name: this.preset().label, url });
-        this.hbDraft = { url: '' };
+        const saved = await api.put(`/api/notifications/heartbeats/${encodeURIComponent(id)}`, { name: this.preset().label, url, allow_internal: !!this.hbDraft.allow_internal });
+        this.hbDraft = { url: '', allow_internal: false };
         if (saved && saved.warning) showToast(saved.warning, 'error');
         else showToast('Heartbeat receiver added', 'success');
         await this.load();
@@ -3539,8 +3540,11 @@ document.addEventListener('alpine:init', () => {
       allow_internal: false, // opt-in: allow this monitor to reach loopback/private/link-local/cloud-metadata targets
       // Alerts v2 policy: blank = the default (3 failures / 2 passes; push 1/1).
       fail_after: '', recover_after: '', repeat_every: '0',
-      push_interval: '86400000', grace: '600000',
+      push_interval: '86400000', grace: '0',
     },
+    // The push URL is fetched from the execute.mutate-gated endpoint; the
+    // monitor list and detail never carry the token for viewers.
+    pushPath: '',
 
     routeIdentity() { const r = Alpine.store('router'); return r.page === 'monitor-detail' ? (r.params.id || '') : ''; },
 
@@ -3576,6 +3580,7 @@ document.addEventListener('alpine:init', () => {
       this.selectedMonitor = null;
       this.detailError = null;
       this.testResult = null; // a test flash belongs to the monitor it ran on
+      this.pushPath = ''; // a revealed push URL belongs to the monitor it was read for
       if (this.detailId) await this.loadDetail();
     },
 
@@ -3653,7 +3658,7 @@ document.addEventListener('alpine:init', () => {
           fail_after: parseInt(this.newMonitor.fail_after) || 0,
           recover_after: parseInt(this.newMonitor.recover_after) || 0,
           repeat_every: (parseInt(this.newMonitor.repeat_every) || 0) * 1000000,
-          grace: push ? parseInt(this.newMonitor.grace) * 1000000 : 0,
+          grace: push ? (parseInt(this.newMonitor.grace) || 0) * 1000000 : 0,
           // Fleet ownership fields round-trip so an edit keeps them.
           app: this.newMonitor.app || '',
           server: this.newMonitor.server || '',
@@ -3745,7 +3750,7 @@ document.addEventListener('alpine:init', () => {
         recover_after: m.recover_after || '',
         repeat_every: String((m.repeat_every || 0) / 1000000),
         push_interval: m.type === 'push' ? String(m.interval / 1000000) : '86400000',
-        grace: m.type === 'push' ? String((m.grace || 0) / 1000000) : '600000',
+        grace: m.type === 'push' ? String((m.grace || 0) / 1000000) : '0',
         app: m.app || '', server: m.server || '', reachable: !!m.reachable,
       };
       if (m.type === 'push') { this.newMonitor.interval = '60000'; this.newMonitor.timeout = '10000'; }
@@ -3757,17 +3762,27 @@ document.addEventListener('alpine:init', () => {
         name: '', type: 'http', method: 'GET', target: '',
         interval: '60000', timeout: '10000', expected_status: '', allow_internal: false,
         enabled: true, fail_after: '', recover_after: '', repeat_every: '0',
-        push_interval: '86400000', grace: '600000',
+        push_interval: '86400000', grace: '0',
       };
     },
 
-    // Push monitors: the ping URL is Dash's own origin + the secret token.
-    pushURL(m) {
-      return (location.origin || '') + '/api/push/' + (m.push_token || '');
+    // Push monitors: the ping URL is Dash's own origin + the secret path,
+    // revealed on request by GET /api/monitors/{id}/push-url (editors only).
+    pushURL() {
+      return this.pushPath ? (location.origin || '') + this.pushPath : '';
     },
 
-    async copyPushURL(m) {
-      try { await navigator.clipboard.writeText(this.pushURL(m)); showToast('Push URL copied', 'success'); }
+    async revealPushURL(m) {
+      try {
+        const res = await rawFetch.get('/api/monitors/' + encodeURIComponent(m.id) + '/push-url');
+        this.pushPath = res.path || '';
+      } catch (e) {
+        showToast(e.message || 'You need edit access to see the push URL', 'error');
+      }
+    },
+
+    async copyPushURL() {
+      try { await navigator.clipboard.writeText(this.pushURL()); showToast('Push URL copied', 'success'); }
       catch { showToast('Copy failed; select the URL instead', 'error'); }
     },
 
