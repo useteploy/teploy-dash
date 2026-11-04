@@ -6,6 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -181,5 +184,84 @@ func TestDeliveryIDSeparatesKinds(t *testing.T) {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", "m", "down", at.UnixNano())))
 	if deliveryID(legacy) != hex.EncodeToString(h[:16]) {
 		t.Fatal("pre-v2 delivery id derivation changed (journaled ids would no longer dedupe)")
+	}
+}
+
+// A pending (retrying) open is superseded when its recovery is enqueued:
+// it never reaches a receiver after the recovery.
+func TestRecoverySupersedesPendingOpen(t *testing.T) {
+	dir := t.TempDir()
+	fail := true
+	var mu sync.Mutex
+	var sent []string
+	cs := &channelSender{outcome: func(channel string, n int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if fail {
+			return errors.New("receiver down")
+		}
+		return nil
+	}}
+	opts := twoChannelOptions(dir, cs)
+	opts.BackoffBase, opts.BackoffMax = 30*time.Millisecond, 30*time.Millisecond
+	ob, err := New(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob.Start()
+	defer ob.Stop(context.Background())
+	open := alert.Event{MonitorID: "m1", Status: "down", OccurredAt: time.Now(), Version: 2, Kind: alert.KindOpened, IncidentID: "inc_1"}
+	ob.Send(open)
+	waitFor(t, 5*time.Second, func() bool { d := ob.LatestForMonitor("m1"); return d != nil && d.Attempts >= 1 }, "open never attempted")
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	rec := open
+	rec.Kind, rec.Status, rec.OccurredAt = alert.KindRecovered, "up", time.Now().Add(time.Second)
+	ob.Send(rec)
+	waitFor(t, 5*time.Second, func() bool {
+		for _, d := range ob.History(0) {
+			if d.Kind == alert.KindRecovered && d.Status == StatusDelivered {
+				return true
+			}
+		}
+		return false
+	}, "recovery never delivered")
+	time.Sleep(80 * time.Millisecond)
+	for _, ev := range cs.channelEvents()[2:] {
+		if ev.Kind == alert.KindOpened {
+			t.Fatal("open was retried after its recovery was enqueued")
+		}
+	}
+	for _, d := range ob.History(0) {
+		if d.Kind == alert.KindOpened && d.Status != StatusSuperseded {
+			t.Fatalf("open status = %s, want superseded", d.Status)
+		}
+	}
+	_ = sent
+}
+
+// Stored and served error text passes through Redact.
+func TestRedactAppliesToStoredAndServedErrors(t *testing.T) {
+	dir := t.TempDir()
+	cs := &channelSender{outcome: func(string, int) error {
+		return errors.New(`Post "https://hooks.slack.com/services/T/B/SECRET": dial tcp: no such host`)
+	}}
+	opts := twoChannelOptions(dir, cs)
+	opts.MaxAttempts = 1
+	opts.Redact = func(s string) string { return strings.ReplaceAll(s, "/services/T/B/SECRET", "/...") }
+	ob, _ := New(dir, opts)
+	ob.Start()
+	defer ob.Stop(context.Background())
+	ob.Send(testEvent("m1", "down", time.Now()))
+	waitFor(t, 5*time.Second, func() bool { d := ob.LatestForMonitor("m1"); return d != nil && d.Status == StatusDeadLettered }, "never dead-lettered")
+	d := ob.LatestForMonitor("m1")
+	raw := fmt.Sprintf("%+v %+v", d, ob.ChannelHealth())
+	if strings.Contains(raw, "SECRET") {
+		t.Fatalf("secret leaked: %s", raw)
+	}
+	journal, _ := os.ReadFile(filepath.Join(dir, journalName))
+	if strings.Contains(string(journal), "SECRET") {
+		t.Fatal("secret persisted in the journal")
 	}
 }

@@ -42,6 +42,11 @@ const (
 	// was held (maintenance, deploy lock, a running operation, a silence)
 	// and is journaled so the hold is visible in delivery history.
 	StatusSuppressed = "suppressed"
+	// StatusSuperseded is a pending open/reminder dropped because its
+	// incident's recovery was enqueued first: a retried open must never
+	// reach a receiver AFTER its own recovery (it would reopen a closed
+	// card).
+	StatusSuperseded = "superseded"
 )
 
 // Event sources sharing one outbox (D08): the label scopes delivery-status
@@ -163,6 +168,10 @@ type Options struct {
 	// leg that acknowledges. Both drive channel-health alerts (plan P3.6).
 	OnDeadLetter func(channel string, ev alert.Event, lastError string)
 	OnDelivered  func(channel string, ev alert.Event)
+	// Redact scrubs credentials from delivery error text, applied when an
+	// error is stored and again when records are read (journals written
+	// before redaction existed). Nil = identity.
+	Redact func(string) string
 }
 
 func (o Options) withDefaults() Options {
@@ -310,8 +319,26 @@ func (o *Outbox) Send(ev alert.Event) {
 	rec := &Record{ID: id, Event: ev, Status: StatusPending, NextAttemptAt: now, CreatedAt: now}
 	o.records[id] = rec
 	o.order = append(o.order, id)
+	var superseded []*Record
+	if ev.Kind == alert.KindRecovered && ev.IncidentID != "" {
+		for _, other := range o.records {
+			if other.ID == id || other.Status != StatusPending || other.Event.IncidentID != ev.IncidentID {
+				continue
+			}
+			if k := other.Event.Kind; k == alert.KindOpened || k == alert.KindRepeat {
+				other.Status = StatusSuperseded
+				other.NextAttemptAt = time.Time{}
+				other.Note = "superseded: the incident recovered before this alert was delivered"
+				cp := *other
+				superseded = append(superseded, &cp)
+			}
+		}
+	}
 	o.mu.Unlock()
 
+	for _, sup := range superseded {
+		o.persistQuiet(sup)
+	}
 	if err := o.persist(rec); err != nil {
 		// Loud, visible, delivery still proceeds: degraded durability (a
 		// restart may re-send), never a silently lost alert.
@@ -477,7 +504,7 @@ func (o *Outbox) attempt(snap *Record) {
 			delivered = append(delivered, out.channel)
 		} else {
 			st.Status = StatusPending
-			st.LastError = out.err.Error()
+			st.LastError = o.redact(out.err.Error())
 			if d := alert.RetryAfter(out.err); d > retryAfter {
 				retryAfter = d
 			}
@@ -487,7 +514,7 @@ func (o *Outbox) attempt(snap *Record) {
 
 	switch {
 	case cfgErr != nil:
-		rec.LastError = deliveryErr.Error()
+		rec.LastError = o.redact(deliveryErr.Error())
 	case rec.Channels != nil:
 		// Record-level error = the first failing leg this round (stable order).
 		pending := 0
@@ -522,7 +549,7 @@ func (o *Outbox) attempt(snap *Record) {
 			o.persistQuiet(&snapshot)
 			return
 		}
-		rec.LastError = deliveryErr.Error()
+		rec.LastError = o.redact(deliveryErr.Error())
 	}
 
 	deadLegs := map[string]string{}
@@ -574,6 +601,13 @@ func (o *Outbox) notify(delivered []string, dead map[string]string, ev alert.Eve
 			o.opts.OnDeadLetter(ch, ev, dead[ch])
 		}
 	}
+}
+
+func (o *Outbox) redact(s string) string {
+	if o.opts.Redact == nil {
+		return s
+	}
+	return o.opts.Redact(s)
 }
 
 func (o *Outbox) persistQuiet(rec *Record) {
@@ -714,7 +748,7 @@ func (o *Outbox) latest(id string, sourceOK func(string) bool) *DeliveryStatus {
 	if best == nil {
 		return nil
 	}
-	return statusOf(best)
+	return o.statusOf(best)
 }
 
 // History lists the newest retained records first (delivered, pending,
@@ -725,7 +759,7 @@ func (o *Outbox) History(limit int) []DeliveryStatus {
 	out := make([]DeliveryStatus, 0, len(o.order))
 	for i := len(o.order) - 1; i >= 0; i-- {
 		if rec := o.records[o.order[i]]; rec != nil {
-			out = append(out, *statusOf(rec))
+			out = append(out, *o.statusOf(rec))
 		}
 		if limit > 0 && len(out) >= limit {
 			break
@@ -756,7 +790,7 @@ func (o *Outbox) ChannelHealth() map[string]ChannelHealth {
 				h.DeadLettered++
 				if !leg.LastAttemptAt.Before(h.LastDeadLetterAt) {
 					h.LastDeadLetterAt = leg.LastAttemptAt
-					h.LastError = leg.LastError
+					h.LastError = o.redact(leg.LastError)
 				}
 			default:
 				h.Pending++
@@ -767,12 +801,12 @@ func (o *Outbox) ChannelHealth() map[string]ChannelHealth {
 	return out
 }
 
-func statusOf(best *Record) *DeliveryStatus {
+func (o *Outbox) statusOf(best *Record) *DeliveryStatus {
 	status := &DeliveryStatus{
 		ID:            best.ID,
 		Status:        best.Status,
 		Attempts:      best.Attempts,
-		LastError:     best.LastError,
+		LastError:     o.redact(best.LastError),
 		LastAttemptAt: best.LastAttemptAt,
 		NextAttemptAt: best.NextAttemptAt,
 		EventStatus:   best.Event.Status,
@@ -791,7 +825,7 @@ func statusOf(best *Record) *DeliveryStatus {
 			status.Channels[channel] = ChannelStatus{
 				Status:        st.Status,
 				Attempts:      st.Attempts,
-				LastError:     st.LastError,
+				LastError:     o.redact(st.LastError),
 				LastAttemptAt: st.LastAttemptAt,
 			}
 		}
