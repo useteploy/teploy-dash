@@ -38,6 +38,10 @@ const (
 	StatusPending      = "pending"
 	StatusDelivered    = "delivered"
 	StatusDeadLettered = "dead_lettered"
+	// StatusSuppressed is a terminal record that was never sent: the alert
+	// was held (maintenance, deploy lock, a running operation, a silence)
+	// and is journaled so the hold is visible in delivery history.
+	StatusSuppressed = "suppressed"
 )
 
 // Event sources sharing one outbox (D08): the label scopes delivery-status
@@ -48,6 +52,7 @@ const (
 const (
 	SourceMonitor     = alert.SourceMonitor
 	SourceRestoreTest = alert.SourceRestoreTest
+	SourceHeartbeat   = alert.SourceHeartbeat
 )
 
 // Sender delivers one event synchronously; a nil error means every
@@ -90,6 +95,8 @@ type Record struct {
 	// semantics (each retry re-sends every configured channel), and once
 	// such a record delivers it stays delivered exactly as before.
 	Channels map[string]ChannelRecord `json:"channels,omitempty"`
+	// Note explains a suppressed record (what held it).
+	Note string `json:"note,omitempty"`
 }
 
 // ChannelStatus is the read-only view of one channel leg.
@@ -111,6 +118,26 @@ type DeliveryStatus struct {
 	EventStatus   string                   `json:"event_status"`
 	OccurredAt    time.Time                `json:"occurred_at"`
 	Channels      map[string]ChannelStatus `json:"channels,omitempty"`
+	// History fields (delivery-history listing).
+	Kind        string    `json:"kind,omitempty"`
+	Source      string    `json:"source,omitempty"`
+	RuleID      string    `json:"rule_id,omitempty"`
+	RuleName    string    `json:"rule_name,omitempty"`
+	IncidentID  string    `json:"incident_id,omitempty"`
+	Note        string    `json:"note,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+}
+
+// ChannelHealth summarizes one channel's retained delivery history (plan
+// P3.6): how many legs delivered, are pending, and dead-lettered, and the
+// most recent of each outcome.
+type ChannelHealth struct {
+	Delivered        int       `json:"delivered"`
+	Pending          int       `json:"pending"`
+	DeadLettered     int       `json:"dead_lettered"`
+	LastDeliveredAt  time.Time `json:"last_delivered_at,omitempty"`
+	LastDeadLetterAt time.Time `json:"last_dead_letter_at,omitempty"`
+	LastError        string    `json:"last_error,omitempty"`
 }
 
 // Options configures an Outbox. Zero fields take the documented defaults.
@@ -131,6 +158,11 @@ type Options struct {
 	// MaxRetained bounds the record count kept after compaction (both
 	// delivered and dead-lettered history for visibility).
 	MaxRetained int
+	// OnDeadLetter is called (outside the outbox lock) once per channel leg
+	// that dead-letters, with the record's event. OnDelivered is called per
+	// leg that acknowledges. Both drive channel-health alerts (plan P3.6).
+	OnDeadLetter func(channel string, ev alert.Event, lastError string)
+	OnDelivered  func(channel string, ev alert.Event)
 }
 
 func (o Options) withDefaults() Options {
@@ -239,10 +271,23 @@ func lastLineIndex(s string) int {
 // monitor + status + occurrence time. The runner enqueues once per
 // transition, so a repeated Send of the same transition (or a journal
 // replay after restart) maps to one delivery.
+//
+// v2 events add the kind, incident and routing into the derivation: a
+// repeat and a recovery of one incident, or the per-channel copies of one
+// channel-health alert, are distinct deliveries. Pre-v2 events keep the
+// original derivation so journaled ids stay stable.
 func deliveryID(ev alert.Event) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", ev.MonitorID, ev.Status, ev.OccurredAt.UnixNano())))
+	key := fmt.Sprintf("%s|%s|%d", ev.MonitorID, ev.Status, ev.OccurredAt.UnixNano())
+	if ev.Version >= 2 {
+		key = fmt.Sprintf("v2|%s|%s|%s|%s|%s|%d|%v|%v|%s", ev.Source, ev.MonitorID, ev.Kind, ev.Reason, ev.IncidentID,
+			ev.OccurredAt.UnixNano(), ev.OnlyChannels, ev.ExcludeChannels, ev.Audience)
+	}
+	h := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(h[:16])
 }
+
+// DeliveryID exposes the deterministic id an event would be journaled under.
+func DeliveryID(ev alert.Event) string { return deliveryID(ev) }
 
 // Send enqueues an event for durable delivery (deduped by delivery id). It
 // is the monitor.Alerter contract. With no channels configured AND the
@@ -251,7 +296,7 @@ func deliveryID(ev alert.Event) string {
 // still enqueues — the attempt will fail loudly and the failure surfaces.
 func (o *Outbox) Send(ev alert.Event) {
 	cfg, cfgErr := o.currentConfig()
-	if cfgErr == nil && cfg.WebhookURL == "" && cfg.SMTPHost == "" && cfg.EmailTo == "" {
+	if cfgErr == nil && len(alert.ChannelsFor(cfg, ev)) == 0 {
 		return
 	}
 	id := deliveryID(ev)
@@ -273,6 +318,24 @@ func (o *Outbox) Send(ev alert.Event) {
 		log.Printf("[outbox] ALERT JOURNAL APPEND FAILED (delivery proceeds, restart may re-send): %v", err)
 	}
 	o.kick()
+}
+
+// RecordSuppressed journals an alert that was HELD rather than sent (plan
+// P3.2: suppressed events are recorded visibly). The record is terminal;
+// it is never delivered. Deduped by delivery id like Send.
+func (o *Outbox) RecordSuppressed(ev alert.Event, note string) {
+	id := deliveryID(ev)
+	o.mu.Lock()
+	if _, exists := o.records[id]; exists {
+		o.mu.Unlock()
+		return
+	}
+	now := time.Now().UTC()
+	rec := &Record{ID: id, Event: ev, Status: StatusSuppressed, CreatedAt: now, Note: note}
+	o.records[id] = rec
+	o.order = append(o.order, id)
+	o.mu.Unlock()
+	o.persistQuiet(rec)
 }
 
 // Start launches the delivery worker (single-threaded: alert volume is
@@ -372,7 +435,7 @@ func (o *Outbox) attempt(snap *Record) {
 			// an upgrade): every configured leg is undelivered, so this
 			// round re-sends them all — exactly what a legacy retry did —
 			// and the ledger built here makes FUTURE retries per-channel.
-			for _, channel := range alert.ConfiguredChannels(cfg) {
+			for _, channel := range alert.ChannelsFor(cfg, snap.Event) {
 				if snap.Channels[channel].Status == StatusDelivered {
 					continue // this leg already acknowledged
 				}
@@ -396,6 +459,11 @@ func (o *Outbox) attempt(snap *Record) {
 	}
 	rec.Attempts++
 	rec.LastAttemptAt = now
+	var retryAfter time.Duration
+	var delivered []string
+	if d := alert.RetryAfter(deliveryErr); d > retryAfter {
+		retryAfter = d
+	}
 	if len(outcomes) > 0 && rec.Channels == nil {
 		rec.Channels = make(map[string]ChannelRecord)
 	}
@@ -406,9 +474,13 @@ func (o *Outbox) attempt(snap *Record) {
 		if out.err == nil {
 			st.Status = StatusDelivered
 			st.LastError = ""
+			delivered = append(delivered, out.channel)
 		} else {
 			st.Status = StatusPending
 			st.LastError = out.err.Error()
+			if d := alert.RetryAfter(out.err); d > retryAfter {
+				retryAfter = d
+			}
 		}
 		rec.Channels[out.channel] = st
 	}
@@ -420,7 +492,7 @@ func (o *Outbox) attempt(snap *Record) {
 		// Record-level error = the first failing leg this round (stable order).
 		pending := 0
 		var firstErr string
-		for _, channel := range alert.ConfiguredChannels(cfg) {
+		for _, channel := range alert.ChannelsFor(cfg, snap.Event) {
 			st := rec.Channels[channel]
 			if st.Status != StatusDelivered {
 				pending++
@@ -436,6 +508,7 @@ func (o *Outbox) attempt(snap *Record) {
 			snapshot := *rec
 			o.mu.Unlock()
 			o.persistQuiet(&snapshot)
+			o.notify(delivered, nil, snapshot.Event)
 			return
 		}
 		rec.LastError = firstErr
@@ -452,6 +525,7 @@ func (o *Outbox) attempt(snap *Record) {
 		rec.LastError = deliveryErr.Error()
 	}
 
+	deadLegs := map[string]string{}
 	if rec.Attempts >= o.opts.MaxAttempts {
 		// Exhausted: dead-letter the record and every still-pending leg
 		// (delivered legs keep their delivered state — that history is the
@@ -462,16 +536,43 @@ func (o *Outbox) attempt(snap *Record) {
 			if st.Status == StatusPending {
 				st.Status = StatusDeadLettered
 				rec.Channels[channel] = st
+				deadLegs[channel] = st.LastError
 			}
 		}
 	} else {
-		rec.NextAttemptAt = now.Add(o.backoff(rec.Attempts))
+		// Honor the receiver's Retry-After when it asks for longer than our
+		// own backoff.
+		wait := o.backoff(rec.Attempts)
+		if retryAfter > wait {
+			wait = retryAfter
+		}
+		rec.NextAttemptAt = now.Add(wait)
 	}
 	snapshot := *rec
 	o.mu.Unlock()
 
 	if err := o.persist(&snapshot); err != nil {
 		log.Printf("[outbox] ALERT JOURNAL APPEND FAILED (state in memory only until next write): %v", err)
+	}
+	o.notify(delivered, deadLegs, snapshot.Event)
+}
+
+// notify runs the channel-health hooks outside the lock.
+func (o *Outbox) notify(delivered []string, dead map[string]string, ev alert.Event) {
+	if o.opts.OnDelivered != nil {
+		for _, ch := range delivered {
+			o.opts.OnDelivered(ch, ev)
+		}
+	}
+	if o.opts.OnDeadLetter != nil {
+		channels := make([]string, 0, len(dead))
+		for ch := range dead {
+			channels = append(channels, ch)
+		}
+		sort.Strings(channels)
+		for _, ch := range channels {
+			o.opts.OnDeadLetter(ch, ev, dead[ch])
+		}
 	}
 }
 
@@ -575,7 +676,7 @@ func (o *Outbox) compactLocked() error {
 // monitor id, or nil when it has none. Restore-test records share the
 // journal; the event source label keeps them from answering for a monitor.
 func (o *Outbox) LatestForMonitor(monitorID string) *DeliveryStatus {
-	return o.LatestForSource(SourceMonitor, monitorID)
+	return o.latest(monitorID, func(source string) bool { return source == SourceMonitor || source == SourceHeartbeat })
 }
 
 // LatestForRestoreTest returns the newest restore-test delivery record for
@@ -588,15 +689,22 @@ func (o *Outbox) LatestForRestoreTest(testID string) *DeliveryStatus {
 // LatestForSource is the source-scoped lookup. An empty source matches the
 // legacy default (monitor) so pre-label journals keep answering.
 func (o *Outbox) LatestForSource(source, id string) *DeliveryStatus {
+	return o.latest(id, func(s string) bool { return s == source })
+}
+
+func recordSource(rec *Record) string {
+	if rec.Event.Source == "" {
+		return SourceMonitor
+	}
+	return rec.Event.Source
+}
+
+func (o *Outbox) latest(id string, sourceOK func(string) bool) *DeliveryStatus {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var best *Record
 	for _, rec := range o.records {
-		recSource := rec.Event.Source
-		if recSource == "" {
-			recSource = SourceMonitor
-		}
-		if recSource != source || rec.Event.MonitorID != id {
+		if !sourceOK(recordSource(rec)) || rec.Event.MonitorID != id {
 			continue
 		}
 		if best == nil || rec.CreatedAt.After(best.CreatedAt) {
@@ -606,6 +714,60 @@ func (o *Outbox) LatestForSource(source, id string) *DeliveryStatus {
 	if best == nil {
 		return nil
 	}
+	return statusOf(best)
+}
+
+// History lists the newest retained records first (delivered, pending,
+// dead-lettered and suppressed), at most limit (0 = all).
+func (o *Outbox) History(limit int) []DeliveryStatus {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]DeliveryStatus, 0, len(o.order))
+	for i := len(o.order) - 1; i >= 0; i-- {
+		if rec := o.records[o.order[i]]; rec != nil {
+			out = append(out, *statusOf(rec))
+		}
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// ChannelHealth folds the retained records into per-channel health.
+func (o *Outbox) ChannelHealth() map[string]ChannelHealth {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := map[string]ChannelHealth{}
+	for _, id := range o.order {
+		rec := o.records[id]
+		if rec == nil {
+			continue
+		}
+		for channel, leg := range rec.Channels {
+			h := out[channel]
+			switch leg.Status {
+			case StatusDelivered:
+				h.Delivered++
+				if leg.LastAttemptAt.After(h.LastDeliveredAt) {
+					h.LastDeliveredAt = leg.LastAttemptAt
+				}
+			case StatusDeadLettered:
+				h.DeadLettered++
+				if !leg.LastAttemptAt.Before(h.LastDeadLetterAt) {
+					h.LastDeadLetterAt = leg.LastAttemptAt
+					h.LastError = leg.LastError
+				}
+			default:
+				h.Pending++
+			}
+			out[channel] = h
+		}
+	}
+	return out
+}
+
+func statusOf(best *Record) *DeliveryStatus {
 	status := &DeliveryStatus{
 		ID:            best.ID,
 		Status:        best.Status,
@@ -615,6 +777,13 @@ func (o *Outbox) LatestForSource(source, id string) *DeliveryStatus {
 		NextAttemptAt: best.NextAttemptAt,
 		EventStatus:   best.Event.Status,
 		OccurredAt:    best.Event.OccurredAt,
+		Kind:          best.Event.Wire().Kind,
+		Source:        recordSource(best),
+		RuleID:        best.Event.MonitorID,
+		RuleName:      best.Event.MonitorName,
+		IncidentID:    best.Event.IncidentID,
+		Note:          best.Note,
+		CreatedAt:     best.CreatedAt,
 	}
 	if len(best.Channels) > 0 {
 		status.Channels = make(map[string]ChannelStatus, len(best.Channels))
