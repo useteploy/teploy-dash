@@ -2,11 +2,14 @@ package alert
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -330,5 +333,64 @@ func TestHumanTextHasNoEmoji(t *testing.T) {
 				t.Fatalf("kind %s renders non-plain rune %U", kind, r)
 			}
 		}
+	}
+}
+
+// Transport errors never carry the destination URL (it is the credential).
+func TestDeliveryErrorRedactsURL(t *testing.T) {
+	cfg := Config{Channels: []Channel{{ID: "chat", Type: TypeSlack, URL: "http://127.0.0.1:9/services/T0/B0/SECRETPATH"}}}
+	err := New(cfg).SendChannel(v2Event(), "chat")
+	if err == nil || strings.Contains(err.Error(), "SECRETPATH") || !strings.Contains(err.Error(), "http://127.0.0.1:9/...") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := Redact("x https://ntfy.sh/topic-xyz y tok_secret", Config{Channels: []Channel{{ID: "p", Type: TypeNtfy, URL: "https://ntfy.sh/topic-xyz", Token: "tok_secret"}}}); strings.Contains(got, "topic-xyz") || strings.Contains(got, "tok_secret") {
+		t.Fatalf("Redact = %q", got)
+	}
+}
+
+// Slack mrkdwn control characters are escaped (no <!channel> injection).
+func TestSlackEscapesControlCharacters(t *testing.T) {
+	srv, got := captureServer(t, 200, nil)
+	ev := v2Event()
+	ev.MonitorName = "<!channel> & co"
+	New(Config{Channels: []Channel{{ID: "c", Type: TypeSlack, URL: srv.URL}}}).SendChannel(ev, "c")
+	var body map[string]string
+	json.Unmarshal((<-got).body, &body)
+	if strings.Contains(body["text"], "<!channel>") || !strings.Contains(body["text"], "&lt;!channel&gt; &amp; co") {
+		t.Fatalf("text = %q", body["text"])
+	}
+}
+
+func TestNtfyBodyTruncated(t *testing.T) {
+	srv, got := captureServer(t, 200, nil)
+	ev := v2Event()
+	ev.Message = strings.Repeat("é", 5000)
+	New(Config{Channels: []Channel{{ID: "p", Type: TypeNtfy, URL: srv.URL + "/t"}}}).SendChannel(ev, "p")
+	if b := (<-got).body; len(b) > 4000 || !utf8Valid(b) {
+		t.Fatalf("ntfy body %d bytes", len(b))
+	}
+}
+
+func utf8Valid(b []byte) bool { return strings.ToValidUTF8(string(b), "?") == string(b) }
+
+// The installed network guard applies to channels unless they opt in.
+func TestDialPolicyGuardsChannels(t *testing.T) {
+	srv, _ := captureServer(t, 200, nil)
+	SetDialPolicy(func(allow bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if !allow {
+				return nil, errors.New("blocked internal address")
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		}
+	})
+	defer SetDialPolicy(nil)
+	cfg := Config{Channels: []Channel{{ID: "h", Type: TypeWebhook, URL: srv.URL}, {ID: "in", Type: TypeWebhook, URL: srv.URL, AllowInternal: true}}}
+	if err := New(cfg).SendChannel(v2Event(), "h"); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("guarded channel: %v", err)
+	}
+	if err := New(cfg).SendChannel(v2Event(), "in"); err != nil {
+		t.Fatalf("allow_internal channel: %v", err)
 	}
 }

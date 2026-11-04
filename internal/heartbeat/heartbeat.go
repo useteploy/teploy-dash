@@ -34,7 +34,8 @@ type Result struct {
 // Runner pings the configured receivers.
 type Runner struct {
 	configFn func() (alert.Config, error)
-	client   *http.Client
+	// client overrides the guarded alert client (tests).
+	client *http.Client
 
 	mu      sync.Mutex
 	results map[string]Result
@@ -44,7 +45,6 @@ type Runner struct {
 func New(configFn func() (alert.Config, error)) *Runner {
 	return &Runner{
 		configFn: configFn,
-		client:   &http.Client{Timeout: pingTimeout},
 		results:  map[string]Result{},
 	}
 }
@@ -95,8 +95,15 @@ func (r *Runner) Ping(ctx context.Context, tgt alert.HeartbeatTarget) Result {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tgt.URL, nil)
 	if err == nil {
 		req.Header.Set("User-Agent", "teploy-dash-heartbeat")
+		// The alert client: network guard (unless the receiver opts into
+		// internal addresses), 10s timeout, redirects refused — a ping that
+		// is redirected elsewhere did not reach the receiver.
+		client := r.client
+		if client == nil {
+			client = alert.ClientFor(tgt.AllowInternal)
+		}
 		var resp *http.Response
-		resp, err = r.client.Do(req)
+		resp, err = client.Do(req)
 		if err == nil {
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 16<<10))
 			resp.Body.Close()
@@ -109,7 +116,9 @@ func (r *Runner) Ping(ctx context.Context, tgt alert.HeartbeatTarget) Result {
 		}
 	}
 	if err != nil {
-		res.Error = err.Error()
+		// The ping URL is the credential (a healthchecks UUID, a push
+		// token): never store or show it in an error.
+		res.Error = alert.RedactError(err, tgt.URL).Error()
 	}
 	r.mu.Lock()
 	r.results[tgt.ID] = res

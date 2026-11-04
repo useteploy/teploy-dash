@@ -53,7 +53,7 @@ func TestPingTimesOut(t *testing.T) {
 	defer slow.Close()
 	defer close(block)
 	r := New(nil)
-	r.client.Timeout = 50 * time.Millisecond
+	r.client = &http.Client{Timeout: 50 * time.Millisecond}
 	res := r.Ping(context.Background(), alert.HeartbeatTarget{ID: "s", URL: slow.URL})
 	if res.OK || res.Error == "" {
 		t.Fatalf("slow receiver = %+v", res)
@@ -88,5 +88,26 @@ func TestSelfHostedWarning(t *testing.T) {
 	}
 	if w := SelfHostedWarning(context.Background(), "https://hc-ping.com/uuid"); w != "" {
 		t.Fatalf("external receiver warned: %q", w)
+	}
+}
+
+// A transport error never carries the ping URL (it is the credential).
+func TestPingErrorRedactsURL(t *testing.T) {
+	r := New(nil)
+	res := r.Ping(context.Background(), alert.HeartbeatTarget{ID: "hc", URL: "http://127.0.0.1:9/ping/secret-uuid-1234"})
+	if res.OK || res.Error == "" || strings.Contains(res.Error, "secret-uuid-1234") {
+		t.Fatalf("error = %q", res.Error)
+	}
+}
+
+// Redirects are not followed: the ping did not reach the receiver.
+func TestPingDoesNotFollowRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer target.Close()
+	redir := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusFound))
+	defer redir.Close()
+	res := New(nil).Ping(context.Background(), alert.HeartbeatTarget{ID: "r", URL: redir.URL})
+	if res.OK || res.Status != http.StatusFound {
+		t.Fatalf("redirect result = %+v", res)
 	}
 }

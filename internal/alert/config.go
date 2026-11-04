@@ -85,6 +85,10 @@ type Channel struct {
 	EmailTo           string `json:"email_to,omitempty"`
 	EmailFrom         string `json:"email_from,omitempty"`
 	SMTPAllowInsecure bool   `json:"smtp_allow_insecure,omitempty"`
+	// AllowInternal lets this channel reach loopback/private/CGNAT
+	// (tailnet) addresses — the monitor network guard's opt-in, for a
+	// receiver on your own network (an Akiroo or ntfy over Tailscale).
+	AllowInternal bool `json:"allow_internal,omitempty"`
 }
 
 // Human reports whether the channel receives rendered text (not the JSON
@@ -117,6 +121,9 @@ type HeartbeatTarget struct {
 	ID   string `json:"id"`
 	Name string `json:"name,omitempty"`
 	URL  string `json:"url"`
+	// AllowInternal opts this receiver out of the network guard (another
+	// Dash or a Kuma on your tailnet).
+	AllowInternal bool `json:"allow_internal,omitempty"`
 }
 
 // Config is the whole notifications.json document.

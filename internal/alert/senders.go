@@ -2,15 +2,100 @@ package alert
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// DialPolicy builds the network-policy dialer for a destination (the
+// monitor package's DASH-010 guard: loopback, private, link-local,
+// CGNAT/tailnet and metadata addresses refused unless allowInternal).
+// Injected at startup to avoid an import cycle; nil = no guard (tests).
+type DialPolicy func(allowInternal bool) func(ctx context.Context, network, addr string) (net.Conn, error)
+
+var (
+	policyMu      sync.RWMutex
+	policyClients map[bool]*http.Client
+)
+
+// SetDialPolicy installs the guard for every alert channel and heartbeat
+// request. Redirects stay refused.
+func SetDialPolicy(p DialPolicy) {
+	policyMu.Lock()
+	defer policyMu.Unlock()
+	if p == nil {
+		policyClients = nil
+		return
+	}
+	policyClients = map[bool]*http.Client{}
+	for _, allow := range []bool{false, true} {
+		policyClients[allow] = &http.Client{
+			Timeout:       webhookClient.Timeout,
+			CheckRedirect: webhookClient.CheckRedirect,
+			Transport:     &http.Transport{DialContext: p(allow), IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: 10 * time.Second},
+		}
+	}
+}
+
+// ClientFor returns the HTTP client for a destination (guarded when a
+// policy is installed). Exported for the heartbeat runner.
+func ClientFor(allowInternal bool) *http.Client {
+	policyMu.RLock()
+	defer policyMu.RUnlock()
+	if policyClients != nil {
+		return policyClients[allowInternal]
+	}
+	return webhookClient
+}
+
+// RedactError rewrites a transport error so the destination URL — for
+// Slack/Discord/ntfy/webhook paths and heartbeat ping URLs, the URL IS the
+// credential — appears only as its hint (scheme://host/...). Go's
+// *url.Error text embeds the full URL; stored as a delivery's last error it
+// would reach every metadata reader and the channel-health alert.
+func RedactError(err error, raw string) error {
+	if err == nil || raw == "" {
+		return err
+	}
+	msg := strings.ReplaceAll(err.Error(), raw, URLHint(raw))
+	if msg == err.Error() {
+		return err
+	}
+	return errors.New(msg)
+}
+
+// Redact scrubs every credential the config holds (channel URLs that are
+// credentials, secrets, tokens, SMTP passwords, heartbeat URLs) from a
+// stored text, for records written before redaction existed.
+func Redact(text string, cfg Config) string {
+	if text == "" {
+		return text
+	}
+	for _, ch := range cfg.Migrate().Channels {
+		if ch.URL != "" {
+			text = strings.ReplaceAll(text, ch.URL, URLHint(ch.URL))
+		}
+		for _, secret := range []string{ch.Secret, ch.Token, ch.SMTPPass} {
+			if len(secret) >= 4 {
+				text = strings.ReplaceAll(text, secret, "[redacted]")
+			}
+		}
+	}
+	for _, hb := range cfg.Heartbeats {
+		if hb.URL != "" {
+			text = strings.ReplaceAll(text, hb.URL, URLHint(hb.URL))
+		}
+	}
+	return text
+}
 
 // RetryAfterError is a delivery refused with an explicit back-off hint
 // (HTTP 429/503 Retry-After, Discord's retry_after). The outbox schedules
@@ -64,10 +149,11 @@ func parseRetryAfter(v string, now time.Time) time.Duration {
 // else (redirects included — see webhookClient) is a failure, with the
 // Retry-After hint attached on 429/503. extraRetry parses a body-carried
 // hint (Discord).
-func post(req *http.Request, extraRetry func([]byte) time.Duration) error {
-	resp, err := webhookClient.Do(req)
+func post(req *http.Request, allowInternal bool, extraRetry func([]byte) time.Duration) error {
+	dest := req.URL.String()
+	resp, err := ClientFor(allowInternal).Do(req)
 	if err != nil {
-		return err
+		return RedactError(err, dest)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 300 && resp.StatusCode >= 200 {
@@ -117,13 +203,15 @@ func sendWebhook(ch Channel, event Event) error {
 		req.Header.Set("X-Teploy-Delivery", event.DeliveryID)
 	}
 	signWebhook(req, ch.Secret, payload)
-	return post(req, nil)
+	return post(req, ch.AllowInternal, nil)
 }
 
 // sendSlack delivers {"text": ...}: the Slack incoming-webhook shape, which
 // Mattermost, Rocket.Chat and Google Chat accept unchanged.
 func sendSlack(ch Channel, event Event) error {
-	text := Title(event) + "\n" + Body(event)
+	// Slack's mrkdwn treats &, < and > as control characters: an unescaped
+	// "<!channel>" in a monitor name or error message would ping everyone.
+	text := slackEscape(Title(event) + "\n" + Body(event))
 	payload, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return err
@@ -132,8 +220,29 @@ func sendSlack(ch Channel, event Event) error {
 	if err != nil {
 		return err
 	}
-	return post(req, nil)
+	return post(req, ch.AllowInternal, nil)
 }
+
+func slackEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
+}
+
+// ntfyMaxBody keeps the message under ntfy's 4096-byte limit (larger bodies
+// are turned into attachments or refused).
+const ntfyMaxBody = 4000
+
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n - 3
+	for cut > 0 && !utf8RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
+func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
 // Discord limits: message content 2000 chars, embed title 256, description
 // 4096 — the description is held to 2000 so the whole message reads like one
@@ -187,7 +296,7 @@ func sendDiscord(ch Channel, event Event) error {
 	if err != nil {
 		return err
 	}
-	return post(req, func(body []byte) time.Duration {
+	return post(req, ch.AllowInternal, func(body []byte) time.Duration {
 		var rl struct {
 			RetryAfter float64 `json:"retry_after"`
 		}
@@ -234,7 +343,7 @@ func ntfyPriority(event Event) string {
 
 // sendNtfy POSTs the text body to <server>/<topic> with ntfy's headers.
 func sendNtfy(ch Channel, event Event, link string) error {
-	req, err := http.NewRequest(http.MethodPost, ch.URL, strings.NewReader(Body(event)))
+	req, err := http.NewRequest(http.MethodPost, ch.URL, strings.NewReader(truncateBytes(Body(event), ntfyMaxBody)))
 	if err != nil {
 		return err
 	}
@@ -250,7 +359,7 @@ func sendNtfy(ch Channel, event Event, link string) error {
 	if ch.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+sanitizeHeader(ch.Token))
 	}
-	return post(req, nil)
+	return post(req, ch.AllowInternal, nil)
 }
 
 // Title is the one-line human headline for an event.
