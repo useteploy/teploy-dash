@@ -119,13 +119,13 @@ type DeliveryStatus struct {
 	OccurredAt    time.Time                `json:"occurred_at"`
 	Channels      map[string]ChannelStatus `json:"channels,omitempty"`
 	// History fields (delivery-history listing).
-	Kind        string    `json:"kind,omitempty"`
-	Source      string    `json:"source,omitempty"`
-	RuleID      string    `json:"rule_id,omitempty"`
-	RuleName    string    `json:"rule_name,omitempty"`
-	IncidentID  string    `json:"incident_id,omitempty"`
-	Note        string    `json:"note,omitempty"`
-	CreatedAt   time.Time `json:"created_at,omitempty"`
+	Kind       string    `json:"kind,omitempty"`
+	Source     string    `json:"source,omitempty"`
+	RuleID     string    `json:"rule_id,omitempty"`
+	RuleName   string    `json:"rule_name,omitempty"`
+	IncidentID string    `json:"incident_id,omitempty"`
+	Note       string    `json:"note,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
 }
 
 // ChannelHealth summarizes one channel's retained delivery history (plan
