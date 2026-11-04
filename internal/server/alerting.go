@@ -46,6 +46,9 @@ const alertHoldGrace = 2 * time.Minute
 // left behind by a crashed CLI must not hide an outage forever.
 const lockHoldCap = 30 * time.Minute
 
+// maintenanceHoldCap bounds how long maintenance mode alone holds alerts.
+const maintenanceHoldCap = 24 * time.Hour
+
 // operationAutoResolve closes a one-shot operation-failure incident when no
 // further attempt of the same kind on the same app follows.
 const operationAutoResolve = 24 * time.Hour
@@ -58,9 +61,10 @@ type alertingState struct {
 	heartbeat *heartbeat.Runner
 	pushLimit *rateLimiter
 
-	holdMu    sync.Mutex
-	lockFirst map[string]time.Time // first time a deploy lock was observed
-	flagLast  map[string]time.Time // last time maintenance/lock was observed
+	holdMu     sync.Mutex
+	lockFirst  map[string]time.Time // first time a deploy lock was observed
+	maintFirst map[string]time.Time // first time maintenance was observed
+	flagLast   map[string]time.Time // last time maintenance/lock was observed
 }
 
 func (s *Server) initAlerting(dataDir string) {
@@ -70,13 +74,25 @@ func (s *Server) initAlerting(dataDir string) {
 	a.pushLimit = newRateLimiter()
 	var errs []error
 	var err error
+	// A corrupt audit or silences file must not stop Dash from watching
+	// anything: set it aside (kept for inspection), log, start empty.
 	if a.audit, err = audit.Open(dataDir); err != nil {
-		errs = append(errs, fmt.Errorf("audit log: %w", err))
-		a.audit, _ = audit.Open("")
+		if aside := setAside(filepath.Join(dataDir, "audit.jsonl"), err); aside == nil {
+			a.audit, err = audit.Open(dataDir)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("audit log: %w", err))
+			a.audit, _ = audit.Open("")
+		}
 	}
 	if a.silences, err = openSilences(dataDir); err != nil {
-		errs = append(errs, fmt.Errorf("silences: %w", err))
-		a.silences, _ = openSilences("")
+		if aside := setAside(filepath.Join(dataDir, "silences.json"), err); aside == nil {
+			a.silences, err = openSilences(dataDir)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("silences: %w", err))
+			a.silences, _ = openSilences("")
+		}
 	}
 	opts := incident.Options{Dir: dataDir, HasChannels: s.alertChannelsConfigured, Hold: s.alertHold,
 		Silenced: s.alertSilenced, PublicURL: s.alertPublicURL}
@@ -88,6 +104,45 @@ func (s *Server) initAlerting(dataDir string) {
 	a.heartbeat = heartbeat.New(loadNotificationsConfig)
 	a.initErr = errors.Join(errs...)
 }
+
+// setAside renames an unreadable state file to <path>.corrupt-<unix> and
+// logs why; a nil return means the path is clear to recreate.
+func setAside(path string, cause error) error {
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	aside := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+	if err := os.Rename(path, aside); err != nil {
+		return err
+	}
+	log.Printf("[alerts] %s was unreadable (%v); moved to %s and starting empty", path, cause, aside)
+	return nil
+}
+
+// RedactAlertText scrubs every credential in the notification config from a
+// stored delivery error (outbox Options.Redact). The config is cached for a
+// few seconds: listings call this once per record.
+func RedactAlertText(text string) string {
+	if text == "" {
+		return text
+	}
+	redactMu.Lock()
+	if time.Since(redactAt) > 5*time.Second {
+		if cfg, err := loadNotificationsConfig(); err == nil {
+			redactCfg = cfg
+		}
+		redactAt = time.Now()
+	}
+	cfg := redactCfg
+	redactMu.Unlock()
+	return alert.Redact(text, cfg)
+}
+
+var (
+	redactMu  sync.Mutex
+	redactAt  time.Time
+	redactCfg alert.Config
+)
 
 // AlertTracker is the shared incident tracker (monitor and restore runners
 // feed it).
@@ -113,7 +168,18 @@ func (s *Server) RunAlerting(ctx context.Context) {
 		log.Printf("[alerts] notifications migration: %v", err)
 	}
 	if s.alerts.tracker != nil {
-		s.alerts.tracker.AnnounceUnannounced()
+		// Runners started (and seeded/adopted) before this runs: retire
+		// incidents whose rule is gone, then announce. On the first start
+		// with incident tracking, EndAdoption turns every outage that
+		// already existed into ONE summary instead of an alert each.
+		s.retireOrphanIncidents()
+		if s.alerts.tracker.Adopting() {
+			if n := s.alerts.tracker.EndAdoption(); n > 0 {
+				log.Printf("[alerts] first start with incident tracking: %d existing outage(s) announced as one summary", n)
+			}
+		} else {
+			s.alerts.tracker.AnnounceUnannounced()
+		}
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait() // the heartbeat loop ends with ctx; join it before returning
@@ -133,7 +199,45 @@ func (s *Server) RunAlerting(ctx context.Context) {
 		case <-t.C:
 			if s.alerts.tracker != nil {
 				s.alerts.tracker.Sweep()
+				// A held rule whose hold ended opens now, not at its next
+				// observation (which for a restore test may be a day away).
+				s.alerts.tracker.ReleaseHolds()
 			}
+		}
+	}
+}
+
+// retireOrphanIncidents closes open incidents whose rule no longer exists
+// (a monitor or restore test deleted while Dash was down, a channel removed
+// from the file by hand). Operation incidents are left to their own
+// recovery or auto-resolve.
+func (s *Server) retireOrphanIncidents() {
+	t := s.alerts.tracker
+	if t == nil {
+		return
+	}
+	cfg, cfgErr := loadNotificationsConfig()
+	for _, inc := range t.Open() {
+		gone := false
+		switch inc.Source {
+		case alert.SourceMonitor, alert.SourceHeartbeat:
+			if s.store != nil {
+				m, err := s.store.GetMonitor(inc.RuleID)
+				gone = err != nil || m == nil || !m.Enabled
+			}
+		case alert.SourceRestoreTest:
+			if s.store != nil {
+				rt, err := s.store.GetRestoreTest(inc.RuleID)
+				gone = err != nil || rt == nil || !rt.Enabled
+			}
+		case alert.SourceAudit:
+			if cfgErr == nil && strings.HasPrefix(inc.RuleID, "channel-") {
+				_, ok := cfg.Channel(strings.TrimPrefix(inc.RuleID, "channel-"))
+				gone = !ok
+			}
+		}
+		if gone {
+			t.Retire(inc.Key, "no longer monitored")
 		}
 	}
 }
@@ -317,6 +421,7 @@ type channelView struct {
 	EmailTo           string                `json:"email_to,omitempty"`
 	EmailFrom         string                `json:"email_from,omitempty"`
 	SMTPAllowInsecure bool                  `json:"smtp_allow_insecure,omitempty"`
+	AllowInternal     bool                  `json:"allow_internal,omitempty"`
 	Health            *outbox.ChannelHealth `json:"health,omitempty"`
 }
 
@@ -327,7 +432,7 @@ func viewChannel(ch alert.Channel, health map[string]outbox.ChannelHealth) chann
 	v := channelView{ID: ch.ID, Type: ch.Type, Name: ch.Name, URLSet: ch.URL != "", SecretSet: ch.Secret != "",
 		TokenSet: ch.Token != "", Kinds: append([]string{}, ch.Kinds...), Usable: ch.Usable(),
 		SMTPHost: ch.SMTPHost, SMTPPort: ch.SMTPPort, SMTPUser: ch.SMTPUser, SMTPPassSet: ch.SMTPPass != "",
-		EmailTo: ch.EmailTo, EmailFrom: ch.EmailFrom, SMTPAllowInsecure: ch.SMTPAllowInsecure}
+		EmailTo: ch.EmailTo, EmailFrom: ch.EmailFrom, SMTPAllowInsecure: ch.SMTPAllowInsecure, AllowInternal: ch.AllowInternal}
 	if alert.URLIsCredential(ch.Type) {
 		v.URLHint = alert.URLHint(ch.URL)
 	} else {
@@ -340,16 +445,17 @@ func viewChannel(ch alert.Channel, health map[string]outbox.ChannelHealth) chann
 }
 
 type heartbeatView struct {
-	ID      string            `json:"id"`
-	Name    string            `json:"name,omitempty"`
-	URLSet  bool              `json:"url_set"`
-	URLHint string            `json:"url_hint,omitempty"`
-	Last    *heartbeat.Result `json:"last,omitempty"`
-	Warning string            `json:"warning,omitempty"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name,omitempty"`
+	AllowInternal bool              `json:"allow_internal,omitempty"`
+	URLSet        bool              `json:"url_set"`
+	URLHint       string            `json:"url_hint,omitempty"`
+	Last          *heartbeat.Result `json:"last,omitempty"`
+	Warning       string            `json:"warning,omitempty"`
 }
 
 func (s *Server) viewHeartbeat(ctx context.Context, hb alert.HeartbeatTarget, results map[string]heartbeat.Result) heartbeatView {
-	v := heartbeatView{ID: hb.ID, Name: hb.Name, URLSet: hb.URL != "", URLHint: alert.URLHint(hb.URL),
+	v := heartbeatView{ID: hb.ID, Name: hb.Name, AllowInternal: hb.AllowInternal, URLSet: hb.URL != "", URLHint: alert.URLHint(hb.URL),
 		Warning: heartbeat.SelfHostedWarning(ctx, hb.URL)}
 	if r, ok := results[hb.ID]; ok {
 		v.Last = &r
@@ -580,6 +686,7 @@ type channelPatch struct {
 	EmailTo           *string   `json:"email_to"`
 	EmailFrom         *string   `json:"email_from"`
 	SMTPAllowInsecure *bool     `json:"smtp_allow_insecure"`
+	AllowInternal     *bool     `json:"allow_internal"`
 }
 
 func (p channelPatch) apply(ch *alert.Channel) {
@@ -606,6 +713,9 @@ func (p channelPatch) apply(ch *alert.Channel) {
 	}
 	if p.SMTPAllowInsecure != nil {
 		ch.SMTPAllowInsecure = *p.SMTPAllowInsecure
+	}
+	if p.AllowInternal != nil {
+		ch.AllowInternal = *p.AllowInternal
 	}
 	if p.Kinds != nil {
 		ch.Kinds = append([]string(nil), (*p.Kinds)...)
@@ -650,7 +760,7 @@ func (s *Server) channelCRUD(w http.ResponseWriter, r *http.Request, id string) 
 		if created {
 			action = "channel.create"
 		}
-		s.auditf(r, action, id, "type %s", ch.Type)
+		s.auditf(r, action, id, "type %s allow_internal=%v kinds=%v", ch.Type, ch.AllowInternal, ch.Kinds)
 		var health map[string]outbox.ChannelHealth
 		if s.outbox != nil {
 			health = s.outbox.ChannelHealth()
@@ -668,6 +778,10 @@ func (s *Server) channelCRUD(w http.ResponseWriter, r *http.Request, id string) 
 		if err != nil {
 			writeErrorStatus(w, err.Error(), code)
 			return
+		}
+		if s.alerts.tracker != nil {
+			// A deleted channel's health incident can never recover.
+			s.alerts.tracker.Retire("channel:"+id, "alert channel deleted")
 		}
 		s.auditf(r, "channel.delete", id, "")
 		writeData(w, map[string]bool{"deleted": true})
@@ -725,8 +839,9 @@ func (s *Server) heartbeatCRUD(w http.ResponseWriter, r *http.Request, id string
 	switch r.Method {
 	case http.MethodPut:
 		var patch struct {
-			Name *string `json:"name"`
-			URL  *string `json:"url"`
+			Name          *string `json:"name"`
+			URL           *string `json:"url"`
+			AllowInternal *bool   `json:"allow_internal"`
 		}
 		if err := strictDecode(r, &patch); err != nil {
 			writeError(w, "invalid request body")
@@ -751,6 +866,9 @@ func (s *Server) heartbeatCRUD(w http.ResponseWriter, r *http.Request, id string
 			}
 			if patch.URL != nil {
 				hb.URL = strings.TrimSpace(*patch.URL)
+			}
+			if patch.AllowInternal != nil {
+				hb.AllowInternal = *patch.AllowInternal
 			}
 			if err := alert.ValidateURL(hb.URL); err != nil {
 				return http.StatusBadRequest, err
@@ -882,7 +1000,8 @@ func (s *Server) OnChannelDeadLetter(channel string, ev alert.Event, lastErr str
 	if others == 0 {
 		return
 	}
-	t.Observe(channelRule(ch), false, time.Now(), fmt.Sprintf("deliveries to %s are failing (dead-lettered after retries): %s", channel, lastErr))
+	t.Observe(channelRule(ch), false, time.Now(),
+		fmt.Sprintf("deliveries to %s are failing (dead-lettered after retries): %s", channel, alert.Redact(lastErr, cfg)))
 }
 
 // OnChannelDelivered closes a channel-health incident once the channel
@@ -969,7 +1088,7 @@ func (s *Server) onOperationFinished(op *operation.Operation) {
 // each ends. The operation hold is CAPPED at grace + the operation's
 // timeout from its start, so a hung deploy cannot hide an outage; the lock
 // hold is capped at grace + lockHoldCap from first sighting. Maintenance is
-// a deliberate state and is not capped. Flags come from the fleet cache
+// deliberate and capped at maintenanceHoldCap (24h) from first sighting. Flags come from the fleet cache
 // (refreshed by page loads and the 5-minute fleet sweep), so a flag change
 // can take up to one sweep to apply.
 func (s *Server) alertHold(rule incident.Rule, now time.Time) (bool, string) {
@@ -977,7 +1096,9 @@ func (s *Server) alertHold(rule incident.Rule, now time.Time) (bool, string) {
 		return false, ""
 	}
 	if s.operations != nil {
-		for _, op := range s.operations.List("", "", 0) {
+		// Only live operations and those that finished within the grace can
+		// hold; older history is not cloned.
+		for _, op := range s.operations.ListLive(now.Add(-alertHoldGrace)) {
 			if op.Request.App != rule.App || (rule.Server != "" && op.Request.Server != rule.Server) {
 				continue
 			}
@@ -1001,13 +1122,28 @@ func (s *Server) alertHold(rule incident.Rule, now time.Time) (bool, string) {
 	if a.lockFirst == nil {
 		a.lockFirst, a.flagLast = map[string]time.Time{}, map[string]time.Time{}
 	}
+	if a.maintFirst == nil {
+		a.maintFirst = map[string]time.Time{}
+	}
 	if seen && !locked {
 		delete(a.lockFirst, key)
 	}
+	if seen && !maint {
+		delete(a.maintFirst, key)
+	}
 	switch {
 	case maint:
-		a.flagLast[key] = now
-		return true, rule.App + " is in maintenance"
+		// Deliberate, but not forever: a maintenance flag forgotten on for a
+		// day stops hiding the app's outages.
+		first, ok := a.maintFirst[key]
+		if !ok {
+			first = now
+			a.maintFirst[key] = first
+		}
+		if now.Sub(first) <= maintenanceHoldCap {
+			a.flagLast[key] = now
+			return true, rule.App + " is in maintenance"
+		}
 	case locked:
 		first, ok := a.lockFirst[key]
 		if !ok {
@@ -1293,12 +1429,22 @@ func (l *rateLimiter) allow(key string, limit int, window time.Duration, now tim
 	return w.count <= limit
 }
 
-// Push limits: per client address (also bounds token guessing) and per
-// token (a looping job cannot flood the check history).
+// Push limits: unknown-token MISSES per client address (bounds token
+// guessing without throttling one host that runs many jobs) and pings per
+// known token (a looping job cannot flood the check history).
 const (
-	pushPerIPPerMinute    = 60
-	pushPerTokenPerMinute = 12
+	pushMissesPerIPPerMinute = 30
+	pushPerTokenPerMinute    = 12
 )
+
+// exceeded reports whether key is over limit in its current window without
+// counting a hit.
+func (l *rateLimiter) exceeded(key string, limit int, window time.Duration, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.windows[key]
+	return w != nil && now.Sub(w.start) <= window && w.count >= limit
+}
 
 // handlePush is GET/POST/HEAD /api/push/<token>: unauthenticated and
 // capability-free by design, scoped by the monitor's secret token.
@@ -1316,6 +1462,12 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		s.alerts.pushLimit = newRateLimiter()
 	}
 	now := time.Now()
+	token := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/push/"), "/")
+	// Shape first: nothing is stored for a request that cannot be a token.
+	if s.monitor == nil || len(token) < 32 || len(token) > 128 {
+		jsonError(w, "not found", http.StatusNotFound)
+		return
+	}
 	ip := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(ip); err == nil {
 		ip = host
@@ -1323,15 +1475,21 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	if s.gate != nil {
 		ip = s.gate.clientIP(r)
 	}
-	token := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/push/"), "/")
-	if !s.alerts.pushLimit.allow("ip:"+ip, pushPerIPPerMinute, time.Minute, now) ||
-		(token != "" && !s.alerts.pushLimit.allow("tok:"+token, pushPerTokenPerMinute, time.Minute, now)) {
+	if s.alerts.pushLimit.exceeded("miss:"+ip, pushMissesPerIPPerMinute, time.Minute, now) {
 		w.Header().Set("Retry-After", "60")
-		jsonError(w, "too many pings", http.StatusTooManyRequests)
+		jsonError(w, "too many unknown push tokens from this address", http.StatusTooManyRequests)
 		return
 	}
-	if s.monitor == nil || len(token) < 32 || len(token) > 128 {
+	if !s.monitor.HasPushToken(token) {
+		s.alerts.pushLimit.allow("miss:"+ip, pushMissesPerIPPerMinute, time.Minute, now)
 		jsonError(w, "not found", http.StatusNotFound)
+		return
+	}
+	// Keyed only by tokens that belong to a running push monitor, so the
+	// limiter cannot grow with attacker-chosen keys.
+	if !s.alerts.pushLimit.allow("tok:"+token, pushPerTokenPerMinute, time.Minute, now) {
+		w.Header().Set("Retry-After", "60")
+		jsonError(w, "too many pings for this monitor", http.StatusTooManyRequests)
 		return
 	}
 	q := r.URL.Query()

@@ -103,6 +103,11 @@ func requiredCapabilities(method, path string) []string {
 		}
 		return []string{caps.ExecuteMutate}
 	}
+	// A push monitor's URL is its credential: only principals who can edit
+	// monitors may read it.
+	if strings.HasPrefix(path, "/api/monitors/") && strings.HasSuffix(path, "/push-url") {
+		return []string{caps.ExecuteMutate}
+	}
 	if strings.HasPrefix(path, "/api/alerts/") {
 		if method == http.MethodGet {
 			return []string{caps.ViewMetadata}

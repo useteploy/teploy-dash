@@ -243,6 +243,8 @@ func TestRequiredCapabilitiesRouteMatrix(t *testing.T) {
 		{"GET", "/api/alerts/incidents", []string{caps.ViewMetadata}},
 		{"GET", "/api/alerts/deliveries", []string{caps.ViewMetadata}},
 		{"GET", "/api/push/abc", nil},
+		{"GET", "/api/monitors/p1/push-url", []string{caps.ExecuteMutate}},
+		{"GET", "/api/monitors/p1", []string{caps.ViewMetadata}},
 		{"POST", "/api/push/abc", nil},
 		// D04 sources carry webhook secrets and credential references —
 		// the same credential-administration class as registries.

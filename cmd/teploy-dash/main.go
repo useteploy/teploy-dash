@@ -267,6 +267,10 @@ func run() error {
 	// delivered ones. An unwritable journal is a broken persistence
 	// contract — refuse to start rather than silently degrade to
 	// best-effort (A32 discipline).
+	// Alert channels and heartbeat pings go through the monitors' network
+	// guard (DASH-010): internal addresses only for destinations that opt in.
+	alert.SetDialPolicy(monitor.PolicyDialContext)
+
 	// Alerts v2: open incidents, silences and the audit trail live in the
 	// data dir; an unreadable file refuses startup like the outbox journal.
 	if err := srv.AlertingInitErr(); err != nil {
@@ -279,6 +283,8 @@ func run() error {
 		// through the other channels.
 		OnDeadLetter: srv.OnChannelDeadLetter,
 		OnDelivered:  srv.OnChannelDelivered,
+		// Delivery errors never carry a credential URL, secret or token.
+		Redact: server.RedactAlertText,
 	})
 	if err != nil {
 		st.Close()

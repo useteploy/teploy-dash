@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/incident"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
@@ -49,6 +50,7 @@ func alertServer(t *testing.T) (*Server, *captureSink) {
 	withTempGroupsFile(t)
 	s := &Server{store: store.NewFileStore(t.TempDir()), fleet: &fleetCache{ttl: time.Minute}}
 	s.initAlerting(t.TempDir())
+	s.alerts.tracker.EndAdoption() // fresh data dir: nothing to adopt
 	sink := &captureSink{}
 	s.alerts.tracker.SetAlerter(sink)
 	return s, sink
@@ -57,7 +59,7 @@ func alertServer(t *testing.T) (*Server, *captureSink) {
 func call(t *testing.T, h http.HandlerFunc, method, path, body string) (int, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req = withUser(req, &sessionInfo{sub: "tyler", user: "tyler", role: RoleAdmin, local: true})
+	req = withUser(req, &sessionInfo{sub: "tyler", user: "tyler", role: RoleAdmin, local: true, caps: caps.PresetForRole(RoleAdmin)})
 	w := httptest.NewRecorder()
 	h(w, req)
 	var out map[string]any
@@ -290,6 +292,9 @@ func TestDeployHoldsMonitorOpenThroughOperationManager(t *testing.T) {
 			return 0, nil
 		}})
 	t.Cleanup(func() { s.DrainOperations(context.Background()) })
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock) // runs before the drain, even when the test fails early
 	sink := &captureSink{}
 	s.alerts.tracker.SetAlerter(sink)
 	if _, _, err := s.operations.Enqueue(operation.Request{Kind: operation.KindDeploy, Server: "s", App: "shop"}, "", nil); err != nil {
@@ -302,7 +307,7 @@ func TestDeployHoldsMonitorOpenThroughOperationManager(t *testing.T) {
 	if len(sink.events()) != 0 || len(sink.sup) != 1 {
 		t.Fatalf("deploy hold: sent %d, suppressed %v", len(sink.events()), sink.sup)
 	}
-	close(release)
+	unblock()
 	if held, _ := s.alertHold(rule, time.Now().Add(alertHoldGrace+time.Minute)); held {
 		// The op may still be finishing; poll briefly.
 		deadline := time.Now().Add(2 * time.Second)
@@ -429,7 +434,7 @@ func TestPushMonitorTokenIsServerAssigned(t *testing.T) {
 		t.Fatalf("create push: %d %s", w.Code, w.Body.String())
 	}
 	m, _ := s.store.GetMonitor("p1")
-	if len(m.PushToken) != 64 || m.PushToken == "attacker-chosen" || m.Target != "push" || m.Grace != pushDefaultGrace {
+	if len(m.PushToken) != 64 || m.PushToken == "attacker-chosen" || m.Target != "push" || m.Grace != 24*time.Hour/10 {
 		t.Fatalf("push monitor = %+v", m)
 	}
 	first := m.PushToken
@@ -514,5 +519,142 @@ func TestHeartbeatReceiverCRUD(t *testing.T) {
 	}
 	if code, _ := call(t, s.handleNotificationAction, "DELETE", "/api/notifications/heartbeats/hc", ""); code != 200 {
 		t.Fatalf("delete: %d", code)
+	}
+}
+
+// The push token reaches only principals who can edit monitors; the
+// push-url endpoint serves it to them (and is audited).
+func TestPushTokenHiddenFromViewers(t *testing.T) {
+	s, _ := alertServer(t)
+	m := store.Monitor{ID: "p1", Name: "backup", Type: "push", Interval: time.Hour, Enabled: true, PushToken: strings.Repeat("ab", 32)}
+	if err := s.store.SaveMonitor(&m); err != nil {
+		t.Fatal(err)
+	}
+	get := func(role, path string, h http.HandlerFunc) string {
+		req := withUser(httptest.NewRequest("GET", path, nil), &sessionInfo{user: role, role: role, caps: caps.PresetForRole(role)})
+		w := httptest.NewRecorder()
+		h(w, req)
+		return w.Body.String()
+	}
+	for _, path := range []string{"/api/monitors", "/api/monitors/p1"} {
+		h := s.handleMonitors
+		if path != "/api/monitors" {
+			h = s.handleMonitor
+		}
+		if body := get(RoleViewer, path, h); strings.Contains(body, m.PushToken) {
+			t.Fatalf("viewer saw the push token at %s", path)
+		}
+		if body := get(RoleEditor, path, h); !strings.Contains(body, m.PushToken) {
+			t.Fatalf("editor lost the push token at %s", path)
+		}
+	}
+	if body := get(RoleEditor, "/api/monitors/p1/push-url", s.handleMonitor); !strings.Contains(body, "/api/push/"+m.PushToken) {
+		t.Fatalf("push-url = %s", body)
+	}
+	if e := s.alerts.audit.Recent(1); len(e) != 1 || e[0].Action != "monitor.push_url" {
+		t.Fatalf("audit = %+v", e)
+	}
+	if got := requiredCapabilities("GET", "/api/monitors/p1/push-url"); len(got) != 1 || got[0] != caps.ExecuteMutate {
+		t.Fatalf("push-url caps = %v", got)
+	}
+}
+
+// Valid pings are not counted against the address (one host can run many
+// jobs); unknown-token misses are, and short paths store nothing.
+func TestPushLimitCountsOnlyMisses(t *testing.T) {
+	withTempGroupsFile(t)
+	st := store.NewFileStore(t.TempDir())
+	mon := monitor.New(st)
+	defer mon.Stop(context.Background())
+	s := New(Config{DataDir: t.TempDir(), Store: st, Monitor: mon, NoAuth: true, CLIInstalled: func() bool { return false }})
+	t.Cleanup(func() { s.DrainOperations(context.Background()) })
+	mon.SetTracker(s.alerts.tracker)
+	var tokens []string
+	for i := 0; i < 8; i++ {
+		tok := strings.Repeat(string(rune('a'+i)), 64)
+		m := store.Monitor{ID: "p" + string(rune('a'+i)), Name: "job", Type: "push", Interval: time.Hour, Grace: time.Minute, Enabled: true, PushToken: tok}
+		st.SaveMonitor(&m)
+		mon.Reload(m)
+		tokens = append(tokens, tok)
+	}
+	do := func(path string) int {
+		w := httptest.NewRecorder()
+		s.handlePush(w, httptest.NewRequest("GET", path, nil))
+		return w.Code
+	}
+	for round := 0; round < 13; round++ { // 104 valid pings from one address
+		for _, tok := range tokens {
+			if c := do("/api/push/" + tok); c != 200 && c != http.StatusTooManyRequests {
+				t.Fatalf("valid ping: %d", c)
+			}
+		}
+	}
+	if c := do("/api/push/" + tokens[0]); c != http.StatusTooManyRequests {
+		t.Fatalf("per-token limit: %d", c)
+	}
+	if c := do("/api/push/x"); c != 404 {
+		t.Fatalf("short token: %d", c)
+	}
+	s.alerts.pushLimit.mu.Lock()
+	keys := len(s.alerts.pushLimit.windows)
+	s.alerts.pushLimit.mu.Unlock()
+	if keys != len(tokens) {
+		t.Fatalf("limiter keys = %d, want only the %d known tokens", keys, len(tokens))
+	}
+	for i := 0; i < pushMissesPerIPPerMinute; i++ {
+		do("/api/push/" + strings.Repeat("0", 64))
+	}
+	if c := do("/api/push/" + strings.Repeat("1", 64)); c != http.StatusTooManyRequests {
+		t.Fatalf("miss limit: %d", c)
+	}
+}
+
+// Deleting a channel retires its health incident; at startup incidents of
+// rules that no longer exist are retired.
+func TestRetireDeletedChannelAndOrphans(t *testing.T) {
+	s, sink := alertServer(t)
+	writeNotifications(t, `{"channels":[{"id":"hook","type":"webhook","url":"https://h.example"},{"id":"phone","type":"ntfy","url":"https://n.example/t"}]}`)
+	s.OnChannelDeadLetter("hook", alert.Event{}, "HTTP 500")
+	call(t, s.handleNotificationAction, "DELETE", "/api/notifications/channels/hook", "")
+	evs := sink.events()
+	if len(evs) != 2 || evs[1].Reason != alert.ReasonRetired {
+		t.Fatalf("channel delete: %+v", evs)
+	}
+	m := store.Monitor{ID: "gone", Name: "gone", Type: "http", Target: "https://g.example", Enabled: false}
+	s.store.SaveMonitor(&m)
+	s.alerts.tracker.Observe(incident.Rule{Key: "monitor:gone", Source: alert.SourceMonitor, ID: "gone", Name: "gone", Policy: incident.Policy{FailAfter: 1}}, false, time.Now(), "x")
+	s.alerts.tracker.Observe(incident.Rule{Key: "monitor:nope", Source: alert.SourceMonitor, ID: "nope", Name: "nope", Policy: incident.Policy{FailAfter: 1}}, false, time.Now(), "x")
+	s.alerts.tracker.Observe(incident.Rule{Key: "restore-test:rt", Source: alert.SourceRestoreTest, ID: "rt", Name: "rt", Policy: incident.Policy{FailAfter: 1}}, false, time.Now(), "x")
+	s.retireOrphanIncidents()
+	if open := s.alerts.tracker.Open(); len(open) != 0 {
+		t.Fatalf("orphans left open: %+v", open)
+	}
+}
+
+// Delivery errors served to metadata readers never carry a credential URL.
+func TestDeliveryErrorsRedacted(t *testing.T) {
+	withTempGroupsFile(t)
+	writeNotifications(t, `{"channels":[{"id":"chat","type":"slack","url":"https://hooks.slack.com/services/T/B/SECRETPATH"}]}`)
+	redactMu.Lock()
+	redactAt = time.Time{}
+	redactMu.Unlock()
+	if got := RedactAlertText(`Post "https://hooks.slack.com/services/T/B/SECRETPATH": dial tcp`); strings.Contains(got, "SECRETPATH") {
+		t.Fatalf("redacted = %q", got)
+	}
+}
+
+// Maintenance holds, but not forever.
+func TestMaintenanceHoldCapped(t *testing.T) {
+	s, _ := alertServer(t)
+	gen, _ := s.fleet.beginRefresh()
+	s.fleet.publish(gen, []ServerObservation{{Server: "s", Apps: []remote.AppState{{App: "shop", Server: "s", Maintenance: true}}}})
+	s.fleet.endRefresh()
+	rule := incident.Rule{App: "shop", Server: "s"}
+	now := time.Now()
+	if held, _ := s.alertHold(rule, now); !held {
+		t.Fatal("maintenance not held")
+	}
+	if held, _ := s.alertHold(rule, now.Add(maintenanceHoldCap+alertHoldGrace+time.Minute)); held {
+		t.Fatal("maintenance held past its cap")
 	}
 }

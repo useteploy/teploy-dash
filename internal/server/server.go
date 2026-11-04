@@ -3693,7 +3693,7 @@ const (
 	monitorMaxRepeatEvery = 7 * 24 * time.Hour
 	pushMinInterval       = 30 * time.Second
 	pushMaxInterval       = 31 * 24 * time.Hour
-	pushDefaultGrace      = time.Minute
+	pushMinDefaultGrace   = 5 * time.Minute
 	pushMaxGrace          = 24 * time.Hour
 )
 
@@ -3720,7 +3720,15 @@ func validatePushMonitor(m *store.Monitor) error {
 		return fmt.Errorf("push interval must be between %s and 31 days", pushMinInterval)
 	}
 	if m.Grace == 0 {
-		m.Grace = pushDefaultGrace
+		// Default lateness: 10% of the interval, at least 5 minutes (a
+		// nightly job gets ~2.4h), within the 24h ceiling.
+		m.Grace = m.Interval / 10
+		if m.Grace < pushMinDefaultGrace {
+			m.Grace = pushMinDefaultGrace
+		}
+		if m.Grace > pushMaxGrace {
+			m.Grace = pushMaxGrace
+		}
 	}
 	if m.Grace < 0 || m.Grace > pushMaxGrace {
 		return fmt.Errorf("grace must be between 0 and 24h")
@@ -3739,6 +3747,43 @@ func (s *Server) isEffectiveAdmin(r *http.Request) bool {
 		return session.role == RoleAdmin
 	}
 	return s.gate == nil && s.config.NoAuth
+}
+
+// callerHolds reports whether the request's principal holds capability (or
+// the instance runs deliberately unauthenticated in --no-auth mode).
+func (s *Server) callerHolds(r *http.Request, capability string) bool {
+	if session, ok := currentUser(r); ok {
+		return session.caps.Allow(capability)
+	}
+	return s.gate == nil && s.config.NoAuth
+}
+
+// redactPushToken hides a push monitor's token from readers who cannot
+// edit monitors: the token lets anyone mark a failing heartbeat up. The
+// push URL is served by GET /api/monitors/{id}/push-url (execute.mutate).
+func (s *Server) redactPushToken(r *http.Request, m *store.Monitor) {
+	if m.PushToken != "" && !s.callerHolds(r, caps.ExecuteMutate) {
+		m.PushToken = ""
+	}
+}
+
+// auditMonitorPolicy records a change to a monitor's alerting policy (who
+// made a monitor quieter or louder).
+func (s *Server) auditMonitorPolicy(r *http.Request, prev *store.Monitor, m store.Monitor) {
+	var before store.Monitor
+	if prev != nil {
+		before = *prev
+	}
+	if prev != nil && before.FailAfter == m.FailAfter && before.RecoverAfter == m.RecoverAfter &&
+		before.RepeatEvery == m.RepeatEvery && before.Grace == m.Grace && before.Enabled == m.Enabled {
+		return
+	}
+	if prev == nil && m.FailAfter == 0 && m.RecoverAfter == 0 && m.RepeatEvery == 0 {
+		return
+	}
+	s.auditf(r, "monitor.policy", m.ID, "fail_after %d->%d recover_after %d->%d repeat_every %s->%s grace %s->%s enabled %v->%v",
+		before.FailAfter, m.FailAfter, before.RecoverAfter, m.RecoverAfter, before.RepeatEvery, m.RepeatEvery,
+		before.Grace, m.Grace, before.Enabled, m.Enabled)
 }
 
 func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
@@ -3765,6 +3810,7 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 
 		var result []monitorWithStats
 		for _, m := range monitors {
+			s.redactPushToken(r, &m)
 			mws := monitorWithStats{Monitor: m}
 			stats, _ := s.store.GetStats(m.ID, time.Now().Add(-24*time.Hour))
 			mws.Stats = stats
@@ -3814,7 +3860,11 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 		// The push token is server-assigned: kept across edits, minted for a
 		// new push monitor, never taken from the request.
 		prevToken := ""
-		if prev, err := s.store.GetMonitor(m.ID); err == nil && prev != nil {
+		prev, prevErr := s.store.GetMonitor(m.ID)
+		if prevErr != nil {
+			prev = nil
+		}
+		if prev != nil {
 			prevToken = prev.PushToken
 		}
 		switch {
@@ -3834,6 +3884,7 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 			// stamps its checks with it (D08 CAS).
 			s.monitor.Reload(m)
 		}
+		s.auditMonitorPolicy(r, prev, m)
 		writeJSON(w, m)
 
 	default:
@@ -3848,6 +3899,21 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	path := strings.TrimPrefix(r.URL.Path, "/api/monitors/")
+
+	// GET /api/monitors/{id}/push-url — the push monitor's secret URL path,
+	// for callers who can edit monitors (execute.mutate, route table).
+	if strings.HasSuffix(path, "/push-url") && r.Method == http.MethodGet {
+		noStore(w)
+		id := strings.TrimSuffix(path, "/push-url")
+		m, err := s.store.GetMonitor(id)
+		if !store.ValidID(id) || err != nil || m == nil || m.Type != "push" || m.PushToken == "" {
+			http.Error(w, "push monitor not found", 404)
+			return
+		}
+		s.auditf(r, "monitor.push_url", id, "push URL revealed")
+		writeJSON(w, map[string]string{"token": m.PushToken, "path": "/api/push/" + m.PushToken})
+		return
+	}
 
 	// POST /api/monitors/{id}/test — run one check immediately, don't save.
 	if strings.HasSuffix(path, "/test") && r.Method == "POST" {
@@ -3883,6 +3949,7 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "monitor not found", 404)
 			return
 		}
+		s.redactPushToken(r, m)
 		checks, _ := s.store.GetChecks(id, time.Now().Add(-24*time.Hour), 100)
 		stats, _ := s.store.GetStats(id, time.Now().Add(-24*time.Hour))
 		resp := map[string]interface{}{
