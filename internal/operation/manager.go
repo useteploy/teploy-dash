@@ -1096,6 +1096,21 @@ func (m *Manager) Get(id string) (*Operation, error) {
 	return cloneOperation(op), nil
 }
 
+// ListLive returns copies of the operations that are not terminal or that
+// finished at or after since — the small set an alert-hold check needs,
+// without cloning the whole retained history under the manager lock.
+func (m *Manager) ListLive(since time.Time) []*Operation {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*Operation
+	for _, op := range m.operations {
+		if !op.Status.Terminal() || (op.FinishedAt != nil && !op.FinishedAt.Before(since)) {
+			out = append(out, cloneOperation(op))
+		}
+	}
+	return out
+}
+
 func (m *Manager) List(status Status, target string, limit int) []*Operation {
 	m.mu.Lock()
 	defer m.mu.Unlock()

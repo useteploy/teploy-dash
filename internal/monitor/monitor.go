@@ -217,20 +217,22 @@ func (r *Runner) Stop(ctx context.Context) {
 // "retired"): nobody is watching it any more, so a receiver's open card
 // would otherwise stay open forever.
 func (r *Runner) Reload(m store.Monitor) {
-	r.stopMonitor(m.ID)
 	if m.Enabled {
+		r.stopMonitor(m.ID)
 		r.startMonitor(m)
 		return
 	}
-	r.retire(m.ID, "monitor disabled")
+	r.mu.Lock()
+	r.teardownLocked(m.ID)
+	r.retireLocked(m.ID, "monitor disabled")
+	r.mu.Unlock()
 }
 
-func (r *Runner) retire(id, why string) {
-	r.mu.Lock()
-	t := r.tracker
-	r.mu.Unlock()
-	if t != nil {
-		t.Retire(RuleKey(id), why)
+// retireLocked closes the monitor's incident; the caller holds r.mu (the
+// same lock a check holds while it feeds the tracker).
+func (r *Runner) retireLocked(id, why string) {
+	if r.tracker != nil {
+		r.tracker.Retire(RuleKey(id), why)
 	}
 }
 
@@ -253,6 +255,7 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	var anchor time.Time
 	var history []incident.Sample
 	var lastPing time.Time
+	var newestMessage string
 	if r.store != nil {
 		// No time floor: the seed only establishes a baseline status, so an old
 		// timestamp is fine. A 24h window meant a monitor down longer than a day
@@ -270,6 +273,7 @@ func (r *Runner) startMonitor(m store.Monitor) {
 		if checks, err := r.store.GetChecks(m.ID, time.Time{}, n); err == nil && len(checks) > 0 {
 			seed = checks[0].Status
 			anchor = checks[0].CheckedAt
+			newestMessage = checks[0].Message
 			for _, c := range checks {
 				history = append(history, incident.Sample{OK: c.Status == "up", At: c.CheckedAt})
 				if lastPing.IsZero() && c.Status == "up" {
@@ -293,7 +297,16 @@ func (r *Runner) startMonitor(m store.Monitor) {
 		r.lastStat[m.ID] = seed
 	}
 	if r.tracker != nil {
-		r.tracker.Seed(RuleFor(m), history)
+		rule := RuleFor(m)
+		r.tracker.Seed(rule, history)
+		// First run after the upgrade: an outage already visible in the
+		// history is adopted unannounced and joins the one summary
+		// (incident.Tracker.EndAdoption) instead of alerting on its own.
+		if r.tracker.Adopting() {
+			if fails, _ := r.tracker.Counts(rule.Key); fails > 0 {
+				r.tracker.AdoptOpen(rule, history[fails-1].At, fails, newestMessage)
+			}
+		}
 	}
 
 	interval := m.Interval
@@ -421,11 +434,11 @@ func initialDelay(anchor time.Time, interval time.Duration, now time.Time) time.
 // a receiver holding an incident nothing will ever close.
 func (r *Runner) Remove(id string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.teardownLocked(id)
 	delete(r.lastStat, id)
 	delete(r.lastPing, id)
-	r.mu.Unlock()
-	r.retire(id, "monitor removed")
+	r.retireLocked(id, "monitor removed")
 }
 
 // runCheck executes one check under the scheduler-owned configuration and
@@ -498,16 +511,17 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 		return
 	}
 	r.lastStat[m.ID] = result.Status
-	tracker := r.tracker
-	r.mu.Unlock()
-
 	// Alerts v2: every committed check feeds the incident policy (debounce,
 	// one incident per outage, holds). A monitor with no history that comes
 	// up down still opens — after fail_after checks — so fleet monitors for
-	// already-broken domains are not silent forever.
-	if tracker != nil {
-		tracker.Observe(RuleFor(m), result.Status == "up", result.CheckedAt, result.Message)
+	// already-broken domains are not silent forever. Observed UNDER r.mu,
+	// after the generation check: a Remove (which retires the incident under
+	// the same lock) can never be followed by a stale check recreating the
+	// deleted monitor's state.
+	if r.tracker != nil {
+		r.tracker.Observe(RuleFor(m), result.Status == "up", result.CheckedAt, result.Message)
 	}
+	r.mu.Unlock()
 }
 
 func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
@@ -680,12 +694,25 @@ func (r *Runner) commit(m store.Monitor, generation uint64, result store.CheckRe
 		return false
 	}
 	r.lastStat[m.ID] = result.Status
-	tracker := r.tracker
-	r.mu.Unlock()
-	if tracker != nil {
-		tracker.Observe(RuleFor(m), result.Status == "up", result.CheckedAt, result.Message)
+	if r.tracker != nil {
+		r.tracker.Observe(RuleFor(m), result.Status == "up", result.CheckedAt, result.Message)
 	}
+	r.mu.Unlock()
 	return true
+}
+
+// HasPushToken reports whether a running push monitor owns token (the push
+// endpoint checks before spending a rate-limit slot on it).
+func (r *Runner) HasPushToken(token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	found := false
+	for t := range r.pushTokens {
+		if tokenEqual(t, token) {
+			found = true
+		}
+	}
+	return found
 }
 
 // ErrUnknownPushToken answers a ping for no running push monitor.

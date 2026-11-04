@@ -181,3 +181,34 @@ func TestPushMonitorLateThenPing(t *testing.T) {
 		t.Fatalf("reported failure: %s", a.kinds())
 	}
 }
+
+// First start with incident tracking: a monitor whose history is already
+// failing is adopted unannounced, and EndAdoption announces it.
+func TestRunnerAdoptsExistingOutageOnFirstStart(t *testing.T) {
+	st := store.NewFileStore(t.TempDir())
+	m := downMonitor(t, st, "m1")
+	r1 := New(st)
+	r1.SetAlerter(&syncAlerter{})
+	for i := 0; i < 4; i++ {
+		r1.runCheck(m, 0)
+	}
+	a := &syncAlerter{}
+	tr, err := incident.New(incident.Options{Dir: t.TempDir(), Alerter: a})
+	if err != nil || !tr.Adopting() {
+		t.Fatalf("want a first-run tracker: %v", err)
+	}
+	r2 := New(st)
+	r2.SetTracker(tr)
+	r2.startMonitor(m)
+	defer r2.Stop(context.Background())
+	if open := tr.Open(); len(open) != 1 || open[0].Notified || open[0].ConsecutiveFailures != 4 {
+		t.Fatalf("adopted = %+v", open)
+	}
+	if a.kinds() != "" {
+		t.Fatalf("adoption alerted: %s", a.kinds())
+	}
+	tr.EndAdoption()
+	if a.kinds() != alert.KindOpened+"/" {
+		t.Fatalf("after adoption: %s", a.kinds())
+	}
+}

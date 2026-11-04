@@ -506,3 +506,17 @@ func TestRunNow_IncidentKinds(t *testing.T) {
 		t.Fatalf("remove did not retire: %+v", capture.events)
 	}
 }
+
+// Disabling a restore test retires its open incident.
+func TestReloadDisabledRetires(t *testing.T) {
+	r, st := newTestRunner(t, `not json`, nil)
+	rt := seedTest(t, st)
+	capture := &capturingAlerter{}
+	r.SetAlerter(capture)
+	r.RunNow(rt)
+	rt.Enabled = false
+	r.Reload(rt)
+	if len(capture.events) != 2 || capture.events[1].Reason != alert.ReasonRetired {
+		t.Fatalf("events = %+v", capture.events)
+	}
+}

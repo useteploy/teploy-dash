@@ -164,6 +164,10 @@ type ruleState struct {
 	fails, oks  int
 	firstFailAt time.Time
 	held        *Held
+	// rule and lastMessage let the hold pass open a held rule whose hold
+	// ended without waiting for its next observation.
+	rule        Rule
+	lastMessage string
 }
 
 // Tracker is the incident state machine.
@@ -173,6 +177,11 @@ type Tracker struct {
 	mu        sync.Mutex
 	states    map[string]*ruleState
 	incidents map[string]*Incident
+	// adopting is true from a start with NO incidents.json (first run
+	// after the upgrade to incident tracking) until EndAdoption: opens in
+	// that window are unannounced, so the outages that already existed are
+	// announced as ONE summary instead of an alert per monitor.
+	adopting bool
 }
 
 // New loads open incidents from dir (when set).
@@ -184,8 +193,10 @@ func New(opts Options) (*Tracker, error) {
 	if opts.Dir == "" {
 		return t, nil
 	}
-	raw, err := os.ReadFile(filepath.Join(opts.Dir, fileName))
+	path := filepath.Join(opts.Dir, fileName)
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		t.adopting = true
 		return t, nil
 	}
 	if err != nil {
@@ -195,7 +206,16 @@ func New(opts Options) (*Tracker, error) {
 		Incidents []*Incident `json:"incidents"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("decode incidents: %w", err)
+		// A corrupt file must not stop Dash from watching anything: set it
+		// aside for inspection and start empty (adopting what is failing,
+		// so the outages it held come back as one summary).
+		aside := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+		if rerr := os.Rename(path, aside); rerr != nil {
+			return nil, fmt.Errorf("decode incidents: %w (and could not set it aside: %v)", err, rerr)
+		}
+		log.Printf("[incident] %s was unreadable (%v); moved to %s and starting with no open incidents", path, err, aside)
+		t.adopting = true
+		return t, nil
 	}
 	for _, inc := range doc.Incidents {
 		if inc != nil && inc.Key != "" {
@@ -234,10 +254,12 @@ type outgoing struct {
 	note string // non-empty = record as suppressed, do not send
 }
 
-func (t *Tracker) flush(out []outgoing) {
-	t.mu.Lock()
+// flushLocked hands alerts to the outbox WHILE the tracker lock is held, so
+// the outbox journals them in the order the state machine produced them: a
+// recovery can never be enqueued ahead of its own open by a concurrent
+// observation. (The outbox never calls back into the tracker from Send.)
+func (t *Tracker) flushLocked(out []outgoing) {
 	a := t.opts.Alerter
-	t.mu.Unlock()
 	if a == nil {
 		return
 	}
@@ -310,6 +332,82 @@ func (t *Tracker) holdFor(rule Rule, at time.Time) string {
 	return ""
 }
 
+// Adopting reports whether the tracker is in its first-run adoption window.
+func (t *Tracker) Adopting() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.adopting
+}
+
+// AdoptOpen records an outage that already existed when tracking started
+// (a monitor whose history is already failing, a restore test whose last
+// run failed) as an unannounced open incident. A no-op outside the
+// adoption window or when the rule already has an incident.
+func (t *Tracker) AdoptOpen(rule Rule, startedAt time.Time, fails int, message string) {
+	rule.Policy = rule.Policy.normalized()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := rule.key()
+	if !t.adopting || t.incidents[key] != nil || fails < rule.Policy.FailAfter {
+		return
+	}
+	inc := &Incident{Key: key, ID: newIncidentID(), StartedAt: startedAt, OpenedAt: t.opts.Now(),
+		ConsecutiveFailures: fails, Message: message}
+	describe(inc, rule)
+	t.incidents[key] = inc
+	t.persistLocked()
+}
+
+// EndAdoption closes the adoption window and announces what it collected
+// (one summary for human channels; per-incident opens for machine ones).
+// It always writes incidents.json, so the next start is not a first run.
+func (t *Tracker) EndAdoption() int {
+	t.mu.Lock()
+	t.adopting = false
+	t.persistLocked()
+	t.mu.Unlock()
+	return t.AnnounceUnannounced()
+}
+
+// ReleaseHolds opens held rules whose hold has ended while they are still
+// failing, without waiting for their next observation (a restore test held
+// during a deploy would otherwise wait a whole interval, and never alert if
+// that next run passed).
+func (t *Tracker) ReleaseHolds() int {
+	now := t.opts.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []outgoing
+	opened := 0
+	for key, st := range t.states {
+		if st.held == nil || t.incidents[key] != nil || st.fails < st.rule.Policy.normalized().FailAfter {
+			continue
+		}
+		if why := t.holdFor(st.rule, now); why != "" {
+			continue
+		}
+		st.held = nil
+		inc := &Incident{Key: key, ID: newIncidentID(), StartedAt: st.firstFailAt, OpenedAt: now,
+			ConsecutiveFailures: st.fails, Message: st.lastMessage}
+		describe(inc, st.rule)
+		if st.rule.Policy.AutoResolveAfter > 0 {
+			inc.AutoResolveAt = now.Add(st.rule.Policy.AutoResolveAfter)
+		}
+		if !t.adopting && t.hasChannels() {
+			inc.Notified = true
+			inc.LastNotifiedAt = now
+			out = append(out, outgoing{ev: t.event(inc, alert.KindOpened, "", st.lastMessage, now)})
+		}
+		t.incidents[key] = inc
+		opened++
+	}
+	if opened > 0 {
+		t.persistLocked()
+	}
+	t.flushLocked(out)
+	return opened
+}
+
 // Seed restores a rule's consecutive pass/fail streak from its history
 // (newest first) after a restart or reload. It sends nothing.
 func (t *Tracker) Seed(rule Rule, history []Sample) {
@@ -346,6 +444,7 @@ func (t *Tracker) Observe(rule Rule, ok bool, at time.Time, message string) {
 
 	t.mu.Lock()
 	st := t.state(key)
+	st.rule, st.lastMessage = rule, message
 	inc := t.incidents[key]
 	changed := false
 	if !ok {
@@ -371,7 +470,11 @@ func (t *Tracker) Observe(rule Rule, ok bool, at time.Time, message string) {
 			}
 		case st.fails >= rule.Policy.FailAfter:
 			if why := t.holdFor(rule, at); why != "" {
-				if st.held == nil || st.held.Reason != why {
+				// Journaled once per hold episode (a deploy moving from queued
+				// to running is the same hold); the reason shown stays current.
+				if st.held != nil {
+					st.held.Reason = why
+				} else {
 					st.held = &Held{Key: key, Source: rule.Source, RuleID: rule.ID, Name: rule.Name, App: rule.App, Reason: why, Since: at}
 					probe := &Incident{ID: "held_" + key, StartedAt: st.firstFailAt, ConsecutiveFailures: st.fails}
 					describe(probe, rule)
@@ -389,7 +492,7 @@ func (t *Tracker) Observe(rule Rule, ok bool, at time.Time, message string) {
 			if rule.Policy.AutoResolveAfter > 0 {
 				inc.AutoResolveAt = at.Add(rule.Policy.AutoResolveAfter)
 			}
-			if t.hasChannels() {
+			if !t.adopting && t.hasChannels() {
 				inc.Notified = true
 				inc.LastNotifiedAt = at
 				out = append(out, outgoing{ev: t.event(inc, alert.KindOpened, "", message, at)})
@@ -415,8 +518,8 @@ func (t *Tracker) Observe(rule Rule, ok bool, at time.Time, message string) {
 	if changed {
 		t.persistLocked()
 	}
+	t.flushLocked(out)
 	t.mu.Unlock()
-	t.flush(out)
 }
 
 // Retire forgets a rule (monitor deleted or disabled, restore test removed,
@@ -437,8 +540,8 @@ func (t *Tracker) Retire(key, message string) {
 		}
 		t.persistLocked()
 	}
+	t.flushLocked(out)
 	t.mu.Unlock()
-	t.flush(out)
 }
 
 // CloseMatching closes every open incident pred selects, with the given
@@ -464,8 +567,8 @@ func (t *Tracker) CloseMatching(pred func(Incident) bool, reason, message string
 	if n > 0 {
 		t.persistLocked()
 	}
+	t.flushLocked(out)
 	t.mu.Unlock()
-	t.flush(out)
 	return n
 }
 
@@ -491,8 +594,8 @@ func (t *Tracker) Sweep() {
 	if changed {
 		t.persistLocked()
 	}
+	t.flushLocked(out)
 	t.mu.Unlock()
-	t.flush(out)
 }
 
 // AnnounceUnannounced sends what opened while no channel was configured:
@@ -551,8 +654,8 @@ func (t *Tracker) AnnounceUnannounced() int {
 	if len(pending) > 0 {
 		t.persistLocked()
 	}
+	t.flushLocked(out)
 	t.mu.Unlock()
-	t.flush(out)
 	return len(pending)
 }
 

@@ -213,10 +213,20 @@ func (r *Runner) Stop(ctx context.Context) {
 }
 
 // Reload reloads a single test (stop + start with new config).
+//
+// Disabling a test retires its open incident: nothing will run it again,
+// so nothing would ever close the receiver's card.
 func (r *Runner) Reload(t store.RestoreTest) {
 	r.stopTest(t.ID)
 	if t.Enabled {
 		r.startTest(t)
+		return
+	}
+	r.mu.Lock()
+	tracker := r.tracker
+	r.mu.Unlock()
+	if tracker != nil {
+		tracker.Retire(RuleKey(t.ID), "restore test disabled")
 	}
 }
 
@@ -248,6 +258,11 @@ func (r *Runner) startTest(t store.RestoreTest) {
 	// that predates a dash restart still alerts on recovery (and vice versa).
 	if !t.LastRunAt.IsZero() {
 		r.lastOK[t.ID] = t.LastOK
+		// First run after the upgrade: a test whose last run failed is an
+		// outage that already existed — adopt it into the one summary.
+		if !t.LastOK && r.tracker != nil && r.tracker.Adopting() {
+			r.tracker.AdoptOpen(RuleFor(t), t.LastRunAt, 1, t.LastDetail)
+		}
 	}
 
 	interval := time.Duration(t.IntervalHours) * time.Hour

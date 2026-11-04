@@ -1,6 +1,8 @@
 package incident
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -168,6 +170,7 @@ func TestRestartRestoresIncidentAndCounts(t *testing.T) {
 	dir := t.TempDir()
 	s := &sink{}
 	tr := newTracker(t, s, func(o *Options) { o.Dir = dir })
+	tr.EndAdoption() // a fresh dir is a first run; nothing to adopt
 	r := monitorRule()
 	observe(tr, r, "----", t0)
 
@@ -345,5 +348,82 @@ func TestAnnounceUnannouncedSummary(t *testing.T) {
 	observe(tr, r, "++", t0.Add(time.Hour))
 	if last := s.sent[len(s.sent)-1]; last.Kind != alert.KindRecovered {
 		t.Fatalf("recovery after summary: %+v", last)
+	}
+}
+
+// First run after the upgrade (no incidents.json): outages that already
+// existed are adopted unannounced and announced as ONE summary; a corrupt
+// file is set aside and behaves like a first run.
+func TestFirstRunAdoptionSummarizes(t *testing.T) {
+	dir := t.TempDir()
+	s := &sink{}
+	tr := newTracker(t, s, func(o *Options) { o.Dir = dir })
+	if !tr.Adopting() {
+		t.Fatal("missing incidents.json must start adopting")
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		r := monitorRule()
+		r.ID, r.Key = id, "monitor:"+id
+		tr.AdoptOpen(r, t0, 5, "HTTP 502")
+	}
+	r := monitorRule()
+	r.ID, r.Key = "d", "monitor:d"
+	observe(tr, r, "---", t0) // opens during adoption: unannounced too
+	if len(s.sent) != 0 {
+		t.Fatalf("adoption sent %s", s.kinds())
+	}
+	tr.AdoptOpen(r, t0, 9, "x") // already open: no-op
+	if n := tr.EndAdoption(); n != 4 {
+		t.Fatalf("announced %d", n)
+	}
+	human := 0
+	for _, ev := range s.sent {
+		if ev.Audience == alert.AudienceHuman {
+			human++
+		}
+	}
+	if human != 1 || len(s.sent) != 5 {
+		t.Fatalf("want one summary + 4 machine opens, got %s", s.kinds())
+	}
+	if tr.Adopting() {
+		t.Fatal("still adopting")
+	}
+	tr2 := newTracker(t, &sink{}, func(o *Options) { o.Dir = dir })
+	if tr2.Adopting() || len(tr2.Open()) != 4 {
+		t.Fatalf("second start: adopting=%v open=%d", tr2.Adopting(), len(tr2.Open()))
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "incidents.json"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tr3, err := New(Options{Dir: dir})
+	if err != nil || !tr3.Adopting() || len(tr3.Open()) != 0 {
+		t.Fatalf("corrupt file: err=%v adopting=%v", err, tr3 != nil && tr3.Adopting())
+	}
+	aside, _ := filepath.Glob(filepath.Join(dir, "incidents.json.corrupt-*"))
+	if len(aside) != 1 {
+		t.Fatalf("corrupt file not set aside: %v", aside)
+	}
+}
+
+// A held rule opens on the release pass once its hold ends, with the count
+// and message it had, without another observation.
+func TestReleaseHoldsOpensWithoutNextObservation(t *testing.T) {
+	s := &sink{}
+	held := true
+	tr := newTracker(t, s, func(o *Options) {
+		o.Hold = func(Rule, time.Time) (bool, string) { return held, "deploy running" }
+	})
+	r := Rule{Source: alert.SourceRestoreTest, ID: "rt1", Name: "restore", App: "shop", Policy: Policy{FailAfter: 1, RecoverAfter: 1}}
+	tr.Observe(r, false, t0, "verify failed")
+	if tr.ReleaseHolds() != 0 || len(s.sent) != 0 {
+		t.Fatal("released while still held")
+	}
+	held = false
+	if tr.ReleaseHolds() != 1 || s.kinds() != alert.KindOpened || s.sent[0].Message != "verify failed" || s.sent[0].ConsecutiveFailures != 1 {
+		t.Fatalf("release: %s %+v", s.kinds(), s.sent)
+	}
+	if tr.ReleaseHolds() != 0 {
+		t.Fatal("released twice")
 	}
 }
