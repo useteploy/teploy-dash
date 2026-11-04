@@ -296,6 +296,7 @@ return 404.
 | `TEPLOY_DASH_UNSAFE_LEGACY_SECRET_ARGV` | _(off)_ | Explicit opt-in for CLIs without the secret-stdin contract: without it, secret-bearing `env set` / `kv set` / template-variable writes are REFUSED (502 with upgrade guidance) instead of silently putting the value on the process list. Empty values keep working either way. |
 | `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
 | `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
+| `TEPLOY_NAV_CLOUD_URL` | _(none)_ | URL of your Teploy Cloud dashboard (for example `https://cloud.teploy.com`). When set, it appears in the top-left cross-product switcher. |
 
 ### Single sign-on (OIDC)
 
