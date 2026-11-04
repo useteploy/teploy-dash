@@ -100,6 +100,13 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS incarnation BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS reachable BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS app TEXT NOT NULL DEFAULT ''`,
+		// Alerts v2 monitor fields (additive, same pattern as app/reachable).
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS server TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS fail_after BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS recover_after BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS repeat_every_ms BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS grace_ms BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE monitors ADD COLUMN IF NOT EXISTS push_token TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS checks (
 			id BIGINT PRIMARY KEY,
 			monitor_id TEXT NOT NULL,
@@ -143,7 +150,7 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app FROM monitors")
+		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app, server, fail_after, recover_after, repeat_every_ms, grace_ms, push_token FROM monitors")
 	if err != nil {
 		return nil, err
 	}
@@ -155,12 +162,15 @@ func (s *NucleusStore) ListMonitors() ([]Monitor, error) {
 		var intervalMs, timeoutMs int64
 		var expectedStatus int
 		var method string
+		var failAfter, recoverAfter, repeatMs, graceMs int64
 
 		err := rows.Scan(&m.ID, &m.Name, &m.Type, &m.Target,
-			&intervalMs, &timeoutMs, &m.Enabled, &expectedStatus, &method, &m.AllowInternal, &m.Incarnation, &m.Reachable, &m.App)
+			&intervalMs, &timeoutMs, &m.Enabled, &expectedStatus, &method, &m.AllowInternal, &m.Incarnation, &m.Reachable, &m.App,
+			&m.Server, &failAfter, &recoverAfter, &repeatMs, &graceMs, &m.PushToken)
 		if err != nil {
 			continue
 		}
+		applyPolicyColumns(&m, failAfter, recoverAfter, repeatMs, graceMs)
 
 		m.Interval = time.Duration(intervalMs) * time.Millisecond
 		m.Timeout = time.Duration(timeoutMs) * time.Millisecond
@@ -181,14 +191,17 @@ func (s *NucleusStore) GetMonitor(id string) (*Monitor, error) {
 	defer cancel()
 	var m Monitor
 	var intervalMs, timeoutMs int64
+	var failAfter, recoverAfter, repeatMs, graceMs int64
 
 	err := s.pool.QueryRow(ctx,
-		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app FROM monitors WHERE id = $1", id,
+		"SELECT id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app, server, fail_after, recover_after, repeat_every_ms, grace_ms, push_token FROM monitors WHERE id = $1", id,
 	).Scan(&m.ID, &m.Name, &m.Type, &m.Target,
-		&intervalMs, &timeoutMs, &m.Enabled, &m.ExpectedStatus, &m.Method, &m.AllowInternal, &m.Incarnation, &m.Reachable, &m.App)
+		&intervalMs, &timeoutMs, &m.Enabled, &m.ExpectedStatus, &m.Method, &m.AllowInternal, &m.Incarnation, &m.Reachable, &m.App,
+		&m.Server, &failAfter, &recoverAfter, &repeatMs, &graceMs, &m.PushToken)
 	if err != nil {
 		return nil, err
 	}
+	applyPolicyColumns(&m, failAfter, recoverAfter, repeatMs, graceMs)
 
 	m.Interval = time.Duration(intervalMs) * time.Millisecond
 	m.Timeout = time.Duration(timeoutMs) * time.Millisecond
@@ -219,21 +232,32 @@ func (s *NucleusStore) SaveMonitor(m *Monitor) error {
 	s.incarnationClock = next
 
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO monitors (id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		`INSERT INTO monitors (id, name, type, target, interval_ms, timeout_ms, enabled, expected_status, method, allow_internal, incarnation, reachable, app,
+		                       server, fail_after, recover_after, repeat_every_ms, grace_ms, push_token)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		 ON CONFLICT (id) DO UPDATE SET
 		   name = EXCLUDED.name, type = EXCLUDED.type, target = EXCLUDED.target,
 		   interval_ms = EXCLUDED.interval_ms, timeout_ms = EXCLUDED.timeout_ms,
 		   enabled = EXCLUDED.enabled, expected_status = EXCLUDED.expected_status,
 		   method = EXCLUDED.method, allow_internal = EXCLUDED.allow_internal,
 		   incarnation = EXCLUDED.incarnation, reachable = EXCLUDED.reachable,
-		   app = EXCLUDED.app`,
+		   app = EXCLUDED.app, server = EXCLUDED.server, fail_after = EXCLUDED.fail_after,
+		   recover_after = EXCLUDED.recover_after, repeat_every_ms = EXCLUDED.repeat_every_ms,
+		   grace_ms = EXCLUDED.grace_ms, push_token = EXCLUDED.push_token`,
 		m.ID, m.Name, m.Type, m.Target,
 		m.Interval.Milliseconds(), m.Timeout.Milliseconds(),
 		m.Enabled, m.ExpectedStatus, m.Method, m.AllowInternal, m.Incarnation,
 		m.Reachable, m.App,
+		m.Server, int64(m.FailAfter), int64(m.RecoverAfter), m.RepeatEvery.Milliseconds(), m.Grace.Milliseconds(), m.PushToken,
 	)
 	return err
+}
+
+func applyPolicyColumns(m *Monitor, failAfter, recoverAfter, repeatMs, graceMs int64) {
+	m.FailAfter = int(failAfter)
+	m.RecoverAfter = int(recoverAfter)
+	m.RepeatEvery = time.Duration(repeatMs) * time.Millisecond
+	m.Grace = time.Duration(graceMs) * time.Millisecond
 }
 
 func (s *NucleusStore) DeleteMonitor(id string) error {

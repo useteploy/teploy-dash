@@ -10,8 +10,59 @@ import (
 	"time"
 
 	"github.com/useteploy/teploy-dash/internal/alert"
+	"github.com/useteploy/teploy-dash/internal/incident"
 	"github.com/useteploy/teploy-dash/internal/store"
 )
+
+// Alerts v2 default policy (plan P3.1). Probe monitors debounce: three
+// consecutive failed checks open an incident, two passing checks recover it.
+// A push monitor's lateness already includes its grace window, so one late
+// evaluation opens and one ping recovers.
+const (
+	DefaultFailAfter        = 3
+	DefaultRecoverAfter     = 2
+	DefaultPushFailAfter    = 1
+	DefaultPushRecoverAfter = 1
+)
+
+// PolicyFor resolves a monitor's effective alerting policy.
+func PolicyFor(m store.Monitor) incident.Policy {
+	p := incident.Policy{FailAfter: m.FailAfter, RecoverAfter: m.RecoverAfter, RepeatEvery: m.RepeatEvery}
+	if p.FailAfter <= 0 {
+		p.FailAfter = DefaultFailAfter
+		if m.Type == "push" {
+			p.FailAfter = DefaultPushFailAfter
+		}
+	}
+	if p.RecoverAfter <= 0 {
+		p.RecoverAfter = DefaultRecoverAfter
+		if m.Type == "push" {
+			p.RecoverAfter = DefaultPushRecoverAfter
+		}
+	}
+	return p
+}
+
+// RuleKey is the incident key of a monitor (stable across type edits).
+func RuleKey(id string) string { return "monitor:" + id }
+
+// RuleFor describes a monitor as an incident rule. A push monitor's target
+// is its secret URL, so alerts name it generically instead.
+func RuleFor(m store.Monitor) incident.Rule {
+	r := incident.Rule{Key: RuleKey(m.ID), Source: alert.SourceMonitor, ID: m.ID, Name: m.Name, App: m.App,
+		Server: m.Server, Target: m.Target, Severity: alert.SeverityCritical, Path: "/monitors/" + m.ID, Policy: PolicyFor(m)}
+	if m.Type == "push" {
+		r.Source = alert.SourceHeartbeat
+		r.Target = "push heartbeat"
+	}
+	return r
+}
+
+// pushEntry is a running push monitor addressable by its token.
+type pushEntry struct {
+	m          store.Monitor
+	generation uint64
+}
 
 // Alerter is what the runner notifies on state transitions. *alert.Dispatcher
 // satisfies it directly (restore tests, un-durabled paths); the alert outbox
@@ -23,7 +74,7 @@ type Alerter interface {
 // Runner manages uptime monitors and runs checks on their intervals.
 type Runner struct {
 	store    store.Store
-	alerter  Alerter
+	tracker  *incident.Tracker
 	client   *http.Client
 	stopChs  map[string]chan struct{}
 	lastStat map[string]string // last known status per monitor (for transition detection)
@@ -32,6 +83,10 @@ type Runner struct {
 	// older generation must not save its result, mutate lastStat, or alert —
 	// it describes a configuration that no longer exists.
 	generations map[string]uint64
+	// push monitors: token -> running config, and the last accepted ping
+	// per monitor (seeded from history).
+	pushTokens map[string]pushEntry
+	lastPing   map[string]time.Time
 	// wg tracks in-flight checks so Stop can join them before the store
 	// closes (A46).
 	wg      sync.WaitGroup
@@ -45,6 +100,8 @@ func New(st store.Store) *Runner {
 		store:       st,
 		lastStat:    make(map[string]string),
 		generations: make(map[string]uint64),
+		pushTokens:  make(map[string]pushEntry),
+		lastPing:    make(map[string]time.Time),
 		client: &http.Client{
 			// No client-level Timeout: each check applies the monitor's own
 			// configured timeout via a per-request context (checkHTTP). A
@@ -82,12 +139,18 @@ func (r *Runner) Start() {
 	log.Printf("[monitor] Started %d monitors", started)
 }
 
-// SetAlerter configures the state-change notifier (a dispatcher, or the
-// durable alert outbox).
-func (r *Runner) SetAlerter(d Alerter) {
+// SetTracker routes check outcomes into the Alerts v2 incident tracker.
+func (r *Runner) SetTracker(t *incident.Tracker) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.alerter = d
+	r.tracker = t
+}
+
+// SetAlerter is the convenience wiring for callers without a shared tracker
+// (tests, embedded use): an in-memory tracker that sends through d.
+func (r *Runner) SetAlerter(d Alerter) {
+	t, _ := incident.New(incident.Options{Alerter: d})
+	r.SetTracker(t)
 }
 
 // CheckNow runs a single check against the given monitor config without
@@ -99,6 +162,11 @@ func (r *Runner) CheckNow(m store.Monitor) store.CheckResult {
 		return r.checkHTTP(m)
 	case "tcp", "ping":
 		return r.checkTCP(m)
+	case "push":
+		r.mu.Lock()
+		last := r.lastPing[m.ID]
+		r.mu.Unlock()
+		return pushVerdict(m, last, time.Now())
 	default:
 		return store.CheckResult{
 			MonitorID: m.ID,
@@ -144,10 +212,25 @@ func (r *Runner) Stop(ctx context.Context) {
 }
 
 // Reload reloads a single monitor (stop + start with new config).
+//
+// A disabled monitor retires its open incident (incident_recovered reason
+// "retired"): nobody is watching it any more, so a receiver's open card
+// would otherwise stay open forever.
 func (r *Runner) Reload(m store.Monitor) {
 	r.stopMonitor(m.ID)
 	if m.Enabled {
 		r.startMonitor(m)
+		return
+	}
+	r.retire(m.ID, "monitor disabled")
+}
+
+func (r *Runner) retire(id, why string) {
+	r.mu.Lock()
+	t := r.tracker
+	r.mu.Unlock()
+	if t != nil {
+		t.Retire(RuleKey(id), why)
 	}
 }
 
@@ -168,13 +251,31 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	// anchor (D08, pass-7 A25 residual).
 	var seed string
 	var anchor time.Time
+	var history []incident.Sample
+	var lastPing time.Time
 	if r.store != nil {
 		// No time floor: the seed only establishes a baseline status, so an old
 		// timestamp is fine. A 24h window meant a monitor down longer than a day
 		// had no baseline after a restart and its recovery alert was suppressed.
-		if checks, err := r.store.GetChecks(m.ID, time.Time{}, 1); err == nil && len(checks) > 0 {
+		// Alerts v2: enough history to restore the consecutive pass/fail
+		// streak the policy counts (plan P3.1).
+		p := PolicyFor(m)
+		n := p.FailAfter
+		if p.RecoverAfter > n {
+			n = p.RecoverAfter
+		}
+		if n++; n > 50 {
+			n = 50
+		}
+		if checks, err := r.store.GetChecks(m.ID, time.Time{}, n); err == nil && len(checks) > 0 {
 			seed = checks[0].Status
 			anchor = checks[0].CheckedAt
+			for _, c := range checks {
+				history = append(history, incident.Sample{OK: c.Status == "up", At: c.CheckedAt})
+				if lastPing.IsZero() && c.Status == "up" {
+					lastPing = c.CheckedAt
+				}
+			}
 		}
 	}
 
@@ -191,6 +292,9 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	if seed != "" {
 		r.lastStat[m.ID] = seed
 	}
+	if r.tracker != nil {
+		r.tracker.Seed(RuleFor(m), history)
+	}
 
 	interval := m.Interval
 	if interval < 10*time.Second {
@@ -206,6 +310,25 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	// reload/remove would otherwise adopt the NEW generation with its OLD
 	// captured configuration and pass every freshness check.
 	generation := r.generations[m.ID]
+
+	if m.Type == "push" {
+		// A push monitor has no probe: its schedule evaluates lateness. The
+		// first deadline counts from the newest accepted ping, or from now
+		// when there is none (a new monitor gets a full interval + grace).
+		prev, known := r.lastPing[m.ID]
+		switch {
+		case !lastPing.IsZero() && (!known || prev.Before(lastPing)):
+			r.lastPing[m.ID] = lastPing
+		case !known:
+			r.lastPing[m.ID] = time.Now()
+		}
+		if m.PushToken != "" {
+			r.pushTokens[m.PushToken] = pushEntry{m: m, generation: generation}
+		}
+		r.wg.Add(1)
+		go r.runPush(m, generation, stopCh)
+		return
+	}
 
 	// F023: count the goroutine's WHOLE lifetime before launching it, so
 	// Stop's Wait can never observe zero while this scheduler is still
@@ -264,6 +387,11 @@ func (r *Runner) stopMonitor(id string) {
 // stopCh is the whole cancellation story.
 func (r *Runner) teardownLocked(id string) {
 	r.generations[id]++
+	for token, e := range r.pushTokens {
+		if e.m.ID == id {
+			delete(r.pushTokens, token)
+		}
+	}
 	if ch, ok := r.stopChs[id]; ok {
 		close(ch)
 		delete(r.stopChs, id)
@@ -287,11 +415,17 @@ func initialDelay(anchor time.Time, interval time.Duration, now time.Time) time.
 // Remove stops a monitor's checker and clears its last-known status. Call this
 // when a monitor is deleted — otherwise its ticker + goroutine leak and keep
 // recording checks for a monitor that no longer exists.
+//
+// An open incident is retired (incident_recovered reason "retired"): a
+// deleted monitor — by a person or by the fleet reconciler — must not leave
+// a receiver holding an incident nothing will ever close.
 func (r *Runner) Remove(id string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.teardownLocked(id)
 	delete(r.lastStat, id)
+	delete(r.lastPing, id)
+	r.mu.Unlock()
+	r.retire(id, "monitor removed")
 }
 
 // runCheck executes one check under the scheduler-owned configuration and
@@ -363,26 +497,16 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 		r.mu.Unlock()
 		return
 	}
-	// Fire alert on state transition (up->down or down->up).
-	prev := r.lastStat[m.ID]
 	r.lastStat[m.ID] = result.Status
-	alerter := r.alerter
+	tracker := r.tracker
 	r.mu.Unlock()
 
-	// A monitor with no history that comes up down alerts too: the fleet
-	// creates monitors for domains that may already be broken, and waiting
-	// for an up->down edge kept those silent forever. A first check that is
-	// up has nothing to report.
-	firstDown := prev == "" && result.Status == "down"
-	if alerter != nil && (firstDown || (prev != "" && prev != result.Status)) {
-		alerter.Send(alert.Event{
-			MonitorID:   m.ID,
-			MonitorName: m.Name,
-			Status:      result.Status,
-			Message:     result.Message,
-			OccurredAt:  result.CheckedAt,
-			Source:      alert.SourceMonitor,
-		})
+	// Alerts v2: every committed check feeds the incident policy (debounce,
+	// one incident per outage, holds). A monitor with no history that comes
+	// up down still opens — after fail_after checks — so fleet monitors for
+	// already-broken domains are not silent forever.
+	if tracker != nil {
+		tracker.Observe(RuleFor(m), result.Status == "up", result.CheckedAt, result.Message)
 	}
 }
 
@@ -478,4 +602,139 @@ func (r *Runner) checkTCP(m store.Monitor) store.CheckResult {
 
 	result.Status = "up"
 	return result
+}
+
+// pushVerdict judges a push monitor: down once no ping arrived within
+// interval + grace of the last accepted one.
+func pushVerdict(m store.Monitor, lastPing, now time.Time) store.CheckResult {
+	res := store.CheckResult{MonitorID: m.ID, CheckedAt: now, Status: "up"}
+	window := m.Interval + m.Grace
+	if !lastPing.IsZero() && now.Sub(lastPing) > window {
+		res.Status = "down"
+		res.Message = fmt.Sprintf("no ping for %s (expected every %s, grace %s)",
+			now.Sub(lastPing).Round(time.Second), m.Interval, m.Grace)
+	}
+	return res
+}
+
+// runPush is a push monitor's scheduler: it sleeps until the current
+// deadline (last ping + interval + grace), records a down check when the
+// deadline passed without a ping, and then waits one more interval before
+// recording the next miss.
+func (r *Runner) runPush(m store.Monitor, generation uint64, stopCh chan struct{}) {
+	defer r.wg.Done()
+	for {
+		r.mu.Lock()
+		last := r.lastPing[m.ID]
+		r.mu.Unlock()
+		wait := time.Until(last.Add(m.Interval + m.Grace))
+		if wait < time.Second {
+			wait = time.Second
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-stopCh:
+			timer.Stop()
+			return
+		}
+		r.mu.Lock()
+		last = r.lastPing[m.ID]
+		r.mu.Unlock()
+		res := pushVerdict(m, last, time.Now())
+		if res.Status != "down" {
+			continue // a ping moved the deadline
+		}
+		r.commit(m, generation, res)
+		// Next miss is recorded one interval later, not in a tight loop.
+		timer = time.NewTimer(m.Interval)
+		select {
+		case <-timer.C:
+		case <-stopCh:
+			timer.Stop()
+			return
+		}
+	}
+}
+
+// commit saves a check under the scheduler's generation and feeds the
+// tracker (shared by push evaluations and pings).
+func (r *Runner) commit(m store.Monitor, generation uint64, result store.CheckResult) bool {
+	r.mu.Lock()
+	stale := r.generations[m.ID] != generation
+	r.mu.Unlock()
+	if stale {
+		return false
+	}
+	result.Incarnation = m.Incarnation
+	applied, err := r.store.SaveCheck(result)
+	if err != nil {
+		log.Printf("[monitor] Failed to save check for %s: %v", m.ID, err)
+	}
+	if !applied {
+		return false
+	}
+	r.mu.Lock()
+	if r.generations[m.ID] != generation {
+		r.mu.Unlock()
+		return false
+	}
+	r.lastStat[m.ID] = result.Status
+	tracker := r.tracker
+	r.mu.Unlock()
+	if tracker != nil {
+		tracker.Observe(RuleFor(m), result.Status == "up", result.CheckedAt, result.Message)
+	}
+	return true
+}
+
+// ErrUnknownPushToken answers a ping for no running push monitor.
+var ErrUnknownPushToken = fmt.Errorf("unknown push token")
+
+// Ping records a push monitor's heartbeat (GET/POST /api/push/<token>). ok
+// false records an explicit failure the pinging job reported. The token is
+// matched in constant time against the running push monitors.
+func (r *Runner) Ping(token string, ok bool, message string) (store.Monitor, error) {
+	r.mu.Lock()
+	var entry pushEntry
+	found := false
+	for t, e := range r.pushTokens {
+		if tokenEqual(t, token) {
+			entry, found = e, true
+		}
+	}
+	r.mu.Unlock()
+	if !found {
+		return store.Monitor{}, ErrUnknownPushToken
+	}
+	now := time.Now()
+	res := store.CheckResult{MonitorID: entry.m.ID, CheckedAt: now, Status: "up", Message: message}
+	if !ok {
+		res.Status = "down"
+		if res.Message == "" {
+			res.Message = "job reported failure"
+		}
+	}
+	if !r.commit(entry.m, entry.generation, res) {
+		return entry.m, fmt.Errorf("monitor changed while the ping was recorded; retry")
+	}
+	if ok {
+		r.mu.Lock()
+		if r.generations[entry.m.ID] == entry.generation {
+			r.lastPing[entry.m.ID] = now
+		}
+		r.mu.Unlock()
+	}
+	return entry.m, nil
+}
+
+func tokenEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := 0; i < len(a); i++ {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
 }
