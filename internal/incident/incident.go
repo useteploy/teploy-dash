@@ -358,6 +358,35 @@ func (t *Tracker) AdoptOpen(rule Rule, startedAt time.Time, fails int, message s
 	t.persistLocked()
 }
 
+// AdoptFailing records a failure that existed before anything watched it (a
+// domain's first check) as an unannounced open incident, whatever the tracker's
+// own adoption window says. The caller follows a batch with AnnounceUnannounced,
+// so what was already broken arrives as one summary rather than an alert each.
+// A held or silenced rule is left to Observe, which applies the hold; reports
+// whether the rule was adopted.
+func (t *Tracker) AdoptFailing(rule Rule, startedAt time.Time, message string) bool {
+	rule.Policy = rule.Policy.normalized()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := rule.key()
+	if t.incidents[key] != nil {
+		return false
+	}
+	now := t.opts.Now()
+	if why := t.holdFor(rule, now); why != "" {
+		return false
+	}
+	st := t.state(key)
+	st.rule, st.lastMessage = rule, message
+	st.oks, st.fails, st.firstFailAt = 0, rule.Policy.FailAfter, startedAt
+	inc := &Incident{Key: key, ID: newIncidentID(), StartedAt: startedAt, OpenedAt: now,
+		ConsecutiveFailures: st.fails, Message: message}
+	describe(inc, rule)
+	t.incidents[key] = inc
+	t.persistLocked()
+	return true
+}
+
 // EndAdoption closes the adoption window and announces what it collected
 // (one summary for human channels; per-incident opens for machine ones).
 // It always writes incidents.json, so the next start is not a first run.

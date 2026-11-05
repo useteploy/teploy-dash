@@ -164,6 +164,13 @@ func requiredCapabilities(method, path string) []string {
 	if strings.HasPrefix(path, "/api/logs/") {
 		return []string{caps.ViewLogs}
 	}
+	// Domain health is a read: results of the scheduled check, nothing runs.
+	if path == "/api/domains" {
+		if method == http.MethodGet {
+			return []string{caps.ViewMetadata}
+		}
+		return []string{caps.ExecuteMutate}
+	}
 	// Onboarding preflight is a read probe; the POST form exists so
 	// CORS-safe clients can send a body.
 	if path == "/api/onboarding/preflight" || path == "/api/onboarding/entry" {

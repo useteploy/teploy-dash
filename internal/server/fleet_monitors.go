@@ -60,12 +60,22 @@ func isPrivateSuffix(h string) bool {
 	return false
 }
 
+// frontedHostsFunc says which hosts on a server have a Caddy route naming them;
+// known=false means nobody can say yet.
+type frontedHostsFunc func(server string) (fronted map[string]bool, known bool)
+
 // desiredFleetMonitors derives the monitor set from one fleet sweep. complete
 // reports whether every server was observed successfully: only a complete
 // sweep may retire a monitor, so an unreachable server never costs its apps
 // their monitoring.
-func desiredFleetMonitors(envelopes []ServerObservation) (want map[string]store.Monitor, complete bool) {
+//
+// A host-ingress domain is monitored only when something fronts it. Otherwise
+// it is a label on a raw published port and https://<domain>/ answers nothing.
+// Where the routes are not known, undetermined keeps an existing monitor without
+// creating one: missing evidence neither adds nor retires.
+func desiredFleetMonitors(envelopes []ServerObservation, frontedHosts frontedHostsFunc) (want map[string]store.Monitor, undetermined map[string]bool, complete bool) {
 	want = make(map[string]store.Monitor)
+	undetermined = make(map[string]bool)
 	complete = len(envelopes) > 0
 	for _, env := range envelopes {
 		if env.Error != "" {
@@ -80,11 +90,29 @@ func desiredFleetMonitors(envelopes []ServerObservation) (want map[string]store.
 			if app.Ingress == "external" {
 				continue
 			}
+			var fronted map[string]bool
+			frontedKnown := true
+			if app.Ingress == "host" {
+				if frontedHosts == nil {
+					frontedKnown = false
+				} else {
+					fronted, frontedKnown = frontedHosts(env.Server)
+				}
+			}
 			for _, h := range fleetMonitorHosts(app.Domain) {
 				if app.Server == "" {
 					app.Server = env.Server
 				}
 				id := fleetMonitorID(h)
+				if app.Ingress == "host" {
+					if !frontedKnown {
+						undetermined[id] = true
+						continue
+					}
+					if !fronted[h] {
+						continue
+					}
+				}
 				if _, ok := want[id]; ok {
 					continue
 				}
@@ -103,7 +131,7 @@ func desiredFleetMonitors(envelopes []ServerObservation) (want map[string]store.
 			}
 		}
 	}
-	return want, complete
+	return want, undetermined, complete
 }
 
 // reconcileFleetMonitors creates missing fleet monitors and, after a complete
@@ -112,7 +140,7 @@ func (s *Server) reconcileFleetMonitors(envelopes []ServerObservation) (added, r
 	if s.store == nil {
 		return 0, 0, nil
 	}
-	want, complete := desiredFleetMonitors(envelopes)
+	want, undetermined, complete := desiredFleetMonitors(envelopes, s.domainFrontedHosts)
 	existing, err := s.store.ListMonitors()
 	if err != nil {
 		return 0, 0, err
@@ -139,7 +167,7 @@ func (s *Server) reconcileFleetMonitors(envelopes []ServerObservation) (added, r
 			}
 			continue
 		}
-		if !complete {
+		if !complete || undetermined[m.ID] {
 			continue
 		}
 		if s.monitor != nil {

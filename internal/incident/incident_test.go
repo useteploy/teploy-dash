@@ -427,3 +427,49 @@ func TestReleaseHoldsOpensWithoutNextObservation(t *testing.T) {
 		t.Fatal("released twice")
 	}
 }
+
+// AdoptFailing opens unannounced whatever the first-run window says, so a new
+// signal source can fold what was already broken into one summary; it respects
+// holds, and a later recovery is announced because the summary announced it.
+func TestAdoptFailing(t *testing.T) {
+	out := &sink{}
+	hold := false
+	tr, err := New(Options{Alerter: out, Hold: func(Rule, time.Time) (bool, string) { return hold, "deploy" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := Rule{Source: "domain", ID: "a", Name: "a", App: "x", Policy: Policy{FailAfter: 2, RecoverAfter: 1}}
+	started := time.Now().Add(-time.Hour)
+	if !tr.AdoptFailing(rule, started, "broken") {
+		t.Fatal("not adopted")
+	}
+	if len(out.sent) != 0 {
+		t.Fatalf("adoption must be silent: %+v", out.sent)
+	}
+	open := tr.Open()
+	if len(open) != 1 || open[0].Notified || !open[0].StartedAt.Equal(started) {
+		t.Fatalf("open = %+v", open)
+	}
+	if tr.AdoptFailing(rule, started, "again") {
+		t.Fatal("an open rule cannot be adopted twice")
+	}
+	rule2 := Rule{Source: "domain", ID: "b", Name: "b", App: "x", Policy: Policy{FailAfter: 1}}
+	tr.AdoptFailing(rule2, started, "broken too")
+	if n := tr.AnnounceUnannounced(); n != 2 {
+		t.Fatalf("announced %d", n)
+	}
+	tr.Observe(rule, true, time.Now(), "fine")
+	var recovered int
+	for _, ev := range out.sent {
+		if ev.Kind == "incident_recovered" {
+			recovered++
+		}
+	}
+	if recovered != 1 {
+		t.Fatalf("events = %+v", out.sent)
+	}
+	hold = true
+	if tr.AdoptFailing(Rule{Source: "domain", ID: "c", App: "x"}, started, "held") {
+		t.Fatal("a held rule goes through Observe, not adoption")
+	}
+}
