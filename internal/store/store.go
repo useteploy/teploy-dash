@@ -28,6 +28,11 @@ type CheckResult struct {
 	// runner from the scheduler-captured configuration; SaveCheck commits
 	// only when it still matches the stored monitor's incarnation (D08).
 	Incarnation uint64 `json:"incarnation,omitempty"`
+	// CertNotAfter is when the certificate presented on this check expires,
+	// taken from the TLS handshake with the monitored host. Set on HTTPS
+	// monitors, including a certificate that failed verification; nil when no
+	// certificate was seen.
+	CertNotAfter *time.Time `json:"cert_not_after,omitempty"`
 }
 
 // Monitor represents an uptime monitor configuration.
