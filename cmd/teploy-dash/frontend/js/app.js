@@ -348,6 +348,7 @@ document.addEventListener('alpine:init', () => {
     { page: 'monitors', path: '/monitors' },
     { page: 'monitor-detail', path: '/monitors/:id' },
     { page: 'domains', path: '/domains' },
+    { page: 'backups', path: '/backups' },
     { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
     { page: 'sources', path: '/sources' },
@@ -3602,6 +3603,235 @@ document.addEventListener('alpine:init', () => {
       }
       const issues = (s.issues || []).map(i => i.scope + ': ' + i.message).join('; ');
       return `${s.server}: part of the evidence is missing${issues ? ' (' + issues + ')' : ''}. What it covers reads unknown.`;
+    },
+  }));
+
+  // ── Backups Page (plan P2) ──
+  // Every database and volume across the fleet: coverage, encryption, restore
+  // tests, and the configuration surfaces (storage once, recovery key, one
+  // policy). Reads the slow sweep's cached view; Refresh asks for a new one.
+  Alpine.data('backupsPage', () => withAsyncLoad({
+    view: null,
+    loading: true,
+    refreshInterval: null,
+    _loadGeneration: 0,
+
+    // storage connect form
+    storage: { provider: 'b2', bucket: '', region: '', account_id: '', endpoint: '', base_prefix: '', access_key: '', secret_key: '', allow_internal: false, delete_refusal_ok: false },
+    storageBusy: false,
+    storageResult: null,
+    rotateMode: false,
+
+    // recovery key flow
+    reauthPassword: '',
+    keygenBusy: false,
+    keygen: null,          // {public_key, private_key, file_text, file_name} shown ONCE
+    keyConfirmedBusy: false,
+    drillOutput: '',
+    drillBusy: false,
+
+    // policy form
+    policy: { interval: '1h', preset: 'standard', volumes: false, volume_max_gb: 0, window_start_hour: null, window_end_hour: null },
+    policyBusy: false,
+    policyResult: null,
+
+    // per-row exclude / override dialogs
+    excludeFor: null,
+    excludeReason: '',
+    overrideFor: null,
+    override: { cron: '0 3 * * *', keep_last: 0, max_age_days: 0 },
+
+    async init() {
+      await this.load();
+      this.refreshInterval = setInterval(() => this.load(), 60000);
+    },
+
+    destroy() {
+      clearInterval(this.refreshInterval);
+      this._loadGeneration++;
+    },
+
+    async load() {
+      const generation = ++this._loadGeneration;
+      try {
+        const data = await api.get('/api/backups');
+        if (generation !== this._loadGeneration) return;
+        this.view = data;
+        if (data.policy) {
+          this.policy.interval = data.policy.interval || this.policy.interval;
+          this.policy.preset = data.policy.preset || this.policy.preset;
+          this.policy.volumes = !!data.policy.volumes;
+          this.policy.volume_max_gb = data.policy.volume_max_gb || 0;
+        }
+        if (data.window) {
+          this.policy.window_start_hour = data.window.start_hour;
+          this.policy.window_end_hour = data.window.end_hour;
+        }
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
+      } catch (e) {
+        if (generation !== this._loadGeneration) return;
+        this.loadError = `Could not load backups: ${e.message}`;
+      }
+      this.loading = false;
+    },
+
+    async refresh() {
+      try {
+        await api.post('/api/backups/refresh', {});
+        showToast('Reading every server now — the page refreshes as evidence arrives', 'info');
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+
+    get rows() { return (this.view && this.view.rows) || []; },
+    get servers() { return (this.view && this.view.servers) || []; },
+    get tests() { return (this.view && this.view.tests) || []; },
+    get checklist() { return (this.view && this.view.checklist) || []; },
+    get recovery() { return (this.view && this.view.recovery) || {}; },
+    get storageView() { return (this.view && this.view.storage) || null; },
+
+    countBy(state) { return this.rows.filter(r => r.state === state).length; },
+
+    coverageLabel(state) {
+      return ({ covered: 'covered', stale: 'stale', failing: 'failing', uncovered: 'uncovered', excluded: 'excluded', adopted: 'adopted', unknown: 'unknown' })[state] || state;
+    },
+
+    coverageClass(state) {
+      return ({ covered: 'green', adopted: 'green', excluded: 'gray', unknown: 'gray', stale: 'yellow', uncovered: 'yellow', failing: 'red' })[state] || 'gray';
+    },
+
+    ageLabel(seconds) {
+      if (seconds === undefined || seconds === null) return 'never';
+      if (seconds < 90) return 'just now';
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 120) return `${minutes} min ago`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 48) return `${hours} h ago`;
+      return `${Math.round(hours / 24)} days ago`;
+    },
+
+    bytesLabel(bytes) {
+      if (!bytes) return '—';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let v = bytes, i = 0;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+    },
+
+    rowName(row) {
+      if (row.app && row.accessory) return `${row.server} · ${row.app}/${row.accessory}`;
+      return `${row.server} · ${row.name}`;
+    },
+
+    serverProblemLine(s) {
+      if (s.state === 'ok') return '';
+      if (s.state === 'unreachable') return `${s.server} could not be read${s.error ? ': ' + s.error : ''} — its rows read unknown, not healthy.`;
+      return `${s.server}: ${s.error || 'the last status read is too old to trust'}.`;
+    },
+
+    // A server-level note worth showing above the table.
+    serverNotes(s) {
+      const notes = [];
+      if (s.aws_cli_problem) notes.push(s.aws_cli_problem);
+      if (s.target && s.target.configured && !s.target.reachable && s.target.error) notes.push(`backup target: ${s.target.error}`);
+      if (s.heartbeat_note) notes.push(s.heartbeat_note);
+      return notes;
+    },
+
+    async connectStorage() {
+      this.storageBusy = true;
+      try {
+        const body = { ...this.storage, rotate: this.rotateMode };
+        const data = await api.post('/api/backups/storage', body);
+        this.storageResult = data;
+        this.rotateMode = false;
+        this.storage.access_key = '';
+        this.storage.secret_key = '';
+        showToast(data.all_ok ? 'Storage connected to every server' : 'Storage pushed; some servers did not verify — see the list', data.all_ok ? 'success' : 'info');
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.storageBusy = false;
+    },
+
+    async generateKey() {
+      this.keygenBusy = true;
+      try {
+        this.keygen = await api.post('/api/backups/recovery-key/generate', { password: this.reauthPassword });
+        this.reauthPassword = '';
+        showToast('Key generated — it is shown once and stored nowhere', 'info');
+      } catch (e) { showToast(e.message, 'error'); }
+      this.keygenBusy = false;
+    },
+
+    async confirmKey() {
+      if (!this.keygen) return;
+      this.keyConfirmedBusy = true;
+      try {
+        await api.post('/api/backups/recovery-key/confirm', { password: this.reauthPassword, public_key: this.keygen.public_key });
+        this.keygen = null;
+        this.reauthPassword = '';
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+      this.keyConfirmedBusy = false;
+    },
+
+    async submitDrill() {
+      this.drillBusy = true;
+      try {
+        await api.post('/api/backups/recovery-key/drill', { output: this.drillOutput });
+        this.drillOutput = '';
+        showToast('Decrypt drill recorded', 'success');
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+      this.drillBusy = false;
+    },
+
+    async applyPolicy() {
+      this.policyBusy = true;
+      try {
+        this.policyResult = await api.post('/api/backups/policy', {
+          interval: this.policy.interval, preset: this.policy.preset,
+          volumes: this.policy.volumes, volume_max_gb: Number(this.policy.volume_max_gb) || 0,
+          window_start_hour: this.policy.window_start_hour, window_end_hour: this.policy.window_end_hour,
+        });
+        showToast(this.policyResult.all_ok ? 'Policy written to every server' : 'Policy written where it could be — see the list', this.policyResult.all_ok ? 'success' : 'info');
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+      this.policyBusy = false;
+    },
+
+    beginExclude(row) {
+      this.excludeFor = row;
+      this.excludeReason = '';
+    },
+
+    async submitExclude(excluded) {
+      const row = this.excludeFor;
+      if (!row || !row.exclude_name) return;
+      try {
+        await api.post('/api/backups/exclude', { server: row.server, name: row.exclude_name, excluded, reason: this.excludeReason });
+        this.excludeFor = null;
+        this.excludeReason = '';
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
+    },
+
+    beginOverride(row) {
+      this.overrideFor = row;
+      this.override = { cron: '0 3 * * *', keep_last: 0, max_age_days: 0 };
+    },
+
+    async submitOverride(remove) {
+      const row = this.overrideFor;
+      if (!row || !row.app) return;
+      try {
+        await api.post('/api/backups/override', { server: row.server, app: row.app, cron: this.override.cron,
+          keep_last: Number(this.override.keep_last) || 0, max_age_days: Number(this.override.max_age_days) || 0, remove });
+        this.overrideFor = null;
+        await this.load();
+      } catch (e) { showToast(e.message, 'error'); }
     },
   }));
 

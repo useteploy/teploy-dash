@@ -76,6 +76,7 @@
     <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" title="DNS, route, certificate and HTTP health for every domain" :class="{ active: $store.router.page === 'domains' }" :aria-current="$store.router.page === 'domains' ? 'page' : null" @click.prevent="$store.router.navigate('domains')">Domains</a></li>
+    <li><a href="#" title="Every database and volume across the fleet — coverage, encryption, restore tests" :class="{ active: $store.router.page === 'backups' }" :aria-current="$store.router.page === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'sources' }" @click.prevent="$store.router.navigate('sources')">Sources</a></li>
@@ -1715,6 +1716,418 @@
               </template>
             </tbody>
           </table>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- ═══ Backups Page (plan P2) ═══ -->
+  <!-- Every database and volume across the fleet, plus the configuration
+       surfaces: connect storage once, the recovery key and its decrypt
+       drill, one policy. Reads the cached fleet view; nothing probes a
+       server on load. -->
+  <template x-if="$store.router.page === 'backups'">
+    <div x-data="backupsPage">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Backups</h1>
+          <p class="subtitle" x-text="rows.length
+            ? rows.length + ' target' + (rows.length !== 1 ? 's' : '') + ': ' + countBy('covered') + countBy('adopted') + ' covered, ' + countBy('failing') + ' failing, ' + countBy('stale') + ' stale, ' + countBy('uncovered') + ' uncovered'
+            : 'Every database and volume across the fleet — storage, encryption, restore tests'"></p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-sm" @click="refresh()" x-text="'Read servers now'"></button>
+        </div>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && view && !view.cli_supported">
+        <div role="status" class="stale-banner" x-text="view.note"></div>
+      </template>
+
+      <template x-if="!loading && view && view.sweep_error">
+        <div role="status" class="stale-banner" x-text="'The last fleet read did not finish: ' + view.sweep_error"></div>
+      </template>
+
+      <!-- First-run checklist: storage → alert channel → recovery drill →
+           first verified backup. Shown until complete. -->
+      <template x-if="!loading && checklist.length > 0">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Get protected</h2><span class="card-meta">Four steps, once</span></div>
+          <ul style="list-style:none;padding:0;margin:0">
+            <template x-for="item in checklist" :key="item.id">
+              <li style="display:flex;gap:.5rem;align-items:baseline;padding:.25rem 0">
+                <span class="dot" :class="item.state === 'done' ? 'green' : (item.state === 'todo' ? 'red' : 'gray')"></span>
+                <span x-text="item.label"></span>
+                <span class="text-muted" x-text="item.detail"></span>
+              </li>
+            </template>
+          </ul>
+        </div>
+      </template>
+
+      <!-- The decrypt drill banner: a key (or storage) without a passed
+           drill keeps this up. Deliberately not an alert. -->
+      <template x-if="!loading && recovery.banner">
+        <div role="status" class="stale-banner">
+          <strong>Recovery is unproven.</strong>
+          <span x-text="recovery.public_key
+            ? 'A recovery key exists but has never decrypted a backup. Do the drill below — until then, a lost server means unreadable backups.'
+            : 'Backups run without a recovery key: they are stored unencrypted. Generate one below.'"></span>
+        </div>
+      </template>
+
+      <template x-if="!loading && view && view.cli_supported">
+        <div>
+          <!-- Storage + recovery + policy -->
+          <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));margin-bottom:1rem">
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
+                <h2>Storage</h2>
+                <span class="card-meta" x-text="storageView
+                  ? storageView.provider.toUpperCase() + ' · ' + storageView.bucket + (storageView.rotated_at ? ' · rotated ' + ageLabel(Math.round((Date.now() - Date.parse(storageView.rotated_at)) / 1000)) : '')
+                  : 'Connect once, push to every server'"></span>
+              </div>
+
+              <template x-if="storageView">
+                <div>
+                  <p class="text-muted" style="margin:.25rem 0 .5rem">Credentials live on the servers; Dash keeps only the bucket name and each server's prefix. Rotation re-prompts, pushes, verifies — and tells you when to revoke the old key.</p>
+                  <dl style="margin:0">
+                    <div style="display:flex;gap:.5rem"><dt class="text-muted">Endpoint</dt><dd class="mono" x-text="storageView.endpoint || '—'"></dd></div>
+                    <div style="display:flex;gap:.5rem"><dt class="text-muted">Prefixes</dt><dd class="mono" x-text="Object.entries(storageView.prefixes || {}).map(([s, p]) => s + ' → ' + p).join(', ') || '—'"></dd></div>
+                  </dl>
+                  <div class="header-actions" style="margin-top:.5rem">
+                    <button class="btn btn-sm btn-danger" @click="rotateMode = true" x-show="!rotateMode">Rotate keys…</button>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="!storageView || rotateMode">
+                <form @submit.prevent="connectStorage()">
+                  <p class="text-muted" x-show="rotateMode" style="margin:.25rem 0 .5rem">Enter the NEW keys. Dash pushes them to every server, verifies each one, and only then tells you to revoke the old key.</p>
+                  <div class="form-row">
+                    <label>Provider
+                      <select x-model="storage.provider">
+                        <option value="b2">Backblaze B2 (recommended)</option>
+                        <option value="r2">Cloudflare R2</option>
+                        <option value="custom">S3-compatible (advanced)</option>
+                      </select>
+                    </label>
+                    <label x-show="storage.provider === 'r2'">Cloudflare account ID<input x-model="storage.account_id" placeholder="32 hex characters"></label>
+                    <label x-show="storage.provider === 'b2'">B2 region<input x-model="storage.region" placeholder="us-west-004"></label>
+                  </div>
+                  <template x-if="storage.provider === 'custom'">
+                    <div class="form-row">
+                      <label>Endpoint URL<input x-model="storage.endpoint" placeholder="https://s3.example.com"></label>
+                      <label>Region<input x-model="storage.region" placeholder="us-east-1"></label>
+                    </div>
+                  </template>
+                  <div class="form-row">
+                    <label>Bucket<input x-model="storage.bucket" placeholder="teploy-backups"></label>
+                    <label>Base prefix (optional)<input x-model="storage.base_prefix" placeholder="teploy"></label>
+                  </div>
+                  <div class="form-row">
+                    <label>Access key ID<input x-model="storage.access_key" autocomplete="off"></label>
+                    <label>Secret access key<input type="password" x-model="storage.secret_key" autocomplete="new-password"></label>
+                  </div>
+                  <label class="checkbox-label" x-show="storage.provider === 'custom'"><input type="checkbox" x-model="storage.allow_internal"> This endpoint is on a private network (admin choice)</label>
+                  <label class="checkbox-label"><input type="checkbox" x-model="storage.delete_refusal_ok"> The store refuses deletes on purpose (a bucket lock)</label>
+                  <p class="text-muted">Dash probes write/read/delete first. On B2, a key that cannot delete is the recommended setup: a compromised server cannot destroy history.</p>
+                  <button class="btn" type="submit" :disabled="storageBusy" x-text="storageBusy ? 'Working…' : (rotateMode ? 'Push new keys to every server' : 'Probe and connect every server')"></button>
+                  <button class="btn btn-sm" type="button" x-show="rotateMode" @click="rotateMode = false">Cancel</button>
+                </form>
+              </template>
+
+              <template x-if="storageResult">
+                <div style="margin-top:.5rem">
+                  <p class="text-muted" x-show="storageResult.probe_note" x-text="storageResult.probe_note"></p>
+                  <p x-show="storageResult.revoke_note" x-text="storageResult.revoke_note"></p>
+                  <template x-for="sv in storageResult.servers || []" :key="sv.server">
+                    <p style="margin:.15rem 0" :class="sv.verified ? 'text-muted' : ''">
+                      <span class="dot" :class="sv.verified ? 'green' : 'red'"></span>
+                      <span class="mono" x-text="sv.server"></span>
+                      <span x-text="sv.verified ? ' stored and verified' : (sv.pushed ? ' stored, not verified: ' + sv.error : ' not pushed: ' + sv.error)"></span>
+                    </p>
+                  </template>
+                </div>
+              </template>
+            </div>
+
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
+                <h2>Recovery key</h2>
+                <span class="card-meta" x-text="recovery.public_key
+                  ? (recovery.drill_passed_at ? 'drill passed' : 'drill pending')
+                  : 'none yet — backups are unencrypted'"></span>
+              </div>
+
+              <template x-if="!recovery.public_key && !keygen">
+                <div>
+                  <p class="text-muted">Backups are encrypted to the owner recovery key and each server's own identity. The private key is shown once, stored nowhere by Dash, and is the only way back when a server is lost.</p>
+                  <div class="form-row">
+                    <label>Dash password (re-authentication)<input type="password" x-model="reauthPassword" autocomplete="current-password"></label>
+                  </div>
+                  <button class="btn" @click="generateKey()" :disabled="keygenBusy" x-text="keygenBusy ? 'Generating…' : 'Generate recovery key'"></button>
+                </div>
+              </template>
+
+              <template x-if="keygen">
+                <div>
+                  <p><strong>Save this now.</strong> It is shown once and never stored. Write the file to offline storage before continuing.</p>
+                  <textarea class="mono" rows="4" readonly x-text="keygen.file_text" style="width:100%"></textarea>
+                  <a class="btn btn-sm" :href="'data:text/plain;charset=utf-8,' + encodeURIComponent(keygen.file_text)" :download="keygen.file_name">Download</a>
+                  <div class="form-row" style="margin-top:.5rem">
+                    <label>Dash password (re-authentication)<input type="password" x-model="reauthPassword" autocomplete="current-password"></label>
+                  </div>
+                  <button class="btn" @click="confirmKey()" :disabled="keyConfirmedBusy" x-text="keyConfirmedBusy ? 'Pushing to servers…' : \"I saved it — encrypt every server's backups\""></button>
+                  <button class="btn btn-sm" @click="keygen = null">Discard and start over</button>
+                </div>
+              </template>
+
+              <template x-if="recovery.public_key && !recovery.drill_passed_at">
+                <div>
+                  <p class="text-muted">Prove the key works: run the fetch with your saved recovery key and paste the JSON it prints. The object is re-assigned daily (retention can take the old one).</p>
+                  <p class="mono" style="white-space:pre-wrap;word-break:break-all" x-text="recovery.drill_command || 'Waiting for the first encrypted object…'"></p>
+                  <textarea rows="4" placeholder='{"key":"s3://…","size_bytes":…,"encrypted":true}' x-model="drillOutput" style="width:100%"></textarea>
+                  <button class="btn" @click="submitDrill()" :disabled="drillBusy || !recovery.drill_key" x-text="drillBusy ? 'Checking…' : 'Record the drill'"></button>
+                  <p class="text-muted" x-show="recovery.rotation_note" x-text="recovery.rotation_note"></p>
+                </div>
+              </template>
+
+              <template x-if="recovery.drill_passed_at">
+                <div>
+                  <p class="text-muted mono" style="word-break:break-all" x-text="'encrypting to ' + recovery.public_key"></p>
+                  <p class="text-muted" x-show="recovery.rotation_note" x-text="recovery.rotation_note"></p>
+                  <p class="text-muted">Decrypt drill passed <span x-text="ageLabel(Math.round((Date.now() - Date.parse(recovery.drill_passed_at)) / 1000))"></span>.</p>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
+              <h2>One policy</h2>
+              <span class="card-meta" x-text="view.policy ? view.policy.interval + ' · ' + view.policy.preset : 'same schedule and retention everywhere'"></span>
+            </div>
+            <p class="text-muted">Written to every server through the teploy CLI; a server's own excludes and adopted containers are kept. Servers that already send heartbeats elsewhere are left alone.</p>
+            <form @submit.prevent="applyPolicy()">
+              <div class="form-row">
+                <label>Frequency
+                  <select x-model="policy.interval">
+                    <template x-for="i in view.intervals || []" :key="i"><option :value="i" x-text="i"></option></template>
+                  </select>
+                </label>
+                <label>Retention
+                  <select x-model="policy.preset">
+                    <option value="simple">simple — keep 14 days</option>
+                    <option value="standard">standard — 7 daily, 4 weekly, 12 monthly</option>
+                  </select>
+                </label>
+              </div>
+              <div class="form-row">
+                <label class="checkbox-label"><input type="checkbox" x-model="policy.volumes"> Back up app volumes (each archive is a full copy)</label>
+                <label>Volume size cap (GB, 0 = none)<input type="number" min="0" step="0.5" x-model.number="policy.volume_max_gb"></label>
+              </div>
+              <div class="form-row">
+                <label>Restore-test window start (UTC hour)<input type="number" min="0" max="23" x-model.number="policy.window_start_hour"></label>
+                <label>Window end (UTC hour)<input type="number" min="0" max="23" x-model.number="policy.window_end_hour"></label>
+              </div>
+              <p class="text-muted" x-show="!view.public_url_set">Set Dash's public URL in Settings so servers can heartbeat after each run — that is how a stopped cron line is caught within a day.</p>
+              <button class="btn" type="submit" :disabled="policyBusy" x-text="policyBusy ? 'Writing…' : 'Apply to every server'"></button>
+            </form>
+            <template x-if="policyResult">
+              <div style="margin-top:.5rem">
+                <template x-for="sv in policyResult.servers || []" :key="sv.server">
+                  <p style="margin:.15rem 0">
+                    <span class="dot" :class="sv.ok ? 'green' : 'red'"></span>
+                    <span class="mono" x-text="sv.server"></span>
+                    <span class="text-muted" x-text="sv.ok ? (sv.note || 'policy written') : sv.error"></span>
+                  </p>
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <!-- Fleet rows -->
+          <template x-for="s in servers" :key="s.server">
+            <template x-if="s.state !== 'ok' || serverNotes(s).length > 0">
+              <div role="status" class="stale-banner" x-text="serverProblemLine(s) || (s.server + ': ' + serverNotes(s).join('; '))"></div>
+            </template>
+          </template>
+
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
+              <h2>Every target</h2>
+              <span class="card-meta" x-text="'projected ' + bytesLabel(view.projected_bytes) + ' of storage at steady state'"></span>
+            </div>
+            <template x-if="rows.length === 0">
+              <div class="empty-state"><p x-text="view.last_sweep_at ? 'No databases or volumes found on your servers yet.' : 'The first fleet read has not finished; it runs shortly after Dash starts.'"></p></div>
+            </template>
+            <template x-if="rows.length > 0">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Target</th>
+                      <th>Engine</th>
+                      <th>State</th>
+                      <th>Last good</th>
+                      <th>Newest copy</th>
+                      <th>Encrypted</th>
+                      <th>Restore test</th>
+                      <th>Old job</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in rows" :key="row.server + '/' + row.name">
+                      <tr>
+                        <td>
+                          <span class="mono" x-text="row.name"></span>
+                          <div class="text-muted" x-text="[row.app, row.server].filter(Boolean).join(' on ')"></div>
+                          <div class="text-muted" x-show="row.uncovered_databases && row.uncovered_databases.length" x-text="'uncovered databases: ' + row.uncovered_databases.join(', ')"></div>
+                          <div class="text-muted" x-show="row.reason" x-text="row.reason"></div>
+                        </td>
+                        <td x-text="row.engine || '—'"></td>
+                        <td>
+                          <span class="dot" :class="coverageClass(row.state)"></span>
+                          <span x-text="coverageLabel(row.state)"></span>
+                          <span class="text-muted" x-show="row.own_schedule" title="This target has its own schedule; the policy leaves it alone"> own schedule</span>
+                          <span class="text-muted" x-show="row.legacy_schedule" title="A pre-fleet-engine teploy cron line"> legacy</span>
+                        </td>
+                        <td>
+                          <span x-text="row.last_good ? ageLabel(row.last_good_age_seconds) : 'never'"></span>
+                          <div class="text-muted" x-show="row.last_error" x-text="row.last_error"></div>
+                        </td>
+                        <td x-text="bytesLabel(row.size_bytes)"></td>
+                        <td>
+                          <span class="dot" :class="row.encrypted ? 'green' : 'red'"></span>
+                          <span x-text="row.encrypted ? 'yes' : 'no'"></span>
+                        </td>
+                        <td>
+                          <span x-show="row.last_restore_test" x-text="row.last_restore_test.ok ? 'passed ' + ageLabel(Math.round((Date.now() - Date.parse(row.last_restore_test.at)) / 1000)) : 'FAILED ' + ageLabel(Math.round((Date.now() - Date.parse(row.last_restore_test.at)) / 1000))"></span>
+                          <span class="text-muted" x-show="!row.last_restore_test">never</span>
+                        </td>
+                        <td>
+                          <template x-if="row.migration">
+                            <span>
+                              <span class="dot" :class="row.migration.ready ? 'green' : 'gray'"></span>
+                              <span :title="row.migration.detail" x-text="row.migration.ready ? 'safe to remove' : 'not yet'"></span>
+                            </span>
+                          </template>
+                          <span class="text-muted" x-show="!row.migration">—</span>
+                        </td>
+                        <td>
+                          <button class="btn btn-sm" x-show="row.exclude_name && row.state !== 'excluded'" @click="beginExclude(row)">Exclude…</button>
+                          <button class="btn btn-sm" x-show="row.exclude_name && row.state === 'excluded'" @click="excludeFor = row; submitExclude(false)">Include</button>
+                          <button class="btn btn-sm" x-show="row.app && row.kind === 'volumes'" @click="beginOverride(row)">Own schedule…</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+
+            <!-- Exclude dialog -->
+            <template x-if="excludeFor">
+              <div class="card" style="margin-top:.5rem">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2 x-text="'Exclude ' + excludeFor.name + ' on ' + excludeFor.server + '?'"></h2></div>
+                <p class="text-muted">Excluded targets get no backup. The reason goes to the audit log.</p>
+                <div class="form-row"><label>Reason<input x-model="excludeReason" placeholder="backed up elsewhere / disposable"></label></div>
+                <button class="btn btn-danger" @click="submitExclude(true)" :disabled="!excludeReason.trim()">Exclude</button>
+                <button class="btn btn-sm" @click="excludeFor = null">Cancel</button>
+              </div>
+            </template>
+
+            <!-- Override dialog -->
+            <template x-if="overrideFor">
+              <div class="card" style="margin-top:.5rem">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2 x-text="'Own volume schedule for ' + overrideFor.app + ' on ' + overrideFor.server"></h2></div>
+                <p class="text-muted">A per-app schedule overrides the policy for this app's volumes. Five cron fields; retention counts what it keeps.</p>
+                <div class="form-row">
+                  <label>Cron<input x-model="override.cron" placeholder="0 3 * * *"></label>
+                  <label>Keep last<input type="number" min="0" x-model.number="override.keep_last"></label>
+                  <label>Max age (days)<input type="number" min="0" x-model.number="override.max_age_days"></label>
+                </div>
+                <button class="btn" @click="submitOverride(false)">Set schedule</button>
+                <button class="btn btn-sm" @click="submitOverride(true)" x-show="overrideFor.own_schedule">Return to the policy</button>
+                <button class="btn btn-sm" @click="overrideFor = null">Cancel</button>
+              </div>
+            </template>
+          </div>
+
+          <!-- Automatic restore tests -->
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
+              <h2>Automatic restore tests</h2>
+              <span class="card-meta" x-text="tests.length + ' dash-owned, weekly, in the off-hours window'"></span>
+            </div>
+            <p class="text-muted">One per covered database: the latest backup is restored into a scratch container on its own server and proven usable. One test per server at a time, only inside the window, and only when the host has RAM and disk to spare.</p>
+            <template x-if="tests.length === 0">
+              <div class="empty-state"><p>None yet — they appear as the policy covers databases.</p></div>
+            </template>
+            <template x-if="tests.length > 0">
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Test</th><th>Engine</th><th>Next</th><th>Last run</th><th>History</th></tr></thead>
+                  <tbody>
+                    <template x-for="t in tests" :key="t.id">
+                      <tr>
+                        <td>
+                          <span class="mono" x-text="[t.server, t.app || t.accessory, t.database].filter(Boolean).join(' · ')"></span>
+                          <span class="text-muted" x-show="t.adopted"> adopted</span>
+                        </td>
+                        <td x-text="t.engine || '—'"></td>
+                        <td x-text="ageLabel(Math.round((Date.parse(t.next_due_at) - Date.now()) / 1000)).replace(' ago', '')"></td>
+                        <td>
+                          <template x-if="t.last_run">
+                            <span>
+                              <span class="dot" :class="t.last_run.ok ? 'green' : (t.last_run.skipped ? 'gray' : 'red')"></span>
+                              <span x-text="t.last_run.skipped ? t.last_run.skipped : (t.last_run.ok ? 'passed' : 'failed')"></span>
+                            </span>
+                          </template>
+                          <span class="text-muted" x-show="!t.last_run">not yet</span>
+                        </td>
+                        <td class="text-muted" x-text="t.history"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+          </div>
+
+          <!-- Migration off hand-written jobs (report-only) -->
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Retiring hand-written backup jobs</h2></div>
+            <p class="text-muted" x-text="view.handwritten_rule"></p>
+            <p class="text-muted">Dash cannot read a server's systemd timers and cron scripts (no CLI read for them yet), so the known job names are a checklist to confirm by hand:</p>
+            <ul>
+              <template x-for="job in view.handwritten || []" :key="job.name">
+                <li><span class="mono" x-text="job.name"></span> — <span class="text-muted" x-text="job.where"></span></li>
+              </template>
+            </ul>
+            <p class="text-muted">A row above shows “safe to remove” when its database has had two consecutive good policy backups and a passing restore test of the same engine. Removal itself stays a human action on the server; keep the old dumps until they age out.</p>
+          </div>
+
+          <!-- Dash itself -->
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Dash itself</h2><span class="card-meta" x-text="view.self_backup.available ? 'covered' : 'not covered yet'"></span></div>
+            <p x-text="view.self_backup.reason"></p>
+            <p class="text-muted">Rebuild runbook: <span class="mono" x-text="view.self_backup.runbook"></span> in the repository.</p>
+          </div>
         </div>
       </template>
     </div>
