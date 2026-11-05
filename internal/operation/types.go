@@ -131,6 +131,13 @@ type Request struct {
 	Accessory string `json:"accessory,omitempty"`
 	// BackupID is the backup a restore promotes (`backup restore <id>`).
 	BackupID string `json:"backup_id,omitempty"`
+	// Database restores one database's own series (`backup restore --database`,
+	// backup-fleet-v1) instead of the accessory's primary. Needs Accessory.
+	Database string `json:"database,omitempty"`
+	// NoBackup skips the automatic backup the CLI takes before a restore or a
+	// purge (backup-fleet-v1). An explicit choice: without it, a failed backup
+	// refuses the destructive step.
+	NoBackup bool `json:"no_backup,omitempty"`
 }
 
 type Operation struct {

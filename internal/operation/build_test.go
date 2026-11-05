@@ -22,8 +22,11 @@ func TestAllowlistedBuilders(t *testing.T) {
 		{"lifecycle", Request{Kind: KindAppLifecycle, Server: "prod", App: "web", Action: "restart"}, []string{"restart", "--host"}, 5 * time.Minute},
 		{"maintenance", Request{Kind: KindMaintenance, Server: "prod", App: "web", Action: "on"}, []string{"maintenance", "on"}, 5 * time.Minute},
 		{"redeploy", Request{Kind: KindRedeploy, Server: "prod", App: "web"}, []string{"redeploy", "--json"}, 30 * time.Minute},
-		{"backup_create", Request{Kind: KindBackupCreate, Server: "prod", App: "web"}, []string{"backup", "create"}, 30 * time.Minute},
-		{"backup_restore", Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000"}, []string{"backup", "restore"}, 60 * time.Minute},
+		{"backup_create", Request{Kind: KindBackupCreate, Server: "prod", App: "web"}, []string{"backup", "create"}, 6*time.Hour + 15*time.Minute},
+		{"backup_restore", Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000"}, []string{"backup", "restore"}, 12*time.Hour + 15*time.Minute},
+		{"backup_restore_no_backup", Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000", NoBackup: true}, []string{"backup", "restore"}, 6*time.Hour + 15*time.Minute},
+		{"purge", Request{Kind: KindRemove, Server: "prod", App: "web", Purge: true}, []string{"remove", "--yes"}, 6*time.Hour + 15*time.Minute},
+		{"purge_no_backup", Request{Kind: KindRemove, Server: "prod", App: "web", Purge: true, NoBackup: true}, []string{"remove", "--yes"}, 10 * time.Minute},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -36,6 +39,59 @@ func TestAllowlistedBuilders(t *testing.T) {
 				t.Fatalf("command=%+v target=%q", command, target)
 			}
 		})
+	}
+}
+
+// Slice 4: the flags of the CLI's fleet engine reach argv only when asked for, so
+// an older CLI keeps today's command, and a database row never loses its scope.
+func TestFleetBackupFlags(t *testing.T) {
+	flagged := func(req Request) []string {
+		t.Helper()
+		command, _, _, err := Build(req, testResolver)
+		if err != nil {
+			t.Fatalf("%+v: %v", req, err)
+		}
+		return command.Args
+	}
+	id := "20261019-120000"
+	plain := flagged(Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: id})
+	if slices.Contains(plain, "--no-backup") || slices.Contains(plain, "--database") {
+		t.Fatalf("plain restore must keep today's argv: %v", plain)
+	}
+	if purge := flagged(Request{Kind: KindRemove, Server: "prod", App: "web", Purge: true}); slices.Contains(purge, "--no-backup") {
+		t.Fatalf("a purge backs up unless told otherwise: %v", purge)
+	}
+	if purge := flagged(Request{Kind: KindRemove, Server: "prod", App: "web", Purge: true, NoBackup: true}); !slices.Contains(purge, "--no-backup") {
+		t.Fatalf("purge no_backup: %v", purge)
+	}
+	args := flagged(Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: id, Accessory: "postgres", Database: "orders", NoBackup: true})
+	if i := slices.Index(args, "--database"); i < 0 || args[i+1] != "orders" || !slices.Contains(args, "--no-backup") {
+		t.Fatalf("database restore: %v", args)
+	}
+
+	for name, req := range map[string]Request{
+		"remove no_backup without purge": {Kind: KindRemove, Server: "prod", App: "web", NoBackup: true},
+		"database without accessory":     {Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: id, Database: "orders"},
+		"database flag smuggling":        {Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: id, Accessory: "postgres", Database: "--no-backup"},
+		"database with a space":          {Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: id, Accessory: "postgres", Database: "a b"},
+	} {
+		if _, _, _, err := Build(req, testResolver); err == nil {
+			t.Errorf("%s: want a refusal", name)
+		}
+	}
+}
+
+// A restore's command may run for hours; its alert hold may not.
+func TestHoldCeilingStaysShort(t *testing.T) {
+	restore := Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000"}
+	if got := HoldCeiling(restore); got != 60*time.Minute {
+		t.Fatalf("restore hold = %v", got)
+	}
+	if got := HoldCeiling(Request{Kind: KindRemove, Purge: true}); got != 60*time.Minute {
+		t.Fatalf("purge hold = %v", got)
+	}
+	if got := HoldCeiling(Request{Kind: KindRemove}); got != 10*time.Minute {
+		t.Fatalf("remove hold = %v", got)
 	}
 }
 

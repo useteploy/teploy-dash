@@ -148,15 +148,20 @@ func BuildRemove(req Request, resolve Resolver) (Command, Server, string, error)
 	if err != nil {
 		return Command{}, Server{}, "", err
 	}
+	if req.NoBackup && !req.Purge {
+		return Command{}, Server{}, "", fmt.Errorf("no_backup only applies to a purge")
+	}
 	args := []string{"remove", "--yes", "--json", "--host", srv.Host, "--app", req.App}
 	if req.Purge {
 		args = append(args, "--purge")
 	}
+	if req.NoBackup {
+		args = append(args, "--no-backup")
+	}
 	if req.Redirect != "" {
 		args = append(args, "--redirect", req.Redirect)
 	}
-	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindRemove)}, srv, appTarget(req), nil
-
+	return Command{Args: addUser(args, srv.User), Timeout: ExecutionTimeout(req)}, srv, appTarget(req), nil
 }
 
 func BuildTemplateInstall(req Request, resolve Resolver, varStdin bool) (Command, Server, string, error) {
@@ -284,7 +289,7 @@ func BuildBackupCreate(req Request, resolve Resolver) (Command, Server, string, 
 	if req.Accessory != "" {
 		args = append(args, "--accessory", req.Accessory)
 	}
-	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindBackupCreate)}, srv, appTarget(req), nil
+	return Command{Args: addUser(args, srv.User), Timeout: ExecutionTimeout(req)}, srv, appTarget(req), nil
 }
 
 // BuildBackupRestore renders `teploy backup restore <id> --yes --json`: the
@@ -302,16 +307,68 @@ func BuildBackupRestore(req Request, resolve Resolver) (Command, Server, string,
 	if req.Accessory != "" && !validIdentifier(req.Accessory) {
 		return Command{}, Server{}, "", fmt.Errorf("invalid accessory")
 	}
+	if req.Database != "" && req.Accessory == "" {
+		return Command{}, Server{}, "", fmt.Errorf("database needs an accessory")
+	}
+	if req.Database != "" && !validIdentifier(req.Database) {
+		return Command{}, Server{}, "", fmt.Errorf("database name %q can only be restored with the CLI", req.Database)
+	}
 	args := []string{"backup", "restore", req.BackupID, "--yes", "--json", "--host", srv.Host, "--app", req.App}
 	if req.Accessory != "" {
 		args = append(args, "--accessory", req.Accessory)
 	}
-	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindBackupRestore)}, srv, appTarget(req), nil
+	if req.Database != "" {
+		args = append(args, "--database", req.Database)
+	}
+	if req.NoBackup {
+		args = append(args, "--no-backup")
+	}
+	return Command{Args: addUser(args, srv.User), Timeout: ExecutionTimeout(req)}, srv, appTarget(req), nil
 }
 
-// KindTimeout is the execution ceiling of an operation kind — the one table
-// both Build and Alerts v2 suppression read (a hung deploy may hide an
-// outage for at most grace + this, plan P3.2).
+// The CLI bounds one backup or restore of one target at 6h (backup.BackupDeadline,
+// backup-fleet-v1). Dash's ceiling sits above it, so the CLI's own deadline and
+// cleanup fire first: killing the CLI mid-restore is the worst way to stop one.
+const (
+	cliBackupDeadline = 6 * time.Hour
+	cliDeadlineMargin = 15 * time.Minute
+)
+
+// ExecutionTimeout is how long Dash lets one request's CLI command run.
+func ExecutionTimeout(req Request) time.Duration {
+	switch req.Kind {
+	case KindBackupCreate:
+		return cliBackupDeadline + cliDeadlineMargin
+	case KindBackupRestore:
+		if req.NoBackup {
+			return cliBackupDeadline + cliDeadlineMargin
+		}
+		// The automatic backup first, then the restore: 6h each.
+		return 2*cliBackupDeadline + cliDeadlineMargin
+	case KindRemove:
+		// Killed during its backup, a purge has deleted nothing and can be
+		// re-run, so one backup's deadline is enough here.
+		if req.Purge && !req.NoBackup {
+			return cliBackupDeadline + cliDeadlineMargin
+		}
+	}
+	return KindTimeout(req.Kind)
+}
+
+// HoldCeiling caps how long one request may hold back alerts for its app (a hung
+// operation may hide an outage for at most grace + this, plan P3.2). Separate from
+// ExecutionTimeout on purpose: a long restore outliving its hold alerts, which is
+// the safe direction; a hung one must not hide an outage for hours.
+func HoldCeiling(req Request) time.Duration {
+	if req.Kind == KindRemove && req.Purge {
+		// The app goes away only after the backup taken first.
+		return 60 * time.Minute
+	}
+	return KindTimeout(req.Kind)
+}
+
+// KindTimeout is the default ceiling of an operation kind: the execution timeout
+// of most kinds and the base of HoldCeiling.
 func KindTimeout(kind Kind) time.Duration {
 	switch kind {
 	case KindDeploy, KindRedeploy, KindTemplateInstall, KindBackupCreate:

@@ -1162,13 +1162,13 @@ func (s *Server) alertHold(rule incident.Rule, now time.Time) (bool, string) {
 }
 
 // operationHolds is one operation's hold window: from admission until grace
-// after it finishes, capped at grace + its kind's timeout from its start.
+// after it finishes, capped at grace + its hold ceiling from its start.
 func operationHolds(op *operation.Operation, now time.Time) (bool, string) {
 	start := op.CreatedAt
 	if op.StartedAt != nil {
 		start = *op.StartedAt
 	}
-	end := start.Add(operation.KindTimeout(op.Request.Kind) + alertHoldGrace)
+	end := start.Add(operation.HoldCeiling(op.Request) + alertHoldGrace)
 	if op.Status.Terminal() {
 		if op.FinishedAt == nil {
 			return false, ""
