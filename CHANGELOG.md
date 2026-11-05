@@ -21,8 +21,9 @@ All notable changes to teploy-dash are recorded here.
   server names it or public DNS answers. Existing monitors are never retired on the
   absence of that evidence.
 - `teploy.yml` no longer carries the `dash.example.com` placeholder.
-- The image bundles teploy CLI v0.1.50 (from v0.1.49): database engine
-  detection, safe in-place restore, dump verification and cron checks.
+- The image bundles teploy CLI v0.1.51 (from v0.1.49): database engine
+  detection, safe in-place restore, dump verification, cron checks and
+  `domains check`.
 - The database actions panel shows the current restore command, and points to
   the Backups tab, which already restores without a project folder.
 
