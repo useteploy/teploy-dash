@@ -49,6 +49,25 @@ All notable changes to teploy-dash are recorded here.
     against the paths the code writes; the page reports the self-backup CLI gap
     (no arbitrary-path targets, no owner-key-only encryption) instead of
     pretending.
+- Cleanup page and `GET /api/cleanup`: what is left over on each server from the
+  CLI's read-only `server audit` — findings with evidence, sizes and severities,
+  per-server checks and disk attribution. A run is a durable operation (one per
+  server at a time); the cached report keeps its age, and a failed run keeps the
+  last report. Partially-audited and unreachable servers are labelled as
+  themselves, never clean. Needs teploy v0.1.53 on the dashboard host
+  (capability `server-audit-v1`).
+- Fix buttons for findings whose remedy the CLI names, re-rendered from dash's
+  operation allowlist (`route remove`, `releases prune --keep N`, `server prune
+  --build-cache --dangling`, orphan `remove`, `redeploy`) and run as durable
+  operations; destructive remedies require the finding's app or subject name
+  typed exactly, enforced server-side. After a remedy finishes, the page offers
+  the re-audit that proves the finding cleared.
+- Dismissals per finding id (audited): hidden from the default view but counted
+  and reversible; a fresh full audit that no longer reports the finding retires
+  the dismissal, while a partial or unreachable audit retires nothing.
+- Contracts corpus pin bumped to teploy-cli `ebf8aa4` (rev 19); the
+  server-audit envelope is registered in the contracts validator and decoded
+  by the corpus tests.
 - Domains page and `GET /api/domains`: one row per domain joining DNS, route,
   certificate and HTTP, naming the first failing layer with its evidence and age.
 - Certificate expiry from each HTTPS monitor's TLS handshake, stored on the check

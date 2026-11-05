@@ -332,6 +332,36 @@ because the engine runs on each server, not here).
 Every action is audited; connecting storage and the recovery key need
 `administer.credentials`, the policy and excludes `execute.mutate`, and nothing
 here is exposed over MCP.
+### Cleanup
+
+**Cleanup** answers "what is left over on each server?" with the CLI's read-only
+audit (`teploy server audit --json`, capability `server-audit-v1`, teploy v0.1.53
+on the dashboard host): stale and dead routes, state with no containers, versions
+beyond the keep policy, reclaimable build cache, dangling volumes, large writable
+layers, unmanaged containers, a Caddyfile with no Caddy, a missing cron daemon and
+disk pressure — each finding with its evidence, size and severity.
+
+- An audit takes minutes over SSH, so **Run audit** is a durable operation you can
+  follow; the page shows the cached report with its age while it runs, and one
+  audit per server at a time. A failed run keeps the last report and names the
+  failure — it never clears the page.
+- Honesty first: a partially-audited server is labelled partially audited (the
+  findings its unread checks would have produced are missing, not clean), an
+  unreachable one says so, and a server never audited says that too.
+- A **Fix** button exists only where the CLI named the command (`remedy.argv`) and
+  dash can rebuild it from its own allowlist (`route remove`, `releases prune`,
+  `server prune`, `remove`, `redeploy`). Everything else is report-only with its
+  evidence — including remedies a newer CLI might name that this dash has not
+  learned yet, which show the command to run by hand.
+- Destructive fixes (removing orphaned state, pruning versions) ask for the
+  finding's app name typed exactly — enforced by the server, not just the dialog.
+  Nothing destructive is one click.
+- After a fix finishes, the page offers the re-audit that proves the finding
+  cleared.
+- Findings can be **dismissed** per finding id: hidden from the default view but
+  counted and reversible, recorded in the audit trail. A fresh audit that fully
+  read the server and no longer reports the finding retires the dismissal; a
+  partial or unreachable audit retires nothing (missing is not cleared).
 
 ### Alerting
 
@@ -649,6 +679,11 @@ so the direct role claim is available here and takes precedence over groups.
 | POST | `/api/backups/policy` | The one policy to every server: `{interval, preset: simple\|standard, volumes, volume_max_gb, window_start_hour?, window_end_hour?}`. `execute.mutate`. |
 | POST | `/api/backups/exclude` | Read-merge-write one server's exclude list: `{server, name, excluded, reason}` (reason required to exclude; audited). `execute.mutate`. |
 | POST | `/api/backups/override` | Per-app volume schedule override or its removal: `{server, app, cron, keep_last, max_age_days, remove?}`. `execute.mutate`. |
+| GET | `/api/cleanup` | Fleet cleanup overview: one row per server with its last audit's state (`ok`/`partial`/`unreachable`/`never`/`stale`), age, finding counts by severity, dismissed and remediable counts, and any live audit operation. `view.metadata`. |
+| GET | `/api/cleanup/{server}` | One server's cached audit: checks (unknown ones named), disk attribution, findings with evidence, remedy verdict (`available`/`runnable`, the argv shown) and dismissal state. `view.metadata`. |
+| POST | `/api/cleanup/{server}/audit` | Queue a durable `server audit` operation (one per server at a time; 409 while one is live). `execute.deploy`. |
+| POST | `/api/cleanup/{server}/remedy` | Run a finding's remedy as an operation: `{id, confirm}`; `confirm` must be the finding's app or subject name exactly when the remedy is destructive. The command is rebuilt from dash's allowlist, never passed through from the envelope. `execute.deploy`. |
+| POST | `/api/cleanup/{server}/dismiss` `/undismiss` | Hide or restore a finding by id (audited; a full audit that no longer reports the finding retires the dismissal). `execute.mutate`. |
 | GET | `/api/alerts/incidents` | Open incidents and held (suppressed) rules. `view.metadata`. |
 | GET | `/api/alerts/deliveries` | Recent alert deliveries (delivered, pending, dead-lettered, suppressed) and per-channel health. `view.metadata`. |
 | GET / POST | `/api/alerts/silences` | Active silences / create `{scope: all\|app\|monitor, target, reason, duration_minutes}`. POST is `execute.mutate`. |
