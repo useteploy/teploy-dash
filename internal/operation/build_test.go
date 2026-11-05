@@ -27,6 +27,12 @@ func TestAllowlistedBuilders(t *testing.T) {
 		{"backup_restore_no_backup", Request{Kind: KindBackupRestore, Server: "prod", App: "web", BackupID: "20261019-120000", NoBackup: true}, []string{"backup", "restore"}, 6*time.Hour + 15*time.Minute},
 		{"purge", Request{Kind: KindRemove, Server: "prod", App: "web", Purge: true}, []string{"remove", "--yes"}, 6*time.Hour + 15*time.Minute},
 		{"purge_no_backup", Request{Kind: KindRemove, Server: "prod", App: "web", Purge: true, NoBackup: true}, []string{"remove", "--yes"}, 10 * time.Minute},
+		// Slice 6 (cleanup): the audit runner and the three remedy commands.
+		// The audit's ceiling sits above the CLI's own 5-minute auditTimeout.
+		{"server_audit", Request{Kind: KindServerAudit, Server: "prod"}, []string{"server", "audit"}, 5*time.Minute + 15*time.Minute},
+		{"route_remove", Request{Kind: KindRouteRemove, Server: "prod", App: "ghost"}, []string{"route", "remove", "--json"}, 5 * time.Minute},
+		{"releases_prune", Request{Kind: KindReleasesPrune, Server: "prod", App: "unset", Keep: 5}, []string{"releases", "prune"}, 10 * time.Minute},
+		{"server_prune", Request{Kind: KindServerPrune, Server: "prod"}, []string{"server", "prune", "--json"}, 15 * time.Minute},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -140,8 +146,7 @@ func TestRollbackToAndBackupBuilders(t *testing.T) {
 	}
 }
 
-func TestBuilderRejectsUnknownCommandsAndFlagLikeIdentifiers(t *testing.T) {
-	for _, request := range []Request{
+func TestBuilderRejectsUnknownCommandsAndFlagLikeIdentifiers(t *testing.T) {	for _, request := range []Request{
 		{Kind: "command", Server: "prod", App: "web"},
 		{Kind: KindAppLifecycle, Server: "prod", App: "web", Action: "shell"},
 		{Kind: KindDeploy, Server: "--help", App: "web"},
@@ -270,5 +275,50 @@ func TestRedactHandlesMultilineSecrets(t *testing.T) {
 	got := Redact("prefix "+secret+" suffix\nfirst part alone: line-one", []string{secret})
 	if strings.Contains(got, "line-one") || strings.Contains(got, "line-two") || strings.Contains(got, "line-three") {
 		t.Fatalf("multiline secret components leaked: %q", got)
+	}
+}
+
+// Slice 6 (cleanup): the audit and remedy builders' exact argv — the remedy a
+// finding names is re-rendered from dash's own allowlist, never passed through
+// from the envelope — plus the keep bound and the server-scoped targets.
+func TestCleanupBuilders(t *testing.T) {
+	audit, _, target, err := Build(Request{Kind: KindServerAudit, Server: "edge"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(audit.Args, []string{"server", "audit", "edge", "--json"}) || target != "server:edge" {
+		t.Fatalf("audit argv=%v target=%q", audit.Args, target)
+	}
+
+	route, _, target, err := Build(Request{Kind: KindRouteRemove, Server: "edge", App: "ghost"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(route.Args, []string{"route", "remove", "--json", "--host", "edge.example", "--app", "ghost", "--user", "deploy"}) || target != "server:edge/app:ghost" {
+		t.Fatalf("route remove argv=%v target=%q", route.Args, target)
+	}
+
+	prune, _, target, err := Build(Request{Kind: KindReleasesPrune, Server: "edge", App: "unset", Keep: 5}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// --keep rides the argv exactly once: the CLI requires an explicit keep
+	// and 0 means "prune everything the protections don't name".
+	if !slices.Contains(prune.Args, "--keep") || !slices.Contains(prune.Args, "5") {
+		t.Fatalf("releases prune argv=%v", prune.Args)
+	}
+	if target != "server:edge/app:unset" {
+		t.Fatalf("releases prune target=%q", target)
+	}
+	if _, _, _, err := Build(Request{Kind: KindReleasesPrune, Server: "edge", App: "unset", Keep: 1001}, testResolver); err == nil {
+		t.Fatal("an absurd keep must be refused before the CLI sees it")
+	}
+
+	server, _, target, err := Build(Request{Kind: KindServerPrune, Server: "edge"}, testResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(server.Args, []string{"server", "prune", "--json", "--host", "edge.example", "--build-cache", "--dangling", "--user", "deploy"}) || target != "server:edge" {
+		t.Fatalf("server prune argv=%v target=%q", server.Args, target)
 	}
 }

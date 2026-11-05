@@ -27,6 +27,18 @@ const (
 	// or hold the app under its fenced lock for minutes.
 	KindBackupCreate  Kind = "backup_create"
 	KindBackupRestore Kind = "backup_restore"
+	// Slice 6 (cleanup/audit, token server-audit-v1): the read-only server
+	// audit and the three remedy commands the audit's findings name.
+	// KindServerAudit is `server audit <server> --json` — read-only, but it
+	// SSHes a dozen reads and can take minutes, so it rides the operation
+	// queue like any long CLI run. The remedies are the CLI's own safe
+	// fixes: a dead managed route (route remove), old versions
+	// (releases prune) and reclaimable build cache / dangling images
+	// (server prune).
+	KindServerAudit   Kind = "server_audit"
+	KindRouteRemove   Kind = "route_remove"
+	KindReleasesPrune Kind = "releases_prune"
+	KindServerPrune   Kind = "server_prune"
 )
 
 // Records of the removed manifest_* and source_preview* kinds still load and
@@ -34,7 +46,8 @@ const (
 func supportedKind(kind Kind) bool {
 	switch kind {
 	case KindDeploy, KindRollback, KindRemove, KindTemplateInstall, KindAppLifecycle, KindMaintenance,
-		KindRedeploy, KindBackupCreate, KindBackupRestore:
+		KindRedeploy, KindBackupCreate, KindBackupRestore,
+		KindServerAudit, KindRouteRemove, KindReleasesPrune, KindServerPrune:
 		return true
 	default:
 		return false
@@ -138,6 +151,11 @@ type Request struct {
 	// purge (backup-fleet-v1). An explicit choice: without it, a failed backup
 	// refuses the destructive step.
 	NoBackup bool `json:"no_backup,omitempty"`
+	// Keep is how many recent versions a releases prune retains
+	// (`releases prune --keep N`, server-audit-v1). The CLI requires the
+	// flag explicitly — 0 prunes everything its protections don't name — so
+	// dash only ever sends a keep the audit's remedy argv carried.
+	Keep int `json:"keep,omitempty"`
 }
 
 type Operation struct {
