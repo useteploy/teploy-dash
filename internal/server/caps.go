@@ -80,6 +80,11 @@ var administerCredentialsPrefixes = []string{
 	// The audit trail records credential and alerting changes (who
 	// configured which channel, who silenced what).
 	"/api/audit",
+	// Programme B: the Observe connection carries a service token (a
+	// credential dash stores and reuses) and mints telemetry keys; the whole
+	// surface is admin/credential work like storage connect.
+	"/api/observe",
+	"/api/observe/",
 }
 
 // requiredCapabilities returns the capability(s) a route requires. It fails
@@ -186,6 +191,22 @@ func requiredCapabilities(method, path string) []string {
 		rest := strings.Trim(strings.TrimPrefix(path, "/api/cleanup/"), "/")
 		if strings.HasSuffix(rest, "/audit") || strings.HasSuffix(rest, "/remedy") {
 			return []string{caps.ExecuteDeploy}
+		}
+		return []string{caps.ExecuteMutate}
+	}
+	// Programme B: the siblings cache is metadata; a rescan is a read-only
+	// sweep (execute.mutate like the domains re-check), and the probe
+	// network policy change additionally requires an admin session inside
+	// the handler (the A13 rule for monitors).
+	if path == "/api/siblings" {
+		if method == http.MethodGet {
+			return []string{caps.ViewMetadata}
+		}
+		return []string{caps.ExecuteMutate}
+	}
+	if strings.HasPrefix(path, "/api/siblings/") {
+		if method == http.MethodGet {
+			return []string{caps.ViewMetadata}
 		}
 		return []string{caps.ExecuteMutate}
 	}

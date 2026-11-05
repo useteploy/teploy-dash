@@ -363,6 +363,9 @@ type Server struct {
 	// cleanup is the Slice 6 server-audit cache (cleanup.go): the last
 	// `server audit` envelope per server plus per-finding dismissals.
 	cleanup cleanupState
+	// siblings is Programme B sibling discovery (siblings.go): the last
+	// `server siblings` envelope per server plus dash's probe verdicts.
+	siblings siblingsState
 }
 
 // New creates a new server.
@@ -382,6 +385,7 @@ func New(config Config) *Server {
 	s.initDomainHealth(config.DataDir)
 	s.initBackups(config.DataDir)
 	s.initCleanup(config.DataDir)
+	s.initSiblings(config.DataDir)
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
 		s.runCLI = cli.RunContext
@@ -1715,6 +1719,9 @@ func (s *Server) routes() {
 	// Slice 6: fleet cleanup over the CLI's server audit.
 	s.mux.HandleFunc("/api/cleanup", s.handleCleanup)
 	s.mux.HandleFunc("/api/cleanup/", s.handleCleanupServer)
+	// Programme B: sibling product discovery (fleet scan + probes).
+	s.mux.HandleFunc("/api/siblings", s.handleSiblings)
+	s.mux.HandleFunc("/api/siblings/", s.handleSiblingsAction)
 	s.mux.HandleFunc("/api/monitors", s.handleMonitors)
 	s.mux.HandleFunc("/api/monitors/", s.handleMonitor)
 
@@ -4151,7 +4158,10 @@ func degradedCodes(h operation.Health) []string {
 // configured via TEPLOY_NAV_{DASH,OBSERVE,SHIP,CLOUD}_URL. Same env convention
 // across Dash, Observe, and Ship, so one set of vars drives the switcher
 // everywhere. Cloud is the hosted Teploy Cloud dashboard: opt-in by URL only,
-// never discovered from the fleet.
+// never discovered from the fleet. Below an explicit URL, a CONFIRMED
+// discovery doc's dashboard_url fills the link (Programme B; probe results
+// only — a product with no doc or an empty URL stays absent rather than
+// guessed), and the fleet-name fallback remains the last resort.
 func (s *Server) teployNav(current string) map[string]interface{} {
 	products := []struct{ key, label, env string }{
 		{"dash", "Dash", "TEPLOY_NAV_DASH_URL"},
@@ -4159,7 +4169,7 @@ func (s *Server) teployNav(current string) map[string]interface{} {
 		{"ship", "Ship", "TEPLOY_NAV_SHIP_URL"},
 		{"cloud", "Cloud", "TEPLOY_NAV_CLOUD_URL"},
 	}
-	apps := make([]map[string]string, 0, len(products))
+	apps := make([]map[string]string, 0, len(products)+1)
 	for _, p := range products {
 		if p.key == current {
 			apps = append(apps, map[string]string{"key": p.key, "label": p.label, "url": ""})
@@ -4169,11 +4179,20 @@ func (s *Server) teployNav(current string) map[string]interface{} {
 		// domain, a tunnel, or a port this dashboard can't infer.
 		url := strings.TrimSpace(os.Getenv(p.env))
 		if url == "" && p.key != "cloud" {
+			// Then a confirmed discovery doc's own dashboard_url.
+			url = s.siblingNavURL(p.key)
+		}
+		if url == "" && p.key != "cloud" {
 			url = s.discoverSibling(p.key)
 		}
 		if url != "" {
 			apps = append(apps, map[string]string{"key": p.key, "label": p.label, "url": url})
 		}
+	}
+	// The forgejo family is not a Teploy product: a confirmed sighting joins
+	// as a plain link to the address that answered.
+	if forgejo := s.siblingForgejoNav(); forgejo != "" {
+		apps = append(apps, map[string]string{"key": "forgejo", "label": "Forgejo", "url": forgejo})
 	}
 	return map[string]interface{}{"current": current, "apps": apps}
 }

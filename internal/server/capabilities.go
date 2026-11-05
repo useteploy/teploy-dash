@@ -89,6 +89,11 @@ type machineFeatures struct {
 	// see cleanupMinCLI): the read-only findings sweep and the remedies its
 	// findings name.
 	ServerAudit bool `json:"server_audit"` // server-audit-v1
+	// Siblings gates sibling product discovery riding `server siblings`
+	// (CLI v0.1.53; see siblingsMinCLI): the candidate report dash probes
+	// for Teploy/forgejo discovery endpoints. The whole Programme B surface
+	// (Siblings page, Observe connect, telemetry opt-in) gates on it.
+	Siblings bool `json:"siblings"` // siblings-v1
 }
 
 type capabilityError struct {
@@ -191,6 +196,7 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				value.Features.DomainsCheck = hasToken("domains-check-v1")
 				value.Features.BackupFleet = hasToken("backup-fleet-v1")
 				value.Features.ServerAudit = hasToken("server-audit-v1")
+				value.Features.Siblings = hasToken("siblings-v1")
 			}
 		} else {
 			// Pre-MI CLI (or version --json refused): the legacy path.
