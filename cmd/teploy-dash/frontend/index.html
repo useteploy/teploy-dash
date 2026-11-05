@@ -77,6 +77,7 @@
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" title="DNS, route, certificate and HTTP health for every domain" :class="{ active: $store.router.page === 'domains' }" :aria-current="$store.router.page === 'domains' ? 'page' : null" @click.prevent="$store.router.navigate('domains')">Domains</a></li>
     <li><a href="#" title="What is left over on each server — stale routes, old versions, reclaimable space — with the fix where one exists" :class="{ active: $store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' }" :aria-current="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' ? 'page' : null" @click.prevent="$store.router.navigate('cleanup')">Cleanup</a></li>
+    <li><a href="#" title="Teploy products on your servers — discovered, probed, and connected where you allow it" :class="{ active: $store.router.page === 'siblings' }" :aria-current="$store.router.page === 'siblings' ? 'page' : null" @click.prevent="$store.router.navigate('siblings')">Siblings</a></li>
     <li><a href="#" title="Every database and volume across the fleet — coverage, encryption, restore tests" :class="{ active: $store.router.page === 'backups' }" :aria-current="$store.router.page === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
@@ -2398,6 +2399,140 @@
           </template>
         </div>
       </div>
+    </div>
+  </template>
+
+  <!-- Programme B: sibling products on the fleet — discovery evidence,
+       probe verdicts, and (for Observe only) the deep connect flow. -->
+  <template x-if="$store.router.page === 'siblings'">
+    <div x-data="siblingsPage">
+
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Siblings</h1>
+          <p class="subtitle">Teploy products running on your servers, found by their labels and probed on their published ports. Nothing is connected until you confirm it.</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-sm" @click="load()">Refresh</button>
+          <button class="btn btn-sm btn-primary" @click="rescan()" :disabled="scanBusy || !cliSupported" x-text="scanBusy ? 'Scanning…' : 'Rescan now'" title="Reads each server's containers and probes the candidates — quick, read-only"></button>
+        </div>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="'Showing the last discovery — the refresh failed: ' + loadError"></div>
+      </template>
+
+      <template x-if="!loading && !cliSupported">
+        <div role="status" class="stale-banner" x-text="note"></div>
+      </template>
+
+      <template x-if="sweepError">
+        <div role="status" class="stale-banner" x-text="'The last sweep did not finish: ' + sweepError"></div>
+      </template>
+
+      <!-- Probing consent: internal addresses (tailnet, LAN) are probed only
+           when an admin allows it. The A13 rule applies: an editor cannot
+           flip this. -->
+      <template x-if="!loading && cliSupported">
+        <div class="stale-banner" role="status" style="display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;">
+          <span x-text="allowInternal
+            ? 'Probing reaches internal addresses (tailnet/LAN) — matches where siblings usually run.'
+            : 'Internal addresses (tailnet/LAN) are not probed — candidates there read “Blocked (internal)” until an admin allows it.'"></span>
+          <button class="btn btn-sm" @click="setAllowInternal(!allowInternal)" :disabled="settingsBusy"
+                  x-text="settingsBusy ? 'Saving…' : (allowInternal ? 'Stop probing internal' : 'Allow probing internal')"></button>
+        </div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && servers.length === 0">
+        <div class="empty-state"><p x-text="cliSupported ? 'No servers configured, or the first sweep has not run yet.' : 'Sibling discovery needs teploy ' + minCLI + ' on the dashboard host.'"></p></div>
+      </template>
+
+      <!-- Candidates: one row per (server, product) with the probe verdict.
+           Honest unknowns stay unknown — nothing renders as “no siblings”
+           when a server was only partly read. -->
+      <template x-if="candidates.length > 0">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Probe</th>
+                <th>Where</th>
+                <th>Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="c in candidates" :key="c.server + '/' + c.product">
+                <tr>
+                  <td>
+                    <strong x-text="c.product"></strong>
+                    <span class="text-muted" x-show="c.label_version" x-text="c.label_version"></span>
+                    <div class="text-muted" x-show="!c.recognized" title="The CLI did not recognise this product label; it is shown as reported">unrecognised label</div>
+                  </td>
+                  <td>
+                    <span class="status-dot dot" :class="probeClass(c.state)"></span>
+                    <span x-text="probeLabel(c.state)"></span>
+                    <div class="text-muted" x-text="'probed ' + ageLabel(c.age_seconds)"></div>
+                  </td>
+                  <td>
+                    <div x-text="c.server"></div>
+                    <div class="text-muted mono" style="font-size: 12px;" x-text="(c.addresses || []).join(', ') || 'no published port'"></div>
+                    <div class="text-muted" x-show="c.container_state && c.container_state !== 'running'" x-text="'container ' + c.container_state"></div>
+                  </td>
+                  <td>
+                    <div x-text="probeHint(c)"></div>
+                    <div class="text-muted mono" style="font-size: 12px;" x-show="c.doc && c.doc.dashboard_url"><a :href="c.doc.dashboard_url" target="_blank" rel="noopener" x-text="c.doc.dashboard_url"></a></div>
+                    <div class="text-muted" x-show="c.base_url && (!c.doc || !c.doc.dashboard_url)"><a :href="c.base_url" target="_blank" rel="noopener" x-text="c.base_url"></a></div>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <!-- Per-server read state: which reports are complete, partial or
+           missing, with their age. -->
+      <template x-if="servers.length > 0">
+        <div>
+          <h2 class="section-title" style="margin-top: 24px;">Server reads</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Server</th>
+                  <th>Read</th>
+                  <th>Last report</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in servers" :key="row.server">
+                  <tr>
+                    <td x-text="row.server"></td>
+                    <td>
+                      <span class="status-dot dot" :class="serverStateClass(row.state)"></span>
+                      <span x-text="serverStateLabel(row.state)"></span>
+                      <div class="text-muted" x-show="row.error" x-text="row.error"></div>
+                    </td>
+                    <td>
+                      <div x-text="ageLabel(row.age_seconds)"></div>
+                      <div class="text-muted" x-show="!row.checked_at">never completed</div>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
     </div>
   </template>
 

@@ -350,6 +350,7 @@ document.addEventListener('alpine:init', () => {
     { page: 'domains', path: '/domains' },
     { page: 'cleanup', path: '/cleanup' },
     { page: 'cleanup-detail', path: '/cleanup/:server' },
+    { page: 'siblings', path: '/siblings' },
     { page: 'backups', path: '/backups' },
     { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
@@ -4049,6 +4050,119 @@ document.addEventListener('alpine:init', () => {
       if (c.info) parts.push(c.info + ' info');
       if (c.dismissed) parts.push(c.dismissed + ' dismissed');
       return parts.length ? parts.join(', ') : 'no findings';
+    },
+  }));
+
+  // ── Siblings Page (Programme B: discovery + Observe connect) ──
+  Alpine.data('siblingsPage', () => withAsyncLoad({
+    servers: [],
+    candidates: [],
+    allowInternal: false,
+    cliSupported: true,
+    minCLI: '',
+    note: '',
+    sweepError: '',
+    scanBusy: false,
+    settingsBusy: false,
+    _loadGeneration: 0,
+    _alive: false,
+
+    async init() {
+      this._alive = true;
+      await this.load();
+      this.refreshInterval = setInterval(() => { if (this._alive) this.load(); }, 60000);
+    },
+
+    destroy() {
+      this._alive = false;
+      clearInterval(this.refreshInterval);
+      this._loadGeneration++;
+    },
+
+    async load() {
+      const generation = ++this._loadGeneration;
+      try {
+        const data = await api.get('/api/siblings');
+        if (generation !== this._loadGeneration) return;
+        this.servers = data.servers || [];
+        this.candidates = data.candidates || [];
+        this.allowInternal = !!data.allow_internal;
+        this.cliSupported = !!data.cli_supported;
+        this.minCLI = data.min_cli_version || '';
+        this.note = data.note || '';
+        this.sweepError = data.sweep_error || '';
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
+      } catch (e) {
+        if (generation !== this._loadGeneration) return;
+        this.loadError = `Could not load sibling discovery: ${e.message}`;
+      }
+      this.loading = false;
+    },
+
+    async rescan() {
+      if (this.scanBusy) return;
+      this.scanBusy = true;
+      try {
+        await api.post('/api/siblings/scan', {});
+        showToast('Sibling sweep started — the page refreshes as it lands', 'success');
+        setTimeout(() => { if (this._alive) this.load(); }, 4000);
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.scanBusy = false;
+    },
+
+    async setAllowInternal(value) {
+      if (this.settingsBusy) return;
+      this.settingsBusy = true;
+      try {
+        const data = await api.post('/api/siblings/settings', { allow_internal: value });
+        this.allowInternal = !!data.allow_internal;
+        showToast(value ? 'Internal addresses will be probed' : 'Internal addresses are no longer probed', 'success');
+        await this.rescan();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.settingsBusy = false;
+    },
+
+    serverStateLabel(state) {
+      return { ok: 'Read complete', partial: 'Partially read', unreachable: 'Unreachable', never: 'Not swept yet' }[state] || state;
+    },
+    serverStateClass(state) {
+      return { ok: 'green', partial: 'yellow', unreachable: 'red', never: 'gray' }[state] || 'gray';
+    },
+    probeLabel(state) {
+      return {
+        confirmed: 'Confirmed',
+        found_not_discoverable: 'Found, not discoverable',
+        unreachable: 'No answer',
+        not_probeable: 'Not probeable from dash',
+        blocked_internal: 'Blocked (internal)',
+      }[state] || state;
+    },
+    probeClass(state) {
+      return { confirmed: 'green', found_not_discoverable: 'yellow', unreachable: 'red', not_probeable: 'gray', blocked_internal: 'gray' }[state] || 'gray';
+    },
+    probeHint(candidate) {
+      if (candidate.state === 'confirmed' && candidate.doc) {
+        const bits = [candidate.doc.product + (candidate.doc.version ? ' ' + candidate.doc.version : '')];
+        if (candidate.doc.instance_id) bits.push('instance ' + candidate.doc.instance_id.slice(0, 8) + '…');
+        if (!candidate.doc.dashboard_url) bits.push('no dashboard URL published');
+        if (!candidate.doc.ingest_url) bits.push('no ingest URL published');
+        return bits.join(' · ');
+      }
+      return candidate.error || '';
+    },
+    ageLabel(seconds) {
+      if (seconds === undefined || seconds === null) return 'never';
+      if (seconds < 90) return 'just now';
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 120) return `${minutes} min ago`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 48) return `${hours} h ago`;
+      return `${Math.round(hours / 24)} days ago`;
     },
   }));
 
