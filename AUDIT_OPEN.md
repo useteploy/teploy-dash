@@ -10,6 +10,51 @@ Open items: 0 P2 improvements, deferred findings (design/architecture)
 listed per pass below, 2 upstream (teploy-cli) items (both already fixed and
 adopted), plus recorded residuals inside partially-fixed findings.
 
+## 2026-11-05 Slice 4 dash half (Dash Backups, P2) — deferred and recorded residuals
+
+Branch `dash-backups` (plan section 6). Built: fleet status sweep + Backups page,
+connect-storage-once, recovery key + decrypt drill, one policy, dash-owned
+automatic restore tests, `source:"backup"` incidents, hand-written-job readiness
+report, rebuild runbook. Open:
+
+- **CLI gaps, reported upstream (teploy-cli), worked around at this layer only by
+  report-only surfaces:**
+  - *Dash cannot back itself up through the policy engine* (P2.7): the engine has
+    no arbitrary-path targets (only accessories, volumes, adopted containers) and
+    always encrypts to the owner key **and** the server's own identity — Dash's
+    state must be readable with the owner key ALONE (a rebuild means the old
+    machine and its identity are gone). Dash ships the interim manual job + the
+    rebuild runbook (`docs/rebuild-dash.md`, unit-checked for the paths it
+    names) and the page reports the gap. Needs: path targets in the policy, and
+    an owner-only recipient mode.
+  - *Hand-written job discovery* (P2.9): no CLI read exposes a server's systemd
+    timers / cron.d / scripts as JSON, so Dash cannot list what jobs exist — it
+    reports per-database readiness (two consecutive watched good policy backups
+    + a green restore test of the right engine) and the known job names from the
+    plan as the owner's checklist. Needs: a `server audit`-style read (P5's
+    `teploy server audit --json` is the natural home).
+  - *Heartbeat append*: `server backup-policy set --heartbeat-stdin` replaces the
+    whole list, so Dash leaves a server that already heartbeats elsewhere alone
+    with a note rather than clobbering a person's receiver. Needs an append mode.
+- **Drill confirmation is trust-based.** Dash holds no private key, so the decrypt
+  drill can only check that the pasted JSON is a plausible fetch of the assigned
+  object (right key, encrypted, plaintext size fits age's overhead). A person
+  could forge that; the aim is that the owner actually ran it once. Accepted.
+- **Migration evidence is a lower bound.** "Two consecutive good policy backups"
+  counts DISTINCT object keys Dash watched arrive between 30-minute sweeps — two
+  runs between sweeps count once, and a fleet adopted mid-stream starts from a
+  baseline, not from zero. Conservative by construction; documented in
+  `backupfleet.go`.
+- **Restore-test window is UTC.** Server clocks disagree; Dash runs on one clock.
+  The window hours are configurable with the policy; documented on the page and
+  in the README.
+- **Live rehearsal of the runbook is out of scope** for this slice (per plan);
+  the runbook's paths are unit-checked instead. Rehearse before relying on it.
+- **Self-test on the storage probe's lifecycle rule hint.** The `.incoming/`
+  lifecycle instructions (B2 fileNamePrefix / aws put-bucket-lifecycle) are
+  printed from `backupLifecycleRule` and were not executed against a real bucket
+  here; they mirror the CLI README's documented rule.
+
 ## 2026-11-05 Slice 5 (domain health) — deferred and recorded residuals
 
 Branch `slice5-domain-health` (plan `_internal/DASH_AUTOCONFIG_PLAN_2026-11-03.md`
