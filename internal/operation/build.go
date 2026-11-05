@@ -52,6 +52,14 @@ func Build(req Request, resolve Resolver) (Command, Server, string, error) {
 		return BuildBackupCreate(req, resolve)
 	case KindBackupRestore:
 		return BuildBackupRestore(req, resolve)
+	case KindServerAudit:
+		return BuildServerAudit(req, resolve)
+	case KindRouteRemove:
+		return BuildRouteRemove(req, resolve)
+	case KindReleasesPrune:
+		return BuildReleasesPrune(req, resolve)
+	case KindServerPrune:
+		return BuildServerPrune(req, resolve)
 	default:
 		return Command{}, Server{}, "", fmt.Errorf("unsupported operation kind %q", req.Kind)
 	}
@@ -326,6 +334,63 @@ func BuildBackupRestore(req Request, resolve Resolver) (Command, Server, string,
 	return Command{Args: addUser(args, srv.User), Timeout: ExecutionTimeout(req)}, srv, appTarget(req), nil
 }
 
+// BuildServerAudit renders `teploy server audit <server> --json`
+// (server-audit-v1): the read-only leftover/construction sweep. The server is
+// addressed by NAME (the CLI resolves servers.yml itself, like server status),
+// so no --host/--user appear here. Read-only, but slow: the audit SSHes a
+// dozen reads under its own 5-minute deadline, so it runs as an operation.
+func BuildServerAudit(req Request, resolve Resolver) (Command, Server, string, error) {
+	srv, err := resolveRequest(req, resolve, false)
+	if err != nil {
+		return Command{}, Server{}, "", err
+	}
+	args := []string{"server", "audit", srv.Name, "--json"}
+	return Command{Args: args, Timeout: ExecutionTimeout(req)}, srv, "server:" + req.Server, nil
+}
+
+// BuildRouteRemove renders `teploy route remove --json` (server-audit-v1):
+// retire one app's managed Caddy block that nothing serves. The CLI
+// compare-and-swaps on the exact block the audit judged dead, so a deploy
+// that rewrote it in between is refused, not undone.
+func BuildRouteRemove(req Request, resolve Resolver) (Command, Server, string, error) {
+	srv, err := resolveRequest(req, resolve, true)
+	if err != nil {
+		return Command{}, Server{}, "", err
+	}
+	args := []string{"route", "remove", "--json", "--host", srv.Host, "--app", req.App}
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindRouteRemove)}, srv, appTarget(req), nil
+}
+
+// BuildReleasesPrune renders `teploy releases prune --app X --keep N --json`
+// (server-audit-v1). The CLI REQUIRES an explicit --keep (0 prunes everything
+// its protections — pinned/current/previous/running — do not name), so dash
+// only builds this from an audit remedy that carried one; keep is bounded so
+// a crafted request cannot smuggle an absurd retention promise.
+func BuildReleasesPrune(req Request, resolve Resolver) (Command, Server, string, error) {
+	srv, err := resolveRequest(req, resolve, true)
+	if err != nil {
+		return Command{}, Server{}, "", err
+	}
+	if req.Keep < 0 || req.Keep > 1000 {
+		return Command{}, Server{}, "", fmt.Errorf("keep must be between 0 and 1000")
+	}
+	args := []string{"releases", "prune", "--json", "--host", srv.Host, "--app", req.App, "--keep", strconv.Itoa(req.Keep)}
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindReleasesPrune)}, srv, appTarget(req), nil
+}
+
+// BuildServerPrune renders `teploy server prune --host S --build-cache
+// --dangling --json` (server-audit-v1): reclaim docker's unused build cache
+// and dangling images. Server-scoped — no app — and exactly the two reclaim
+// kinds the audit offers; no tagged image, container or volume is touched.
+func BuildServerPrune(req Request, resolve Resolver) (Command, Server, string, error) {
+	srv, err := resolveRequest(req, resolve, false)
+	if err != nil {
+		return Command{}, Server{}, "", err
+	}
+	args := []string{"server", "prune", "--json", "--host", srv.Host, "--build-cache", "--dangling"}
+	return Command{Args: addUser(args, srv.User), Timeout: KindTimeout(KindServerPrune)}, srv, "server:" + req.Server, nil
+}
+
 // The CLI bounds one backup or restore of one target at 6h (backup.BackupDeadline,
 // backup-fleet-v1). Dash's ceiling sits above it, so the CLI's own deadline and
 // cleanup fire first: killing the CLI mid-restore is the worst way to stop one.
@@ -333,6 +398,12 @@ const (
 	cliBackupDeadline = 6 * time.Hour
 	cliDeadlineMargin = 15 * time.Minute
 )
+
+// The CLI bounds one server audit at 5 minutes (auditTimeout, server-audit-v1):
+// a dozen SSH reads. Dash's ceiling sits above it for the same reason as the
+// backup deadlines — the CLI's own timeout answers first, and killing the CLI
+// mid-audit only loses the report.
+const cliAuditDeadline = 5 * time.Minute
 
 // ExecutionTimeout is how long Dash lets one request's CLI command run.
 func ExecutionTimeout(req Request) time.Duration {
@@ -351,6 +422,8 @@ func ExecutionTimeout(req Request) time.Duration {
 		if req.Purge && !req.NoBackup {
 			return cliBackupDeadline + cliDeadlineMargin
 		}
+	case KindServerAudit:
+		return cliAuditDeadline + cliDeadlineMargin
 	}
 	return KindTimeout(req.Kind)
 }
@@ -379,6 +452,15 @@ func KindTimeout(kind Kind) time.Duration {
 		return 5 * time.Minute
 	case KindBackupRestore:
 		return 60 * time.Minute
+	case KindServerPrune:
+		// docker build-cache/image prunes scan the whole daemon; on a busy
+		// host they can take minutes, and they are safe to leave running.
+		return 15 * time.Minute
+	case KindReleasesPrune:
+		// One image per retired version, under the app's lock.
+		return 10 * time.Minute
+	case KindRouteRemove:
+		return 5 * time.Minute
 	default:
 		return 30 * time.Minute
 	}

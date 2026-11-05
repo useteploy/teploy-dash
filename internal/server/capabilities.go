@@ -85,6 +85,10 @@ type machineFeatures struct {
 	// BackupFleet gates per-database restores and skipping the automatic backup
 	// before a restore or purge (CLI v0.1.52; see backupFleetMinCLI).
 	BackupFleet bool `json:"backup_fleet"` // backup-fleet-v1
+	// ServerAudit gates the cleanup page riding `server audit` (CLI v0.1.53;
+	// see cleanupMinCLI): the read-only findings sweep and the remedies its
+	// findings name.
+	ServerAudit bool `json:"server_audit"` // server-audit-v1
 }
 
 type capabilityError struct {
@@ -186,6 +190,7 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				value.Features.TriggerPoll = hasToken("trigger-poll-v1")
 				value.Features.DomainsCheck = hasToken("domains-check-v1")
 				value.Features.BackupFleet = hasToken("backup-fleet-v1")
+				value.Features.ServerAudit = hasToken("server-audit-v1")
 			}
 		} else {
 			// Pre-MI CLI (or version --json refused): the legacy path.

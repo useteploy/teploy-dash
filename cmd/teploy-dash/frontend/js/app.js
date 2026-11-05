@@ -348,6 +348,8 @@ document.addEventListener('alpine:init', () => {
     { page: 'monitors', path: '/monitors' },
     { page: 'monitor-detail', path: '/monitors/:id' },
     { page: 'domains', path: '/domains' },
+    { page: 'cleanup', path: '/cleanup' },
+    { page: 'cleanup-detail', path: '/cleanup/:server' },
     { page: 'backups', path: '/backups' },
     { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
@@ -3832,6 +3834,221 @@ document.addEventListener('alpine:init', () => {
         this.overrideFor = null;
         await this.load();
       } catch (e) { showToast(e.message, 'error'); }
+    },
+  }));
+
+  // ── Cleanup Page (Slice 6) ──
+  // What is left over on each server, from the CLI's read-only audit
+  // (`teploy server audit --json`). Findings carry their evidence; a fix
+  // button exists only where the CLI named the command, and a destructive
+  // one asks for the finding's app or subject name typed — enforced by the
+  // server, the dialog is just the prompt. Audits are slow (minutes), so a
+  // run is a durable operation; the page shows the cached report with its
+  // age while one runs.
+  Alpine.data('cleanupPage', () => withAsyncLoad({
+    rows: [],
+    detail: null,
+    cliSupported: true,
+    minCLI: '',
+    note: '',
+    discoveryError: '',
+    showDismissed: false,
+    confirmFinding: null, // the finding a destructive remedy is being confirmed for
+    confirmText: '',
+    auditBusy: '',
+    remedyBusy: false,
+    // Remedies whose operation has not finished; when one succeeds the page
+    // offers a re-audit so the finding clears with evidence, not vibes.
+    pending: [],
+    finishedServers: [],
+    refreshInterval: null,
+    pollTimer: null,
+    _loadGeneration: 0,
+    detailId: '',
+    _alive: false,
+
+    routeIdentity() { const r = Alpine.store('router'); return r.page === 'cleanup-detail' ? (r.params.server || '') : ''; },
+
+    async init() {
+      this._alive = true;
+      this._bound = this.routeIdentity();
+      this.routeEffect = Alpine.effect(() => {
+        const identity = this.routeIdentity();
+        if (identity !== this._bound) { this._bound = identity; this.load(); }
+      });
+      await this.load();
+      this.refreshInterval = setInterval(() => { if (!this._alive) return; this.load(); this.pollPending(); }, 60000);
+      this.pollTimer = setInterval(() => { if (!this._alive) return; this.pollPending(); }, 4000);
+    },
+
+    destroy() {
+      this._alive = false;
+      clearInterval(this.refreshInterval);
+      clearInterval(this.pollTimer);
+      this._loadGeneration++;
+    },
+
+    async load() {
+      const generation = ++this._loadGeneration;
+      const detailId = this.routeIdentity();
+      try {
+        const data = detailId
+          ? await api.get('/api/cleanup/' + encodeURIComponent(detailId))
+          : await api.get('/api/cleanup');
+        if (generation !== this._loadGeneration) return;
+        this.detail = detailId ? data : null;
+        this.rows = detailId ? [] : (data.servers || []);
+        this.cliSupported = !!data.cli_supported;
+        this.minCLI = data.min_cli_version || '';
+        this.note = data.note || '';
+        this.discoveryError = data.discovery_error || '';
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
+      } catch (e) {
+        if (generation !== this._loadGeneration) return;
+        this.loadError = `Could not load the cleanup report: ${e.message}`;
+      }
+      this.loading = false;
+    },
+
+    async pollPending() {
+      if (!this.pending.length) return;
+      for (const p of [...this.pending]) {
+        try {
+          const op = await api.get('/api/operations/' + encodeURIComponent(p.opId));
+          if (!['succeeded', 'failed', 'canceled', 'interrupted', 'already_committed'].includes(op.status)) continue;
+          this.pending = this.pending.filter(x => x.opId !== p.opId);
+          if (op.status === 'succeeded') {
+            if (!this.finishedServers.includes(p.server)) this.finishedServers.push(p.server);
+            showToast('Remedy finished — re-audit ' + p.server + ' to confirm the finding cleared', 'success');
+          } else {
+            showToast('Remedy ' + op.status + (op.error ? ': ' + op.error : ''), 'error');
+          }
+        } catch (e) { /* the operation read failed; retry on the next tick */ }
+      }
+      await this.load();
+    },
+
+    openServer(server) { Alpine.store('router').navigate('cleanup-detail', { server }); },
+
+    async runAudit(server) {
+      this.auditBusy = server;
+      try {
+        const op = await api.post('/api/cleanup/' + encodeURIComponent(server) + '/audit', {});
+        if (isOperation(op)) showToast('Audit of ' + server + ' queued', 'success');
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.auditBusy = '';
+    },
+
+    // The server re-checks the typed name; this only disables the button.
+    confirmName(finding) { return finding.app || finding.subject; },
+    openRemedy(finding) {
+      if (!this.detail || !finding.remedy || !finding.remedy.runnable) return;
+      if (finding.remedy.destructive) {
+        this.confirmFinding = finding;
+        this.confirmText = '';
+        return;
+      }
+      this.runRemedy(finding, '');
+    },
+    async confirmRemedy() {
+      const f = this.confirmFinding;
+      if (!f) return;
+      if (this.confirmText !== this.confirmName(f)) {
+        showToast('Type ' + this.confirmName(f) + ' to confirm', 'error');
+        return;
+      }
+      await this.runRemedy(f, this.confirmText);
+    },
+    async runRemedy(finding, confirmText) {
+      if (!this.detail || this.remedyBusy) return;
+      this.remedyBusy = true;
+      try {
+        const op = await api.post('/api/cleanup/' + encodeURIComponent(this.detail.server) + '/remedy',
+          { id: finding.id, confirm: confirmText || undefined });
+        if (isOperation(op)) {
+          this.pending.push({ server: this.detail.server, opId: op.id, findingId: finding.id });
+          showToast('Remedy queued', 'success');
+        }
+        this.confirmFinding = null;
+        this.confirmText = '';
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.remedyBusy = false;
+    },
+
+    async dismiss(finding) { await this.setDismissal(finding, true); },
+    async undismiss(finding) { await this.setDismissal(finding, false); },
+    async setDismissal(finding, dismiss) {
+      try {
+        await api.post('/api/cleanup/' + encodeURIComponent(this.detail.server) + '/' + (dismiss ? 'dismiss' : 'undismiss'), { id: finding.id });
+        await this.load();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+
+    get visibleFindings() {
+      const findings = (this.detail && this.detail.findings) || [];
+      return this.showDismissed ? findings : findings.filter(f => !f.dismissed);
+    },
+    get dismissedFindings() {
+      const findings = (this.detail && this.detail.findings) || [];
+      return findings.filter(f => f.dismissed);
+    },
+
+    stateLabel(state) {
+      return { ok: 'Clean bill', partial: 'Partially audited', unreachable: 'Unreachable', never: 'Not audited yet', stale: 'Report is stale' }[state] || state;
+    },
+    stateClass(state) {
+      return { ok: 'green', partial: 'yellow', unreachable: 'red', never: 'gray', stale: 'gray' }[state] || 'gray';
+    },
+    severityClass(sev) {
+      return { critical: 'red', warning: 'yellow', info: 'gray' }[sev] || 'gray';
+    },
+    kindLabel(kind) {
+      return {
+        stale_route: 'Stale route', empty_managed_region: 'Empty managed region',
+        managed_route_dead_upstream: 'Dead upstream', orphan_state: 'Orphaned state',
+        manual_route_dead_upstream: 'Hand-written route, dead upstream', manual_route_nonlocal_address: 'Route to a non-local address',
+        versions_beyond_policy: 'Versions beyond policy', reclaimable_build_artifacts: 'Reclaimable build cache',
+        large_writable_layer: 'Large writable layer', unmanaged_container: 'Unmanaged container',
+        dangling_volumes: 'Dangling volumes', caddyfile_without_caddy: 'Caddyfile without Caddy',
+        scheduler_missing: 'Scheduler missing', disk_pressure: 'Disk pressure',
+      }[kind] || kind;
+    },
+    remedyLabel(finding) {
+      const argv = finding.remedy && finding.remedy.argv;
+      return argv ? argv.slice(1).join(' ') : '';
+    },
+    fmtBytes(n) {
+      if (n === undefined || n === null) return '';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let v = n, u = 0;
+      while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+      return `${v >= 10 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
+    },
+    ageLabel(seconds) {
+      if (seconds === undefined || seconds === null) return 'never';
+      if (seconds < 90) return 'just now';
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 120) return `${minutes} min ago`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 48) return `${hours} h ago`;
+      return `${Math.round(hours / 24)} days ago`;
+    },
+    countsSummary(row) {
+      const c = row.counts || {};
+      const parts = [];
+      if (c.critical) parts.push(c.critical + ' critical');
+      if (c.warning) parts.push(c.warning + ' warning');
+      if (c.info) parts.push(c.info + ' info');
+      if (c.dismissed) parts.push(c.dismissed + ' dismissed');
+      return parts.length ? parts.join(', ') : 'no findings';
     },
   }));
 

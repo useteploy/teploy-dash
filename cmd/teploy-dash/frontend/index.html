@@ -76,6 +76,7 @@
     <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" title="DNS, route, certificate and HTTP health for every domain" :class="{ active: $store.router.page === 'domains' }" :aria-current="$store.router.page === 'domains' ? 'page' : null" @click.prevent="$store.router.navigate('domains')">Domains</a></li>
+    <li><a href="#" title="What is left over on each server — stale routes, old versions, reclaimable space — with the fix where one exists" :class="{ active: $store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' }" :aria-current="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' ? 'page' : null" @click.prevent="$store.router.navigate('cleanup')">Cleanup</a></li>
     <li><a href="#" title="Every database and volume across the fleet — coverage, encryption, restore tests" :class="{ active: $store.router.page === 'backups' }" :aria-current="$store.router.page === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
@@ -2130,6 +2131,273 @@
           </div>
         </div>
       </template>
+    </div>
+  </template>
+
+  <!-- Cleanup (Slice 6): what is left over on each server, from the CLI's
+       read-only `server audit`. One component serves the fleet overview
+       (/cleanup) and a server's report (/cleanup/:server), like monitors. -->
+  <template x-if="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail'">
+    <div x-data="cleanupPage">
+
+      <!-- Fleet overview -->
+      <template x-if="!routeIdentity()">
+        <div>
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">Cleanup</h1>
+              <p class="subtitle">What is left over on each server — stale routes, old versions, reclaimable space — and the command that fixes it, where one exists.</p>
+            </div>
+          </div>
+
+          <template x-if="loading">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
+
+          <template x-if="!loading && loadFailed && !showingStale">
+            <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+          </template>
+
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="'Showing the last report — the refresh failed: ' + loadError"></div>
+          </template>
+
+          <template x-if="!loading && !cliSupported">
+            <div role="status" class="stale-banner" x-text="note"></div>
+          </template>
+
+          <template x-if="discoveryError">
+            <div role="status" class="stale-banner" x-text="discoveryError"></div>
+          </template>
+
+          <template x-if="finishedServers.length > 0">
+            <div role="status" class="stale-banner">
+              <span>A remedy finished on <span x-text="finishedServers.join(', ')"></span>. Re-audit to confirm the finding cleared:</span>
+              <template x-for="server in finishedServers" :key="server">
+                <button class="btn btn-sm" style="margin-left: 8px;" @click="runAudit(server)" :disabled="auditBusy === server" x-text="auditBusy === server ? 'Auditing…' : 'Re-audit ' + server"></button>
+              </template>
+            </div>
+          </template>
+
+          <template x-if="!loading && !loadFailed && rows.length === 0">
+            <div class="empty-state"><p>No servers configured.</p></div>
+          </template>
+
+          <template x-if="rows.length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Server</th>
+                    <th>Last audit</th>
+                    <th>Findings</th>
+                    <th style="width: 220px;"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="row in rows" :key="row.server">
+                    <tr>
+                      <td>
+                        <span class="status-dot dot" :class="stateClass(row.state)"></span>
+                        <a :href="'/cleanup/' + encodeURIComponent(row.server)" @click.prevent="openServer(row.server)" x-text="row.server"></a>
+                        <div class="text-muted" x-text="stateLabel(row.state) + (row.configured === false ? ' — no longer configured' : '')"></div>
+                        <div class="text-muted" x-show="row.error" x-text="row.error"></div>
+                      </td>
+                      <td>
+                        <div x-text="ageLabel(row.age_seconds)"></div>
+                        <div class="text-muted" x-show="row.live_audit">
+                          <span>audit <span x-text="row.live_audit ? row.live_audit.status : ''"></span></span>
+                          <a x-show="row.live_audit" :href="'/operations/' + (row.live_audit ? row.live_audit.id : '')">follow</a>
+                        </div>
+                        <div class="text-muted" x-show="row.checks_unknown" x-text="row.checks_unknown + ' check(s) could not be read'"></div>
+                        <div class="text-muted" x-show="row.last_error" x-text="row.last_error"></div>
+                      </td>
+                      <td x-text="countsSummary(row)"></td>
+                      <td>
+                        <button class="btn btn-sm btn-primary" @click="runAudit(row.server)" :disabled="auditBusy === row.server || !!row.live_audit || !cliSupported"
+                                x-text="auditBusy === row.server ? 'Auditing…' : 'Run audit'" title="Minutes over SSH; it runs as an operation you can follow"></button>
+                        <button class="btn btn-sm" @click="openServer(row.server)" :disabled="row.state === 'never'">Open</button>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- One server's report -->
+      <template x-if="routeIdentity()">
+        <div>
+          <a href="#" class="back-link" @click.prevent="$store.router.navigate('cleanup')">&larr; Cleanup</a>
+          <div class="page-header">
+            <div>
+              <h1 class="page-title" x-text="detail ? detail.server : routeIdentity()"></h1>
+              <p class="subtitle" x-text="detail ? stateLabel(detail.state) + (detail.audited_at ? ' — audited ' + ageLabel(detail.age_seconds) : '') : ''"></p>
+            </div>
+            <div class="header-actions" x-show="detail">
+              <button class="btn btn-sm" @click="load()">Refresh</button>
+              <button class="btn btn-sm btn-primary" @click="runAudit(detail.server)" :disabled="auditBusy === detail.server || !!detail.live_audit || !cliSupported"
+                      x-text="auditBusy === detail.server ? 'Auditing…' : 'Re-run audit'"></button>
+            </div>
+          </div>
+
+          <template x-if="loading">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
+
+          <template x-if="!loading && loadFailed && !showingStale">
+            <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+          </template>
+
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="'Showing the last report — the refresh failed: ' + loadError"></div>
+          </template>
+
+          <template x-if="!loading && !cliSupported">
+            <div role="status" class="stale-banner" x-text="note"></div>
+          </template>
+
+          <template x-if="detail && detail.state === 'unreachable'">
+            <div role="status" class="stale-banner" x-text="'The server could not be audited' + (detail.error ? ': ' + detail.error : '') + '. Nothing here says it is clean.'"></div>
+          </template>
+
+          <template x-if="detail && detail.state === 'partial'">
+            <div role="status" class="stale-banner">Part of the audit could not read its sources (below); the findings that depend on them are missing, not cleared.</div>
+          </template>
+
+          <template x-if="detail && detail.last_error">
+            <div role="status" class="stale-banner" x-text="detail.last_error + ' — the report below is the last good one.'"></div>
+          </template>
+
+          <template x-if="detail && detail.live_audit">
+            <div role="status" class="stale-banner">An audit is <span x-text="detail.live_audit.status"></span> — <a :href="'/operations/' + detail.live_audit.id">follow it</a>.</div>
+          </template>
+
+          <template x-if="finishedServers.includes(routeIdentity())">
+            <div role="status" class="stale-banner">A remedy finished here. <button class="btn btn-sm" style="margin-left: 8px;" @click="runAudit(routeIdentity())" :disabled="auditBusy === routeIdentity()" x-text="auditBusy === routeIdentity() ? 'Auditing…' : 'Re-audit now'"></button></div>
+          </template>
+
+          <template x-if="detail && detail.state === 'never'">
+            <div class="empty-state">
+              <p>This server has not been audited yet.</p>
+              <button class="btn btn-primary" @click="runAudit(detail.server)" :disabled="auditBusy === detail.server || !cliSupported" x-text="auditBusy === detail.server ? 'Auditing…' : 'Run the first audit'"></button>
+            </div>
+          </template>
+
+          <template x-if="detail && detail.checks && detail.checks.length > 0">
+            <div style="margin-bottom: 20px;">
+              <h3 style="font-size: 15px; margin: 0 0 8px;">Checks</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead>
+                  <tbody>
+                    <template x-for="c in detail.checks" :key="c.name">
+                      <tr>
+                        <td x-text="c.name"></td>
+                        <td><span class="dot" :class="c.status === 'ok' ? 'green' : 'yellow'"></span> <span x-text="c.status === 'ok' ? 'ok' : 'unknown'"></span></td>
+                        <td class="text-muted" x-text="c.detail || (c.status === 'unknown' ? 'could not be read' : '')"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="detail && detail.disk">
+            <div style="margin-bottom: 20px;">
+              <h3 style="font-size: 15px; margin: 0 0 8px;">Disk</h3>
+              <p class="card-meta" x-text="detail.disk.path + ': ' + fmtBytes(detail.disk.available_bytes) + ' available (' + detail.disk.used_percent + '% used)'"></p>
+              <div class="table-wrap" x-show="detail.disk.attribution && detail.disk.attribution.length">
+                <table>
+                  <thead><tr><th>Attribution</th><th>Size</th></tr></thead>
+                  <tbody>
+                    <template x-for="a in (detail.disk.attribution || [])" :key="a.name">
+                      <tr><td x-text="a.name"></td><td x-text="fmtBytes(a.size_bytes)"></td></tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="detail && detail.state !== 'never'">
+            <div>
+              <div class="section-header" style="margin-bottom: 12px;">
+                <h3 style="font-size: 15px; margin: 0;">Findings</h3>
+                <label class="checkbox-label" x-show="dismissedFindings.length > 0"><input type="checkbox" x-model="showDismissed"> Show dismissed (<span x-text="dismissedFindings.length"></span>)</label>
+              </div>
+              <template x-if="visibleFindings.length === 0">
+                <div class="empty-state"><p>No open findings<x-show="dismissedFindings.length"> — <span x-text="dismissedFindings.length"></span> dismissed</x-show>.</p></div>
+              </template>
+              <div class="table-wrap" x-show="visibleFindings.length > 0">
+                <table>
+                  <thead>
+                    <tr><th>Finding</th><th>Evidence</th><th style="width: 280px;"></th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="f in visibleFindings" :key="f.id">
+                      <tr :class="f.dismissed ? 'text-muted' : ''">
+                        <td>
+                          <span class="dot" :class="severityClass(f.severity)"></span>
+                          <strong x-text="kindLabel(f.kind)"></strong>
+                          <div class="mono" style="font-size: 12px;" x-text="f.subject"></div>
+                          <div class="text-muted" x-show="f.size_bytes" x-text="f.size_bytes ? fmtBytes(f.size_bytes) : ''"></div>
+                        </td>
+                        <td>
+                          <span x-text="f.evidence"></span>
+                          <div class="text-muted" style="margin-top: 4px;" x-show="f.related && f.related.length" x-text="'related: ' + (f.related || []).join(', ')"></div>
+                          <div class="text-muted" style="margin-top: 4px;" x-show="f.dismissed" x-text="'dismissed by ' + f.dismissed.actor"></div>
+                        </td>
+                        <td>
+                          <template x-if="f.remedy && f.remedy.runnable">
+                            <button class="btn btn-sm" :class="f.remedy.destructive ? 'btn-danger' : ''" @click="openRemedy(f)" :disabled="remedyBusy"
+                                    :title="remedyLabel(f)" x-text="f.remedy.destructive ? 'Fix (destructive)…' : 'Fix'"></button>
+                          </template>
+                          <template x-if="f.remedy && f.remedy.available && !f.remedy.runnable">
+                            <div>
+                              <span class="badge">report-only here</span>
+                              <div class="text-muted" style="font-size: 12px;" x-text="f.remedy.note"></div>
+                            </div>
+                          </template>
+                          <template x-if="f.remedy && !f.remedy.available">
+                            <span class="text-muted" style="font-size: 12px;">report-only</span>
+                          </template>
+                          <button class="btn btn-sm" style="margin-left: 8px;" @click="f.dismissed ? undismiss(f) : dismiss(f)" x-text="f.dismissed ? 'Un-dismiss' : 'Dismiss'" title="Hide this finding; a fresh audit that proves it cleared retires the dismissal"></button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Destructive remedy confirmation: type the finding's app or subject
+           name. The server enforces the match; this dialog is the prompt. -->
+      <div class="dialog-overlay" x-show="confirmFinding" @click.self="confirmFinding = null" @keydown.escape.window="confirmFinding && (confirmFinding = null)" x-cloak>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="cleanup-remedy-title" tabindex="-1" x-effect="confirmFinding && $nextTick(() => $el.focus())">
+          <h2 id="cleanup-remedy-title">Fix <span x-text="confirmFinding ? kindLabel(confirmFinding.kind) : ''"></span>?</h2>
+          <template x-if="confirmFinding">
+            <form @submit.prevent="confirmRemedy()">
+              <p>This runs <span class="mono" x-text="remedyLabel(confirmFinding)"></span> — the fix the audit named. It is destructive: what it removes does not come back.</p>
+              <p class="text-muted" x-text="confirmFinding.evidence"></p>
+              <div class="field">
+                <label for="cleanup-remedy-confirm">Type <span class="mono" x-text="confirmName(confirmFinding)"></span> to confirm</label>
+                <input id="cleanup-remedy-confirm" type="text" class="form-input" x-model="confirmText" autocomplete="off">
+              </div>
+              <div class="dialog-actions">
+                <button type="button" class="btn" @click="confirmFinding = null">Cancel</button>
+                <button type="submit" class="btn btn-danger" :disabled="remedyBusy || confirmText !== confirmName(confirmFinding)" x-text="remedyBusy ? 'Starting…' : 'Run it'"></button>
+              </div>
+            </form>
+          </template>
+        </div>
+      </div>
     </div>
   </template>
 

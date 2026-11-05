@@ -54,6 +54,51 @@ report, rebuild runbook. Open:
   lifecycle instructions (B2 fileNamePrefix / aws put-bucket-lifecycle) are
   printed from `backupLifecycleRule` and were not executed against a real bucket
   here; they mirror the CLI README's documented rule.
+## 2026-11-05 Slice 6 (cleanup/audit) — deferred and recorded residuals
+
+Branch `dash-cleanup` (plan section 9 Dash half). Built: the cleanup page over
+`teploy server audit --json` (fleet overview + per server), audits as durable
+operations (one per server), the cached report file `<data>/server-audit.json`
+(dash-owned, dismissals included), remedies re-rendered from the operation
+allowlist with server-enforced typed confirmations, audited dismissals with
+retire-on-cleared semantics, capability `server-audit-v1`, contracts pin rev 19.
+Open:
+
+- **Release order.** The gate names v0.1.53 (released); the Dockerfiles still
+  bundle v0.1.52 — bump `TEPLOY_VERSION` when this ships, as Slice 5 did.
+- **No background audit cadence.** Audits run only when asked (button or
+  post-remedy offer). A fleet sweep every N minutes was deliberately not built:
+  one audit is a multi-minute SSH burst per server, and nothing in the plan
+  asked for a timer. A report older than 7 days reads `stale`. Incidents are
+  NOT opened from audit findings — they are one operator's snapshot, not an
+  alerting signal; revisit if a fleet-wide cadence lands.
+- **Upstream (teploy-cli) corpus gap.** The rev-19 fixture produces 13 of the
+  schema's 14 finding kinds: its scenario has no server without a Caddy, so
+  `caddyfile_without_caddy` never appears, though the MANIFEST sells the
+  fixture as "one of each finding". Recorded for the CLI's corpus session; dash
+  decodes kinds as plain strings, so no dash change is owed when the fixture
+  grows.
+- **Remedy allowlist.** Dash runs only remedy command shapes it can rebuild:
+  `route remove`, `releases prune --keep N`, `server prune --build-cache
+  --dangling` (the full reclaim only — a narrower remedy is refused with the
+  CLI command shown), `remove`, `redeploy`. A future remedy command (or a
+  future flag on a known one) renders report-only with the argv displayed;
+  that is the forward-compat path, not a gap to work around.
+- **Dismissals are per finding id, not per principal.** Any principal with
+  `execute.mutate` can dismiss or restore; every action is in the audit trail
+  with its actor. Per-principal visibility was not asked for.
+- **Remedy failures do not open operation incidents.** The new kinds are not
+  in `alertedOperationKinds`: they are operator-triggered one-shots whose
+  failure is visible in the operation center and on the cleanup page, not an
+  app-health signal. Deliberate.
+- **Re-audit after a remedy is offered, not queued.** The operator may want to
+  bundle several remedies before paying a multi-minute audit again; the offer
+  is a button, not an automatic enqueue. If remedies become fleet-wide, a
+  debounced auto re-audit is the natural next slice.
+- **Harvest reads the operation journal.** The report is decoded from the
+  finished operation's retained stdout events; if retention ever dropped them
+  before the finish hook ran, the failure is honest (`last_error` names it and
+  the previous report stays) — not silent.
 
 ## 2026-11-05 Slice 5 (domain health) — deferred and recorded residuals
 

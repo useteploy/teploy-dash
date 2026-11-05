@@ -360,6 +360,9 @@ type Server struct {
 	// cached fleet backup view, storage/recovery/policy records, the
 	// dash-owned restore tests and the migration evidence.
 	backups backupState
+	// cleanup is the Slice 6 server-audit cache (cleanup.go): the last
+	// `server audit` envelope per server plus per-finding dismissals.
+	cleanup cleanupState
 }
 
 // New creates a new server.
@@ -378,6 +381,7 @@ func New(config Config) *Server {
 	s.initAlerting(config.DataDir)
 	s.initDomainHealth(config.DataDir)
 	s.initBackups(config.DataDir)
+	s.initCleanup(config.DataDir)
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
 		s.runCLI = cli.RunContext
@@ -502,7 +506,12 @@ func New(config Config) *Server {
 		},
 		// Alerts v2: app operation failures become incidents (source
 		// "operation"); the next success of the same kind recovers them.
-		OnFinish: s.onOperationFinished,
+		// Slice 6: a finished server_audit operation's report is harvested
+		// into the cleanup cache (cleanup.go) before the incident pass.
+		OnFinish: func(op *operation.Operation) {
+			s.onCleanupOperationFinished(op)
+			s.onOperationFinished(op)
+		},
 	})
 	if s.operationInitErr != nil {
 		log.Printf("operations: disabled: %v", s.operationInitErr)
@@ -1703,6 +1712,9 @@ func (s *Server) routes() {
 
 	// Uptime monitors
 	s.mux.HandleFunc("/api/domains", s.handleDomains)
+	// Slice 6: fleet cleanup over the CLI's server audit.
+	s.mux.HandleFunc("/api/cleanup", s.handleCleanup)
+	s.mux.HandleFunc("/api/cleanup/", s.handleCleanupServer)
 	s.mux.HandleFunc("/api/monitors", s.handleMonitors)
 	s.mux.HandleFunc("/api/monitors/", s.handleMonitor)
 

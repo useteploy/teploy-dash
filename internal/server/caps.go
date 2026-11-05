@@ -175,6 +175,20 @@ func requiredCapabilities(method, path string) []string {
 		}
 		return []string{caps.ExecuteMutate}
 	}
+	// Slice 6 cleanup: the cached audit is metadata; running an audit or a
+	// remedy enqueues an operation (deploy-flow control — the remedies ARE
+	// deploy-state changes: route removal, version prunes, removes); a
+	// dismissal is an audited UI preference.
+	if path == "/api/cleanup" || strings.HasPrefix(path, "/api/cleanup/") {
+		if method == http.MethodGet {
+			return []string{caps.ViewMetadata}
+		}
+		rest := strings.Trim(strings.TrimPrefix(path, "/api/cleanup/"), "/")
+		if strings.HasSuffix(rest, "/audit") || strings.HasSuffix(rest, "/remedy") {
+			return []string{caps.ExecuteDeploy}
+		}
+		return []string{caps.ExecuteMutate}
+	}
 	// Onboarding preflight is a read probe; the POST form exists so
 	// CORS-safe clients can send a body.
 	if path == "/api/onboarding/preflight" || path == "/api/onboarding/entry" {
