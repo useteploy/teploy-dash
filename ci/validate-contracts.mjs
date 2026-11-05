@@ -79,6 +79,9 @@ const artifacts = {
   "backup-restore-envelope": { schema: "backup-restore-envelope.schema.json", classes: { valid: "validate" } },
   // Domain health (corpus rev 17, plan P4): `teploy domains check --json`.
   "domains-check-envelope": { schema: "domains-check-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-status-envelope": { schema: "backup-status-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-run-envelope": { schema: "backup-run-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-policy-envelope": { schema: "backup-policy-envelope.schema.json", classes: { valid: "validate" } },
   // Git-source artifacts (corpus rev 16, plan D4): the connected-source
   // show envelope, credential provisioning receipts and the poll results.
   // Dash adopts these surfaces separately (D4); classified here so the
