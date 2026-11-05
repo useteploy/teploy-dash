@@ -22,16 +22,24 @@ incidents, host-ingress fleet monitor rule. Open:
   (`domainsMinCLI`; v0.1.50 advertises no such token, so it reads unsupported). The
   Dockerfiles still bundle v0.1.50: bump `TEPLOY_VERSION` after the release. The
   check runs from this host over SSH, so no per-server CLI version is involved.
-- **Second-incident rule is one way.** A domain rule does not open while the host's
-  monitor has an open incident. The reverse is not suppressed: a domain rule open
-  first, then the monitor going down, gives two incidents with different causes.
-  Accepted: it needs DNS to break and HTTP to keep working for at least 30 minutes.
+- **Second-incident rule is one way.** The DNS and obtain rules and an expired
+  certificate do not open while any monitor for the host has an open incident. The
+  reverse is not suppressed: a domain rule open first, then the monitor going down,
+  gives two incidents. Accepted: it needs DNS to break and HTTP to keep working for
+  at least 30 minutes. An expiring (not expired) certificate always alerts.
+- **Retirement is per server.** A rule retires only when every server that evidenced
+  it reads `ok` this sweep. A record for a server no longer in the fleet has no say.
+  After a restart the evidence is the incident's own server field, so a rule held
+  but not open loses that scope (it can reopen as held; harmless).
+- **Unfronted host-ingress monitors stay.** Per review, `fronted` cannot be proven
+  absent, so plan P4's "retire the ones that no longer qualify" does not apply: a
+  host-ingress monitor only retires when no app serves the domain any more.
 - **Debounce streaks are not restored on restart** (open incidents are). A DNS
   failure across a restart takes one more sweep to open. Monitors restore theirs
   from check history; domain rules keep one snapshot, not a history.
 - **Stale route evidence** comes from the CLI's Caddyfile view only. Cloudflare
-  tunnel config is plan v2, so a tunnelled host-ingress domain with no Caddy block
-  gets no fleet monitor. Add a monitor by hand; it then gets expiry and HTTP rows.
+  tunnel config is plan v2; a tunnelled host-ingress domain counts as fronted through
+  its proxied DNS answer.
 - **Hand-written blocks alert** like any other domain (DNS, obtain) once adopted.
   Silence them by rule id or retire the block.
 - **`started_at` on a domain incident** is the first failing check Dash saw, per the

@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,22 +106,41 @@ func TestCheckHTTP_Reachable(t *testing.T) {
 	}
 }
 
-func TestCertExpiry_ReadsTheFirstHop(t *testing.T) {
+func TestFirstHopCert(t *testing.T) {
 	first, last := time.Date(2027, 1, 2, 0, 0, 0, 0, time.UTC), time.Date(2030, 1, 2, 0, 0, 0, 0, time.UTC)
 	cert := func(at time.Time) *tls.ConnectionState {
 		return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{NotAfter: at}}}
 	}
 	redirect := &http.Response{TLS: cert(first), Request: &http.Request{}}
 	final := &http.Response{TLS: cert(last), Request: &http.Request{Response: redirect}}
-	got := certExpiry(final)
-	if got == nil || !got.Equal(first) {
-		t.Fatalf("expiry = %v, want the monitored host's %v", got, first)
+	got := firstHopCert(final)
+	if got == nil || !got.NotAfter.Equal(first) {
+		t.Fatalf("cert = %+v, want the monitored host's %v", got, first)
 	}
-	if got := certExpiry(&http.Response{Request: &http.Request{}}); got != nil {
+	if got := firstHopCert(&http.Response{Request: &http.Request{}}); got != nil {
 		t.Errorf("a plain HTTP response has no certificate: %v", got)
 	}
-	if got := certExpiry(&http.Response{TLS: &tls.ConnectionState{}}); got != nil {
+	if got := firstHopCert(&http.Response{TLS: &tls.ConnectionState{}}); got != nil {
 		t.Errorf("no peer certificate: %v", got)
+	}
+}
+
+// A refusal on a later redirect hop is another host's certificate: recording its
+// expiry would alert on the wrong domain.
+func TestCheckHTTP_RefusedOnLaterHopRecordsNoExpiry(t *testing.T) {
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer tlsSrv.Close()
+	target := "https://localhost:" + tlsSrv.URL[strings.LastIndex(tlsSrv.URL, ":")+1:] + "/"
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
+	defer first.Close()
+	got := New(&mockStore{}).checkHTTP(store.Monitor{ID: "m", Type: "http", Target: first.URL, AllowInternal: true})
+	if got.Status != "down" {
+		t.Fatalf("%+v", got)
+	}
+	if got.CertNotAfter != nil {
+		t.Fatalf("recorded another host's expiry: %v", got.CertNotAfter)
 	}
 }
 
@@ -134,8 +154,8 @@ func TestCheckHTTP_RejectedCertificateStillReportsExpiry(t *testing.T) {
 	if got.Status != "down" {
 		t.Fatalf("an untrusted certificate must read down: %+v", got)
 	}
-	if got.CertNotAfter == nil || !got.CertNotAfter.After(time.Now()) {
-		t.Fatalf("expiry = %v", got.CertNotAfter)
+	if got.CertNotAfter == nil || !got.CertNotAfter.After(time.Now()) || got.CertNotBefore == nil {
+		t.Fatalf("expiry = %v, start = %v", got.CertNotAfter, got.CertNotBefore)
 	}
 }
 

@@ -17,9 +17,9 @@ All notable changes to teploy-dash are recorded here.
 
 ### Changed
 
-- Fleet monitors: a host-ingress domain is monitored only when a Caddy block names
-  it. One that no longer qualifies retires on a complete sweep; without evidence
-  existing monitors stay and none are added.
+- Fleet monitors: a new host-ingress domain gets a monitor only when a route on any
+  server names it or public DNS answers. Existing monitors are never retired on the
+  absence of that evidence.
 - `teploy.yml` no longer carries the `dash.example.com` placeholder.
 - The image bundles teploy CLI v0.1.50 (from v0.1.49): database engine
   detection, safe in-place restore, dump verification and cron checks.

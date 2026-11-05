@@ -442,8 +442,11 @@ func TestDomainIncidents_FirstResultsBecomeOneSummary(t *testing.T) {
 		if ev.Kind == alert.KindSummary {
 			summaries++
 		}
-		if ev.Source == alert.SourceDomain && ev.Audience != alert.AudienceMachine {
+		if ev.Kind != alert.KindSummary && ev.Source == alert.SourceDomain && ev.Audience != alert.AudienceMachine {
 			human++
+		}
+		if ev.Kind == alert.KindSummary && (!strings.HasPrefix(ev.Message, "First domain health results.") || ev.Source != alert.SourceDomain) {
+			t.Errorf("summary wording: %+v", ev)
 		}
 	}
 	if summaries != 1 || human != 0 {
@@ -485,7 +488,11 @@ func TestDomainIncidents_ServerUnreachableNeverAdopted(t *testing.T) {
 	}
 }
 
-func TestDomainIncidents_RetireOnRemovalOnlyOnCompleteEvidence(t *testing.T) {
+func emptyServer(snap *domainSnapshot, name, state string, now time.Time) {
+	snap.Servers[name] = &domainServerRecord{Server: name, State: state, LastAttemptAt: now, LastSuccessAt: now, Caddy: domainCaddy{Caddyfile: "present"}}
+}
+
+func TestDomainIncidents_RetireOnRemovalPerServer(t *testing.T) {
 	s, sink := domainServer(t)
 	now := domainsNow
 	setSnapshot(s, snapshotOf(now,
@@ -497,25 +504,254 @@ func TestDomainIncidents_RetireOnRemovalOnlyOnCompleteEvidence(t *testing.T) {
 	if n := len(domainEvents(sink, alert.KindOpened)); n != 1 {
 		t.Fatalf("opened %d", n)
 	}
-	// a.dev is gone, but another server could not be read: wait.
-	incomplete := snapshotOf(now, domainRow("other", "b", "b.dev"))
-	incomplete.Servers["other"].State = "unreachable"
-	setSnapshot(s, incomplete)
+	// a.dev is gone from edge, whose read did not complete: wait.
+	partial := snapshotOf(now, domainRow("other", "b", "b.dev"))
+	emptyServer(partial, "edge", "partial", now)
+	setSnapshot(s, partial)
 	s.evaluateDomainIncidents(now, true)
 	if len(s.alerts.tracker.Open()) != 1 {
-		t.Fatal("retired on incomplete evidence")
+		t.Fatal("retired on a partly read server")
 	}
 	// An older CLI proves nothing either.
-	setSnapshot(s, snapshotOf(now, domainRow("other", "b", "b.dev")))
+	gone := snapshotOf(now, domainRow("other", "b", "b.dev"))
+	emptyServer(gone, "edge", "ok", now)
+	setSnapshot(s, gone)
 	s.evaluateDomainIncidents(now, false)
 	if len(s.alerts.tracker.Open()) != 1 {
 		t.Fatal("retired on an unsupported CLI")
 	}
-	// Complete: it retires.
+	// Edge was read and no longer has it. A long-dead server elsewhere is not
+	// edge's evidence, and holds nothing up.
+	emptyServer(gone, "dead", "unreachable", now.Add(-48*time.Hour))
+	setSnapshot(s, gone)
 	s.evaluateDomainIncidents(now, true)
 	rec := domainEvents(sink, alert.KindRecovered)
 	if len(rec) != 1 || rec[0].Reason != alert.ReasonRetired || len(s.alerts.tracker.Open()) != 0 {
 		t.Fatalf("recovered = %+v, open = %+v", rec, s.alerts.tracker.Open())
+	}
+}
+
+// The false all-clear: a server whose Caddyfile or state read failed comes back
+// partial, its rows read route unknown and TLS not_applicable, so its rule keys
+// vanish. Open incidents must survive that, across more than one sweep and a
+// restart of the in-memory key set.
+func TestDomainIncidents_PartialServerNeverAllClears(t *testing.T) {
+	s, sink := domainServer(t)
+	now := domainsNow
+	setSnapshot(s, snapshotOf(now,
+		domainRow("edge", "a", "a.dev", withDNS("nxdomain"), withObtainFailing(now.Add(-48*time.Hour))),
+	), "edge", domainAdoptMonitors)
+	s.evaluateDomainIncidents(now, true)
+	s.evaluateDomainIncidents(now, true)
+	if n := len(s.alerts.tracker.Open()); n != 2 {
+		t.Fatalf("open = %d", n)
+	}
+	blind := snapshotOf(now, domainRow("edge", "a", "a.dev", withRoute("unknown"), func(r *domainCheckRow) {
+		r.DNS.Status, r.TLS.Status, r.Route.UpstreamResolves = "unknown", "not_applicable", "unknown"
+	}))
+	blind.Servers["edge"].State = "partial"
+	blind.Servers["edge"].Caddy.Caddyfile = "unreadable"
+	setSnapshot(s, blind)
+	for i := 0; i < 3; i++ {
+		s.evaluateDomainIncidents(now, true)
+	}
+	if got := domainEvents(sink, alert.KindRecovered); len(got) != 0 {
+		t.Fatalf("a false all-clear: %+v", got)
+	}
+	if n := len(s.alerts.tracker.Open()); n != 2 {
+		t.Fatalf("open = %d", n)
+	}
+	s.domains.ruleKeys = domainRuleKeys{} // as after a restart: inc.Server still scopes it
+	s.evaluateDomainIncidents(now, true)
+	if got := domainEvents(sink, alert.KindRecovered); len(got) != 0 {
+		t.Fatalf("a false all-clear after a restart: %+v", got)
+	}
+}
+
+// Caddy recreated: logs and elapsed reset, so an open obtain incident reads
+// failing for under a day. It is still failing.
+func TestDomainIncidents_ResetClockIsNotARecovery(t *testing.T) {
+	s, sink := domainServer(t)
+	now := domainsNow
+	setSnapshot(s, snapshotOf(now, domainRow("edge", "a", "a.dev", withObtainFailing(now.Add(-14*24*time.Hour)))), "edge", domainAdoptMonitors)
+	s.evaluateDomainIncidents(now, true)
+	if n := len(domainEvents(sink, alert.KindOpened)); n != 1 {
+		t.Fatalf("opened %d", n)
+	}
+	setSnapshot(s, snapshotOf(now, domainRow("edge", "a", "a.dev", withObtainFailing(now.Add(-time.Hour)))))
+	for i := 0; i < 2; i++ {
+		s.evaluateDomainIncidents(now, true)
+	}
+	if got := domainEvents(sink, alert.KindRecovered); len(got) != 0 {
+		t.Fatalf("said recovered while failing: %+v", got)
+	}
+	setSnapshot(s, snapshotOf(now, domainRow("edge", "a", "a.dev")))
+	s.evaluateDomainIncidents(now, true)
+	if got := domainEvents(sink, alert.KindRecovered); len(got) != 1 {
+		t.Fatalf("a real ok closes: %+v", got)
+	}
+}
+
+// Host on A and B, DNS points at A, A unreachable: B's wrong_target proves
+// nothing.
+func TestDomainIncidents_WrongTargetWithAnUnreadInstanceIsUnknown(t *testing.T) {
+	s, sink := domainServer(t)
+	now := domainsNow
+	snap := snapshotOf(now,
+		domainRow("a", "x", "x.dev", withRoute("managed")),
+		domainRow("b", "x", "x.dev", withDNS("wrong_target", "192.0.2.1")),
+	)
+	snap.Servers["a"].State = "unreachable"
+	snap.Servers["a"].LastSuccessAt = now.Add(-3 * time.Hour)
+	setSnapshot(s, snap, "a", "b", domainAdoptMonitors)
+	for i := 0; i < 3; i++ {
+		s.evaluateDomainIncidents(now, true)
+	}
+	if got := domainEvents(sink, alert.KindOpened); len(got) != 0 {
+		t.Fatalf("opened a critical: %+v", got)
+	}
+	r := rowFor(t, buildDomainRows(snap, nil, now), "x.dev")
+	if r.DNS.State != layerUnknown {
+		t.Errorf("dns = %+v", r.DNS)
+	}
+}
+
+func TestDomainIncidents_PartialFirstSweepIsNotAdopted(t *testing.T) {
+	s, sink := domainServer(t)
+	now := domainsNow
+	partial := snapshotOf(now, domainRow("edge", "a", "a.dev"))
+	partial.Servers["edge"].State = "partial"
+	setSnapshot(s, partial)
+	s.evaluateDomainIncidents(now, true)
+	if s.domains.snap.Adopted["edge"] {
+		t.Fatal("a partial sweep adopted the server")
+	}
+	setSnapshot(s, snapshotOf(now,
+		domainRow("edge", "a", "a.dev", withDNS("nxdomain")),
+		domainRow("edge", "b", "b.dev", withDNS("nxdomain")),
+	))
+	s.evaluateDomainIncidents(now, true)
+	summaries := 0
+	for _, ev := range sink.events() {
+		if ev.Kind == alert.KindSummary {
+			summaries++
+		} else if ev.Audience != alert.AudienceMachine {
+			t.Errorf("an individual human alert: %+v", ev)
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("summaries = %d", summaries)
+	}
+}
+
+func TestDomainIncidents_WildcardObtainAlerts(t *testing.T) {
+	s, sink := domainServer(t)
+	now := domainsNow
+	setSnapshot(s, snapshotOf(now, domainRow("edge", "a", "*.foo.dev", withDNS("skipped"), withObtainFailing(now.Add(-3*24*time.Hour)),
+		func(r *domainCheckRow) { r.Skip = "wildcard" })), "edge", domainAdoptMonitors)
+	s.evaluateDomainIncidents(now, true)
+	got := domainEvents(sink, alert.KindOpened)
+	if len(got) != 1 || !strings.Contains(got[0].Message, "failing for 3 days") || got[0].Target != "*.foo.dev" {
+		t.Fatalf("opened = %+v", got)
+	}
+	r := rowFor(t, buildDomainRows(&s.domains.snap, nil, now), "*.foo.dev")
+	if r.FirstFailing != "cert" {
+		t.Errorf("row = %+v", r)
+	}
+}
+
+// A long-open monitor incident must not hide an expiring certificate, and every
+// monitor for the host counts as the one holding the outage.
+func TestDomainIncidents_MonitorOverlapScope(t *testing.T) {
+	s, sink := domainServer(t)
+	now := time.Now().UTC()
+	soon := now.Add(5 * 24 * time.Hour)
+	older := seedMonitor(t, s, store.Monitor{ID: "down", Name: "a", Target: "https://a.dev/health"},
+		store.CheckResult{Status: "down", Message: "503", CheckedAt: now.Add(-time.Minute), CertNotAfter: &soon})
+	seedMonitor(t, s, store.Monitor{ID: "newer", Name: "b", Target: "https://a.dev/"},
+		store.CheckResult{Status: "up", StatusCode: 200, CheckedAt: now, CertNotAfter: &soon})
+	rule := monitor.RuleFor(older)
+	for i := 0; i < rule.Policy.FailAfter; i++ {
+		s.alerts.tracker.Observe(rule, false, now, "503")
+	}
+	setSnapshot(s, snapshotOf(now, domainRow("edge", "x", "a.dev", withDNS("nxdomain"))), "edge", domainAdoptMonitors)
+	s.evaluateDomainIncidents(now, true)
+	s.evaluateDomainIncidents(now, true)
+	var names []string
+	for _, ev := range domainEvents(sink, alert.KindOpened) {
+		names = append(names, ev.MonitorName)
+	}
+	if len(names) != 1 || !strings.Contains(names[0], "certificate expiry") {
+		t.Fatalf("want only the expiry alert (DNS is the monitor's outage, on either monitor): %v", names)
+	}
+
+	// Already expired: that is the outage.
+	s2, sink2 := domainServer(t)
+	gone := now.Add(-time.Hour)
+	m := seedMonitor(t, s2, store.Monitor{ID: "m", Name: "m", Target: "https://b.dev/"},
+		store.CheckResult{Status: "down", Message: "certificate has expired", CheckedAt: now, CertNotAfter: &gone})
+	r2 := monitor.RuleFor(m)
+	for i := 0; i < r2.Policy.FailAfter; i++ {
+		s2.alerts.tracker.Observe(r2, false, now, "certificate has expired")
+	}
+	setSnapshot(s2, snapshotOf(now), domainAdoptMonitors)
+	s2.evaluateDomainIncidents(now, true)
+	if got := domainEvents(sink2, alert.KindOpened); len(got) != 0 {
+		t.Fatalf("a second incident for an expired certificate: %+v", got)
+	}
+}
+
+func TestCertThresholds(t *testing.T) {
+	at := func(d time.Duration) *time.Time { v := domainsNow.Add(d); return &v }
+	for _, c := range []struct {
+		name           string
+		lifetime       time.Duration
+		warn, critical time.Duration
+	}{
+		{"90 days", 90 * 24 * time.Hour, 14 * 24 * time.Hour, 3 * 24 * time.Hour},
+		{"6 days", 6 * 24 * time.Hour, 2 * 24 * time.Hour, 24 * time.Hour},
+		{"12 hours", 12 * time.Hour, 4 * time.Hour, 2 * time.Hour},
+	} {
+		warn, critical := certThresholds(at(0), at(c.lifetime))
+		if warn != c.warn || critical != c.critical {
+			t.Errorf("%s: warn=%v critical=%v", c.name, warn, critical)
+		}
+	}
+	if warn, critical := certThresholds(nil, at(time.Hour)); warn != domainCertWarn || critical != domainCertCritical {
+		t.Errorf("no start: warn=%v critical=%v", warn, critical)
+	}
+}
+
+func TestDomainIncidents_ShortLivedCertDoesNotWarnForever(t *testing.T) {
+	s, sink := domainServer(t)
+	now := time.Now().UTC()
+	start, end := now.Add(-time.Hour), now.Add(6*24*time.Hour)
+	seedMonitor(t, s, store.Monitor{ID: "m", Name: "m", Target: "https://short.dev/"},
+		store.CheckResult{Status: "up", StatusCode: 200, CheckedAt: now, CertNotBefore: &start, CertNotAfter: &end})
+	setSnapshot(s, snapshotOf(now), domainAdoptMonitors)
+	s.evaluateDomainIncidents(now, false)
+	if got := domainEvents(sink, alert.KindOpened); len(got) != 0 {
+		t.Fatalf("a fresh 6-day certificate alerted: %+v", got)
+	}
+}
+
+func TestDomainIncidents_ExpiryEscalationReAlerts(t *testing.T) {
+	s, sink := domainServer(t)
+	now := time.Now().UTC()
+	soon := now.Add(5 * 24 * time.Hour)
+	seedMonitor(t, s, store.Monitor{ID: "m", Name: "m", Target: "https://e.dev/"},
+		store.CheckResult{Status: "up", StatusCode: 200, CheckedAt: now, CertNotAfter: &soon})
+	setSnapshot(s, snapshotOf(now), domainAdoptMonitors)
+	s.evaluateDomainIncidents(now, false)
+	later := now.Add(time.Second)
+	sooner := now.Add(2 * 24 * time.Hour)
+	seedMonitor(t, s, store.Monitor{ID: "m", Name: "m", Target: "https://e.dev/"},
+		store.CheckResult{Status: "up", StatusCode: 200, CheckedAt: later, CertNotAfter: &sooner})
+	s.evaluateDomainIncidents(later, false)
+	s.evaluateDomainIncidents(later, false)
+	repeats := domainEvents(sink, alert.KindRepeat)
+	if len(repeats) != 1 || repeats[0].Severity != alert.SeverityCritical {
+		t.Fatalf("repeats = %+v", repeats)
 	}
 }
 
@@ -620,7 +856,7 @@ func TestDomainsGate_OlderCLIIsANoteNotAnError(t *testing.T) {
 	if view["cli_supported"] != false || !strings.Contains(view["note"].(string), "v0.1.51") {
 		t.Fatalf("view = %+v", view)
 	}
-	if _, known := s.domainFrontedHosts("edge"); known {
+	if s.domainFronted("a.dev") {
 		t.Error("an older CLI cannot say what fronts a host")
 	}
 }
@@ -740,28 +976,38 @@ func TestFleetMonitors_HostIngressNeedsAFront(t *testing.T) {
 	s := &Server{store: st}
 	s.initDomainHealth("")
 	now := time.Now().UTC()
+	host := func(r *domainCheckRow) { r.Ingress = "host" }
+	label := func(r *domainCheckRow) { r.Ingress, r.Skip = "host", "host_label" }
 	setSnapshot(s, snapshotOf(now,
-		domainRow("a", "fronted", "fronted.dev", withRoute("manual"), func(r *domainCheckRow) { r.Ingress = "host" }),
-		domainRow("a", "bare", "bare.dev", withRoute("none"), func(r *domainCheckRow) { r.Ingress, r.Skip = "host", "host_label" }),
-		domainRow("a", "stale", "stale.dev", withRoute("stale_managed"), func(r *domainCheckRow) { r.Ingress = "host" }),
+		domainRow("a", "manual", "manual.dev", withRoute("manual"), host),
+		domainRow("a", "tunnelled", "tunnelled.dev", withRoute("none"), withDNS("proxied", "104.16.0.1"), label),
+		domainRow("a", "elsewhere", "elsewhere.dev", withRoute("none"), withDNS("nxdomain"), label),
+		domainRow("b", "other-box", "elsewhere.dev", withRoute("managed"), withDNS("nxdomain")),
+		domainRow("a", "bare", "bare.dev", withRoute("none"), withDNS("nxdomain"), label),
+		domainRow("a", "stale", "stale.dev", withRoute("stale_managed"), withDNS("nxdomain"), host),
 	))
 	sweep := []ServerObservation{fleetEnv("a", "",
-		remote.AppState{App: "fronted", Domain: "fronted.dev", Ingress: "host"},
+		remote.AppState{App: "manual", Domain: "manual.dev", Ingress: "host"},
+		remote.AppState{App: "tunnelled", Domain: "tunnelled.dev", Ingress: "host"},
+		remote.AppState{App: "elsewhere", Domain: "elsewhere.dev", Ingress: "host"},
 		remote.AppState{App: "bare", Domain: "bare.dev", Ingress: "host"},
 		remote.AppState{App: "stale", Domain: "stale.dev", Ingress: "host"},
+		remote.AppState{App: "fresh", Domain: "unseen.dev", Ingress: "host"},
 		remote.AppState{App: "routed", Domain: "routed.dev", Ingress: "caddy"},
 		remote.AppState{App: "ext", Domain: "ext.dev", Ingress: "external"},
 	)}
-	// A monitor a host-ingress app got under the old rule.
+	// A monitor an unfronted host-ingress app got under the old rule: nothing
+	// proves a tunnel is not there, so it stays.
 	old := store.Monitor{ID: fleetMonitorID("bare.dev"), Name: "bare.dev", Type: "http", Target: "https://bare.dev/", Enabled: true, App: "bare", Interval: time.Minute, Timeout: time.Second}
 	if err := st.SaveMonitor(&old); err != nil {
 		t.Fatal(err)
 	}
 	added, removed, err := s.reconcileFleetMonitors(sweep)
-	if err != nil || added != 2 || removed != 1 {
+	if err != nil || added != 4 || removed != 0 {
 		t.Fatalf("added=%d removed=%d err=%v", added, removed, err)
 	}
-	for host, want := range map[string]bool{"fronted.dev": true, "routed.dev": true, "bare.dev": false, "stale.dev": false, "ext.dev": false} {
+	for host, want := range map[string]bool{"manual.dev": true, "tunnelled.dev": true, "elsewhere.dev": true, "routed.dev": true, "bare.dev": true,
+		"stale.dev": false, "unseen.dev": false, "ext.dev": false} {
 		m, _ := st.GetMonitor(fleetMonitorID(host))
 		if (m != nil) != want {
 			t.Errorf("%s: monitor = %+v, want present=%v", host, m, want)
@@ -775,6 +1021,7 @@ func TestFleetMonitors_UnknownRoutesKeepWhatExists(t *testing.T) {
 	s := &Server{store: st}
 	s.initDomainHealth("")
 	s.domains.snap.Unsupported = true
+	s.domains.snap.Servers["a"] = &domainServerRecord{Server: "a", State: "ok", LastSuccessAt: time.Now(), Domains: []domainCheckRow{domainRow("a", "kept", "kept.dev", withRoute("managed"))}}
 	old := store.Monitor{ID: fleetMonitorID("kept.dev"), Name: "kept.dev", Type: "http", Target: "https://kept.dev/", Enabled: true, App: "kept", Interval: time.Minute, Timeout: time.Second}
 	if err := st.SaveMonitor(&old); err != nil {
 		t.Fatal(err)

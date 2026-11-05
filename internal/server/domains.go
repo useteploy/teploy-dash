@@ -12,7 +12,8 @@ package server
 // open incident, a domain rule for that host does not open a second one. The
 // monitor's alert owns the outage and the Domains page names the cause; a domain
 // rule that outlives the monitor's recovery opens then. A rule already open is
-// left alone.
+// left alone. A certificate that is expiring is a different problem from the
+// outage, so only an already-expired one counts as the same outage.
 //
 // Evidence that could not be collected reads "unknown", with its age; it is
 // neither a failure nor a pass, so it opens and closes nothing.
@@ -172,15 +173,16 @@ type domainHealthState struct {
 	path string
 	mu   sync.Mutex
 	snap domainSnapshot
-	// ruleKeys are the rule keys the last evaluation saw, so a rule that stops
-	// applying is retired even when it was only being held.
-	ruleKeys map[string]bool
+	// ruleKeys are the rules the last evaluation saw, with the servers evidencing
+	// each, so a rule that stops applying is retired even when it was only being
+	// held, and only once those servers have been read.
+	ruleKeys domainRuleKeys
 }
 
 func (s *Server) initDomainHealth(dataDir string) {
 	d := &s.domains
 	d.snap = domainSnapshot{Servers: map[string]*domainServerRecord{}, Adopted: map[string]bool{}}
-	d.ruleKeys = map[string]bool{}
+	d.ruleKeys = domainRuleKeys{}
 	if dataDir == "" {
 		return
 	}
@@ -450,16 +452,18 @@ func monitorHost(target string) string {
 }
 
 // domainMonitors maps each host to its enabled HTTP monitor, preferring the one
-// with the newest evidence. ok=false means monitors could not be listed.
-func (s *Server) domainMonitors() (map[string]domainMonitorEvidence, bool) {
-	out := map[string]domainMonitorEvidence{}
+// with the newest evidence. hostOfRule maps every such monitor's incident key to
+// its host, since a host can have several. listed=false means monitors could not
+// be listed.
+func (s *Server) domainMonitors() (out map[string]domainMonitorEvidence, hostOfRule map[string]string, listed bool) {
+	out, hostOfRule = map[string]domainMonitorEvidence{}, map[string]string{}
 	if s.store == nil {
-		return out, false
+		return out, hostOfRule, false
 	}
 	monitors, err := s.store.ListMonitors()
 	if err != nil {
 		log.Printf("[domains] listing monitors: %v", err)
-		return out, false
+		return out, hostOfRule, false
 	}
 	for _, m := range monitors {
 		if !m.Enabled || m.Type != "http" {
@@ -469,6 +473,7 @@ func (s *Server) domainMonitors() (map[string]domainMonitorEvidence, bool) {
 		if host == "" {
 			continue
 		}
+		hostOfRule[monitor.RuleKey(m.ID)] = host
 		ev := domainMonitorEvidence{monitor: m}
 		if s.monitor != nil {
 			ev.result, ev.known = s.monitor.LastResult(m.ID)
@@ -478,7 +483,7 @@ func (s *Server) domainMonitors() (map[string]domainMonitorEvidence, bool) {
 		}
 		out[host] = ev
 	}
-	return out, true
+	return out, hostOfRule, true
 }
 
 // domainGroup is every (server, app) row for one host.
@@ -533,7 +538,7 @@ func domainGroups(snap *domainSnapshot) []domainGroup {
 	for _, name := range names {
 		rec := snap.Servers[name]
 		for _, row := range rec.Domains {
-			if row.Skip == "ip_literal" || row.Skip == "invalid_name" || row.Skip == "wildcard" {
+			if row.Skip == "ip_literal" || row.Skip == "invalid_name" {
 				continue
 			}
 			g := byHost[row.Host]
@@ -596,6 +601,12 @@ func dnsLayer(g domainGroup, rep domainGroupRow, now time.Time) domainLayer {
 	case "nxdomain":
 		return domainLayer{layerFail, "no DNS record"}
 	case "wrong_target":
+		// DNS may point at a server that could not be read this round.
+		for _, r := range g.rows {
+			if !r.fresh(now) {
+				return domainLayer{layerUnknown, "DNS may point at " + r.row.Server + ", which could not be checked"}
+			}
+		}
 		answer := "another address"
 		if len(rep.row.DNS.Answers) > 0 {
 			answer = rep.row.DNS.Answers[0]
@@ -657,16 +668,32 @@ func routeLayer(rep domainGroupRow, now time.Time) domainLayer {
 	return domainLayer{layerOK, "routed by " + r.Owner}
 }
 
+// certThresholds scale with the certificate's lifetime: a 6-day certificate is
+// always under 14 days, and warning about it for its whole life is noise.
+func certThresholds(notBefore, notAfter *time.Time) (warn, critical time.Duration) {
+	warn, critical = domainCertWarn, domainCertCritical
+	if notBefore != nil && notAfter != nil {
+		if third := notAfter.Sub(*notBefore) / 3; third > 0 && third < warn {
+			warn = third
+		}
+	}
+	if half := warn / 2; half < critical {
+		critical = half
+	}
+	return warn, critical
+}
+
 func certLayer(g domainGroup, rep *domainGroupRow, mon domainMonitorEvidence, hasMon bool, now time.Time) (domainLayer, *time.Time) {
 	var notAfter *time.Time
 	live := domainLayer{}
 	if hasMon && mon.known && mon.result.CertNotAfter != nil && now.Sub(mon.result.CheckedAt) <= domainMonitorStaleAfter {
 		notAfter = mon.result.CertNotAfter
 		left := notAfter.Sub(now)
+		warn, _ := certThresholds(mon.result.CertNotBefore, notAfter)
 		switch {
 		case left <= 0:
 			live = domainLayer{layerFail, "certificate expired " + humanSpan(left) + " ago"}
-		case left < domainCertWarn:
+		case left < warn:
 			live = domainLayer{layerWarn, "certificate expires in " + humanSpan(left)}
 		default:
 			live = domainLayer{layerOK, "certificate valid for " + humanSpan(left)}
@@ -859,7 +886,7 @@ type domainServerView struct {
 func (s *Server) domainsView(ctx context.Context, now time.Time) map[string]any {
 	caps := s.capabilities(ctx)
 	supported := caps.CLI.Installed && caps.Features.DomainsCheck
-	monitors, _ := s.domainMonitors()
+	monitors, _, _ := s.domainMonitors()
 
 	d := &s.domains
 	d.mu.Lock()
@@ -913,8 +940,12 @@ func domainRuleKey(cause, host string) string { return "domain:" + cause + ":" +
 
 func domainRule(cause, host, app, server, severity string, policy incident.Policy) incident.Rule {
 	label := map[string]string{"dns": "DNS", "cert-expiry": "certificate expiry", "cert-obtain": "certificate"}[cause]
+	target := "https://" + host + "/"
+	if strings.HasPrefix(host, "*.") {
+		target = host
+	}
 	return incident.Rule{Key: domainRuleKey(cause, host), Source: alert.SourceDomain, ID: "domain-" + cause + "-" + host,
-		Name: host + " " + label, App: app, Server: server, Target: "https://" + host + "/", Severity: severity,
+		Name: host + " " + label, App: app, Server: server, Target: target, Severity: severity,
 		Path: "/domains", Policy: policy}
 }
 
@@ -926,19 +957,34 @@ var (
 )
 
 type domainObservation struct {
-	rule      incident.Rule
-	ok        bool
-	message   string
-	host      string
-	adoptKey  string
-	startedAt time.Time
+	rule     incident.Rule
+	ok       bool
+	message  string
+	host     string
+	adoptKey string
+	// sameOutage marks a failure that is the outage an open HTTP monitor incident
+	// already reports, so it opens nothing of its own.
+	sameOutage bool
+	startedAt  time.Time
+}
+
+// domainRuleKeys maps a rule key to the servers whose rows evidence it.
+type domainRuleKeys map[string]map[string]bool
+
+func (k domainRuleKeys) add(key, server string) {
+	if k[key] == nil {
+		k[key] = map[string]bool{}
+	}
+	if server != "" {
+		k[key][server] = true
+	}
 }
 
 // domainObservations derives what this sweep says about each rule. Unknown says
 // nothing. keys are the rules that still apply, which the caller uses to retire
 // the rest.
-func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorEvidence, monitorsListed bool, supported bool, now time.Time) (obs []domainObservation, keys map[string]bool) {
-	keys = map[string]bool{}
+func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorEvidence, monitorsListed bool, supported bool, now time.Time) (obs []domainObservation, keys domainRuleKeys) {
+	keys = domainRuleKeys{}
 	for _, g := range domainGroups(snap) {
 		if !supported {
 			break
@@ -953,14 +999,16 @@ func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorE
 		// block's name has nothing to resolve to; its row names the route.
 		if routeServes(rep.row.Route.Kind) && !isLabelOnly(rep.row.Skip) && rep.row.DNS.Status != "skipped" {
 			key := domainRuleKey("dns", g.host)
-			keys[key] = true
+			for _, r := range g.rows {
+				keys.add(key, r.row.Server)
+			}
 			layer := dnsLayer(g, rep, now)
 			switch layer.State {
 			case layerOK:
 				obs = append(obs, domainObservation{rule: domainRule("dns", g.host, app, rep.row.Server, alert.SeverityCritical, domainDNSPolicy), ok: true, message: layer.Detail, host: g.host, adoptKey: rep.row.Server})
 			case layerFail:
 				at := rep.rec.LastSuccessAt
-				obs = append(obs, domainObservation{rule: domainRule("dns", g.host, app, rep.row.Server, alert.SeverityCritical, domainDNSPolicy), message: layer.Detail, host: g.host, adoptKey: rep.row.Server, startedAt: at})
+				obs = append(obs, domainObservation{rule: domainRule("dns", g.host, app, rep.row.Server, alert.SeverityCritical, domainDNSPolicy), message: layer.Detail, host: g.host, adoptKey: rep.row.Server, sameOutage: true, startedAt: at})
 			}
 		}
 
@@ -969,10 +1017,9 @@ func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorE
 			if r.row.TLS.Status == "not_applicable" || r.row.TLS.Status == "" {
 				continue
 			}
-			key := domainRuleKey("cert-obtain", g.host)
-			keys[key] = true
+			keys.add(domainRuleKey("cert-obtain", g.host), r.row.Server)
 		}
-		if keys[domainRuleKey("cert-obtain", g.host)] {
+		if keys[domainRuleKey("cert-obtain", g.host)] != nil {
 			obtainRow, obtainApp := rep, app
 			for _, r := range g.rows {
 				if r.fresh(now) && r.row.TLS.Status == "failing" {
@@ -987,9 +1034,12 @@ func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorE
 			layer := obtainLayer(g, obtainRow, now)
 			rule := domainRule("cert-obtain", g.host, obtainApp, obtainRow.row.Server, alert.SeverityWarning, domainCertPolicy)
 			switch layer.State {
-			case layerOK, layerWarn:
-				// Failing for under a day is not yet this rule's condition.
+			case layerOK:
 				obs = append(obs, domainObservation{rule: rule, ok: true, message: "certificate obtain is no longer failing", host: g.host, adoptKey: obtainRow.row.Server})
+			case layerWarn:
+				// Failing, for under a day as far as the logs reach: not yet this
+				// rule's condition to open, and a recreated Caddy's reset clock is
+				// not a recovery either. Only a real ok closes.
 			case layerFail:
 				message := layer.Detail
 				if routeLayerStale := obtainRow.row.Route.Kind == "stale_managed"; routeLayerStale {
@@ -1002,7 +1052,7 @@ func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorE
 				if obtainRow.row.TLS.FailingSince != nil {
 					started = *obtainRow.row.TLS.FailingSince
 				}
-				obs = append(obs, domainObservation{rule: rule, message: message, host: g.host, adoptKey: obtainRow.row.Server, startedAt: started})
+				obs = append(obs, domainObservation{rule: rule, message: message, host: g.host, adoptKey: obtainRow.row.Server, sameOutage: true, startedAt: started})
 			}
 		}
 	}
@@ -1014,18 +1064,18 @@ func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorE
 			if !strings.HasPrefix(strings.ToLower(mon.monitor.Target), "https://") {
 				continue
 			}
-			key := domainRuleKey("cert-expiry", host)
-			keys[key] = true
+			keys.add(domainRuleKey("cert-expiry", host), "")
 			if !mon.known || mon.result.CertNotAfter == nil || now.Sub(mon.result.CheckedAt) > domainMonitorStaleAfter {
 				continue
 			}
 			left := mon.result.CertNotAfter.Sub(now)
+			warnAt, criticalAt := certThresholds(mon.result.CertNotBefore, mon.result.CertNotAfter)
 			severity := alert.SeverityWarning
-			if left < domainCertCritical {
+			if left < criticalAt {
 				severity = alert.SeverityCritical
 			}
 			rule := domainRule("cert-expiry", host, mon.monitor.App, mon.monitor.Server, severity, domainCertPolicy)
-			if left >= domainCertWarn {
+			if left >= warnAt {
 				obs = append(obs, domainObservation{rule: rule, ok: true, message: "certificate valid for " + humanSpan(left), host: host, adoptKey: domainAdoptMonitors})
 				continue
 			}
@@ -1033,7 +1083,7 @@ func domainObservations(snap *domainSnapshot, monitors map[string]domainMonitorE
 			if left <= 0 {
 				message = "certificate expired " + humanSpan(left) + " ago (" + mon.result.CertNotAfter.UTC().Format("2006-01-02") + ")"
 			}
-			obs = append(obs, domainObservation{rule: rule, message: message, host: host, adoptKey: domainAdoptMonitors, startedAt: mon.result.CheckedAt})
+			obs = append(obs, domainObservation{rule: rule, message: message, host: host, adoptKey: domainAdoptMonitors, sameOutage: left <= 0, startedAt: mon.result.CheckedAt})
 		}
 	}
 	sort.Slice(obs, func(i, j int) bool { return obs[i].rule.Key < obs[j].rule.Key })
@@ -1045,7 +1095,7 @@ func (s *Server) evaluateDomainIncidents(now time.Time, supported bool) {
 	if t == nil {
 		return
 	}
-	monitors, listed := s.domainMonitors()
+	monitors, hostOfRule, listed := s.domainMonitors()
 
 	d := &s.domains
 	d.mu.Lock()
@@ -1054,25 +1104,19 @@ func (s *Server) evaluateDomainIncidents(now time.Time, supported bool) {
 
 	open := map[string]bool{}
 	monitorDown := map[string]bool{}
-	hostOfMonitor := map[string]string{}
-	for host, mon := range monitors {
-		hostOfMonitor[monitor.RuleKey(mon.monitor.ID)] = host
-	}
 	for _, inc := range t.Open() {
 		open[inc.Key] = true
-		if host, ok := hostOfMonitor[inc.Key]; ok {
+		if host, ok := hostOfRule[inc.Key]; ok {
 			monitorDown[host] = true
 		}
 	}
 
 	adopted := 0
-	touched := map[string]bool{}
 	for _, o := range obs {
-		touched[o.adoptKey] = true
 		switch {
 		case o.ok:
 			t.Observe(o.rule, true, now, o.message)
-		case monitorDown[o.host] && !open[o.rule.Key]:
+		case o.sameOutage && monitorDown[o.host] && !open[o.rule.Key]:
 			// The monitor's incident owns this outage (see the file comment).
 		case !d.snap.Adopted[o.adoptKey]:
 			// The first results from a source: what was already broken becomes
@@ -1087,10 +1131,10 @@ func (s *Server) evaluateDomainIncidents(now time.Time, supported bool) {
 		}
 	}
 
-	// Mark what has now reported. A server still unreachable has given nothing
-	// to adopt; the monitors source counts once any monitor could be listed.
+	// Mark what has now fully reported. A server read only in part gave only part
+	// of what there is to adopt, and the rest must not arrive as individual opens.
 	for name, rec := range d.snap.Servers {
-		if supported && rec.State != "unreachable" && !rec.LastSuccessAt.IsZero() {
+		if supported && rec.State == "ok" && !rec.LastSuccessAt.IsZero() {
 			d.snap.Adopted[name] = true
 		}
 	}
@@ -1099,62 +1143,94 @@ func (s *Server) evaluateDomainIncidents(now time.Time, supported bool) {
 	}
 	if adopted > 0 {
 		log.Printf("[domains] first results: %d existing failure(s) adopted into one announcement", adopted)
-		t.AnnounceUnannounced()
+		t.AnnounceWith(incident.Summary{Intro: "First domain health results. Already failing:", Path: "/domains", Source: alert.SourceDomain})
 	}
 
-	// Retire on complete evidence: a server that could not be read keeps its
-	// rules, and an older CLI proves nothing either way.
-	complete := supported
-	for _, rec := range d.snap.Servers {
-		if rec.State == "unreachable" {
-			complete = false
-		}
+	// Retire a rule that no longer applies only on evidence from the servers that
+	// held it: a partly read server's rows lose their rule keys without anything
+	// having changed. Its keys are carried instead, and a dead server elsewhere
+	// holds up nothing else.
+	carried := domainRuleKeys{}
+	for key, servers := range keys {
+		carried[key] = servers
 	}
-	retire := func(key string) {
-		if keys[key] {
+	mayRetire := func(key string, servers map[string]bool) bool {
+		if strings.HasPrefix(key, "domain:cert-expiry:") {
+			return listed
+		}
+		if !supported {
+			return false
+		}
+		if len(servers) == 0 {
+			// Nothing says whose it was: every server must have been read.
+			for _, rec := range d.snap.Servers {
+				if rec.State != "ok" {
+					return false
+				}
+			}
+			return true
+		}
+		for name := range servers {
+			// A server removed from the fleet has no record, and no say.
+			if rec := d.snap.Servers[name]; rec != nil && rec.State != "ok" {
+				return false
+			}
+		}
+		return true
+	}
+	consider := func(key string, servers map[string]bool) {
+		if keys[key] != nil {
 			return
 		}
-		isExpiry := strings.HasPrefix(key, "domain:cert-expiry:")
-		if (isExpiry && listed) || (!isExpiry && complete) {
+		if mayRetire(key, servers) {
 			t.Retire(key, "domain no longer served")
+			return
+		}
+		for name := range servers {
+			carried.add(key, name)
+		}
+		if len(servers) == 0 {
+			carried.add(key, "")
 		}
 	}
-	for key := range d.ruleKeys {
-		retire(key)
+	for key, servers := range d.ruleKeys {
+		consider(key, servers)
 	}
 	for _, inc := range t.Open() {
-		if inc.Source == alert.SourceDomain {
-			retire(inc.Key)
+		if inc.Source != alert.SourceDomain || carried[inc.Key] != nil {
+			continue
 		}
+		servers := d.ruleKeys[inc.Key]
+		if len(servers) == 0 && inc.Server != "" {
+			servers = map[string]bool{inc.Server: true}
+		}
+		consider(inc.Key, servers)
 	}
-	d.ruleKeys = keys
+	d.ruleKeys = carried
 	d.saveLocked()
 }
 
 // ── fleet monitors ───────────────────────────────────────────────────────────
 
-// domainFrontedHosts reports which hosts on a server have a live Caddy route
-// naming them. known=false means the evidence is missing (older CLI, a server
-// that could not be read, a Caddyfile that would not parse).
-func (s *Server) domainFrontedHosts(server string) (fronted map[string]bool, known bool) {
+// domainFronted reports whether evidence shows something fronts a host: a live
+// route naming it on any server, or public DNS that answers (a proxy, a tunnel,
+// another box). False is not proof of absence: callers treat it as undetermined.
+func (s *Server) domainFronted(host string) bool {
 	d := &s.domains
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.snap.Unsupported {
-		return nil, false
+		return false
 	}
-	rec := d.snap.Servers[server]
-	if rec == nil || rec.State == "unreachable" || rec.LastSuccessAt.IsZero() {
-		return nil, false
-	}
-	if rec.Caddy.Caddyfile != "present" && rec.Caddy.Caddyfile != "absent" {
-		return nil, false
-	}
-	fronted = map[string]bool{}
-	for _, row := range rec.Domains {
-		if routeServes(row.Route.Kind) {
-			fronted[row.Host] = true
+	for _, rec := range d.snap.Servers {
+		for _, row := range rec.Domains {
+			if row.Host != host {
+				continue
+			}
+			if routeServes(row.Route.Kind) || row.DNS.Status == "ok" || row.DNS.Status == "proxied" {
+				return true
+			}
 		}
 	}
-	return fronted, true
+	return false
 }

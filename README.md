@@ -203,8 +203,9 @@ reconciling.
   seeing it, judged up on any answer below 500 (a root that returns 401 is a
   live site; a 5xx or no answer is not). Retired when no app serves the
   domain any more, and only after a sweep that reached every server.
-  Placeholder, IP-literal and wildcard domains are skipped, and so is a
-  host-ingress domain nothing fronts (see [Domain health](#domain-health)).
+  Placeholder, IP-literal and wildcard domains are skipped, and no monitor is
+  added for a host-ingress domain with no sign of a front (see
+  [Domain health](#domain-health)).
   Disable one to silence it; deleting it brings it back on the next sweep.
 - 24-hour stats (uptime %, total / up / down checks, average response time).
 - Storage: Nucleus over pgwire (preferred) or rolling JSONL files
@@ -245,22 +246,27 @@ debounce, holds, silences and retirement as monitors:
 | Rule | Opens when | Severity | Debounce |
 |---|---|---|---|
 | DNS | no record or wrong target, on a route that serves the domain | critical | 2 checks to open, 2 to recover |
-| Certificate expiry | under 14 days | warning, critical under 3 days | 1 reading |
+| Certificate expiry | under 14 days, or a third of the lifetime if shorter | warning; critical under 3 days, or half the warning point if shorter, which re-alerts | 1 reading |
 | Certificate obtain | failing for over 24 hours | warning | 1 reading |
 
 - A Cloudflare answer is a hint, not a failure. A host-ingress or external
   domain that nothing fronts is a label and is not checked.
-- While a domain's HTTP monitor has an open incident, a domain rule for that host
-  does not open a second one: the monitor's alert owns the outage and the page
-  names the cause. If the cause outlives it, the domain rule opens then.
+- While any HTTP monitor for a domain has an open incident, the DNS and obtain
+  rules and an already-expired certificate do not open a second one: the monitor's
+  alert owns the outage and the page names the cause. If the cause outlives it, the
+  domain rule opens then. A certificate that is only expiring still alerts.
+- A rule closes on real evidence only. Unknown, or a clock reset by a recreated
+  Caddy, closes nothing.
 - The first results from a server are adopted: what was already broken arrives as
   one summary, not an alert per domain.
 - A rule retires (`incident_recovered`, reason `retired`) when its domain goes
-  away, only after a sweep that read every server.
+  away, only after a sweep that fully read the servers holding it. A dead server
+  elsewhere holds up nothing.
 
-Fleet monitors follow the same evidence: a host-ingress domain gets a monitor only
-when a Caddy block names it. Without evidence (an older CLI, a server that could
-not be read) existing monitors stay and none are added.
+Fleet monitors follow the same evidence: a host-ingress domain gets a monitor when
+a route on any server names it, or public DNS answers. Otherwise it is
+undetermined: none is added and an existing one stays, because a tunnel or another
+box's proxy may be fronting it.
 
 ### Alerting
 

@@ -3,10 +3,13 @@ package monitor
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -573,13 +576,13 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 	if err != nil {
 		result.Status = "down"
 		result.Message = err.Error()
-		result.CertNotAfter = rejectedCertExpiry(err)
+		recordCert(&result, rejectedCert(err, req.URL.Hostname()))
 		return result
 	}
 	defer resp.Body.Close()
 
 	result.StatusCode = resp.StatusCode
-	result.CertNotAfter = certExpiry(resp)
+	recordCert(&result, firstHopCert(resp))
 
 	// If the user configured an exact expected status, require it. Otherwise
 	// treat any 2xx/3xx as up. Previously the configured ExpectedStatus was
@@ -605,10 +608,10 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 	return result
 }
 
-// certExpiry reads the expiry of the certificate the monitored host itself
-// presented: the first hop of the redirect chain, so https://example.dev
-// redirecting to https://www.example.dev reports example.dev's certificate.
-func certExpiry(resp *http.Response) *time.Time {
+// firstHopCert reads the certificate the monitored host itself presented: the
+// first hop of the redirect chain, so https://example.dev redirecting to
+// https://www.example.dev reports example.dev's certificate.
+func firstHopCert(resp *http.Response) *x509.Certificate {
 	first := resp
 	for first.Request != nil && first.Request.Response != nil {
 		first = first.Request.Response
@@ -616,20 +619,33 @@ func certExpiry(resp *http.Response) *time.Time {
 	if first.TLS == nil || len(first.TLS.PeerCertificates) == 0 {
 		return nil
 	}
-	at := first.TLS.PeerCertificates[0].NotAfter.UTC()
-	return &at
+	return first.TLS.PeerCertificates[0]
 }
 
-// rejectedCertExpiry recovers the expiry from a handshake the client refused:
-// an expired certificate is exactly when the date matters, and no response
-// exists to read it from.
-func rejectedCertExpiry(err error) *time.Time {
+// rejectedCert recovers the certificate from a handshake the client refused: an
+// expired certificate is exactly when the date matters, and no response exists to
+// read it from. Only the monitored host's: a refusal on a later redirect hop is
+// another host's certificate.
+func rejectedCert(err error, host string) *x509.Certificate {
 	var verify *tls.CertificateVerificationError
-	if errors.As(err, &verify) && len(verify.UnverifiedCertificates) > 0 {
-		at := verify.UnverifiedCertificates[0].NotAfter.UTC()
-		return &at
+	if !errors.As(err, &verify) || len(verify.UnverifiedCertificates) == 0 {
+		return nil
 	}
-	return nil
+	var request *url.Error
+	if errors.As(err, &request) {
+		if u, perr := url.Parse(request.URL); perr != nil || !strings.EqualFold(u.Hostname(), host) {
+			return nil
+		}
+	}
+	return verify.UnverifiedCertificates[0]
+}
+
+func recordCert(result *store.CheckResult, cert *x509.Certificate) {
+	if cert == nil {
+		return
+	}
+	notBefore, notAfter := cert.NotBefore.UTC(), cert.NotAfter.UTC()
+	result.CertNotBefore, result.CertNotAfter = &notBefore, &notAfter
 }
 
 // LastResult returns a monitor's newest committed check, if any.

@@ -60,20 +60,19 @@ func isPrivateSuffix(h string) bool {
 	return false
 }
 
-// frontedHostsFunc says which hosts on a server have a Caddy route naming them;
-// known=false means nobody can say yet.
-type frontedHostsFunc func(server string) (fronted map[string]bool, known bool)
+// frontedHostFunc says whether evidence shows something fronts a host.
+type frontedHostFunc func(host string) bool
 
 // desiredFleetMonitors derives the monitor set from one fleet sweep. complete
 // reports whether every server was observed successfully: only a complete
 // sweep may retire a monitor, so an unreachable server never costs its apps
 // their monitoring.
 //
-// A host-ingress domain is monitored only when something fronts it. Otherwise
-// it is a label on a raw published port and https://<domain>/ answers nothing.
-// Where the routes are not known, undetermined keeps an existing monitor without
-// creating one: missing evidence neither adds nor retires.
-func desiredFleetMonitors(envelopes []ServerObservation, frontedHosts frontedHostsFunc) (want map[string]store.Monitor, undetermined map[string]bool, complete bool) {
+// A host-ingress domain gets a monitor when something shows it is fronted (a
+// route on any server, or DNS that answers). Otherwise it reads undetermined:
+// no monitor is created and an existing one is kept, because absence of evidence
+// cannot rule out a tunnel or another box's proxy this view does not see.
+func desiredFleetMonitors(envelopes []ServerObservation, fronted frontedHostFunc) (want map[string]store.Monitor, undetermined map[string]bool, complete bool) {
 	want = make(map[string]store.Monitor)
 	undetermined = make(map[string]bool)
 	complete = len(envelopes) > 0
@@ -90,28 +89,14 @@ func desiredFleetMonitors(envelopes []ServerObservation, frontedHosts frontedHos
 			if app.Ingress == "external" {
 				continue
 			}
-			var fronted map[string]bool
-			frontedKnown := true
-			if app.Ingress == "host" {
-				if frontedHosts == nil {
-					frontedKnown = false
-				} else {
-					fronted, frontedKnown = frontedHosts(env.Server)
-				}
-			}
 			for _, h := range fleetMonitorHosts(app.Domain) {
 				if app.Server == "" {
 					app.Server = env.Server
 				}
 				id := fleetMonitorID(h)
-				if app.Ingress == "host" {
-					if !frontedKnown {
-						undetermined[id] = true
-						continue
-					}
-					if !fronted[h] {
-						continue
-					}
+				if app.Ingress == "host" && (fronted == nil || !fronted(h)) {
+					undetermined[id] = true
+					continue
 				}
 				if _, ok := want[id]; ok {
 					continue
@@ -140,7 +125,7 @@ func (s *Server) reconcileFleetMonitors(envelopes []ServerObservation) (added, r
 	if s.store == nil {
 		return 0, 0, nil
 	}
-	want, undetermined, complete := desiredFleetMonitors(envelopes, s.domainFrontedHosts)
+	want, undetermined, complete := desiredFleetMonitors(envelopes, s.domainFronted)
 	existing, err := s.store.ListMonitors()
 	if err != nil {
 		return 0, 0, err

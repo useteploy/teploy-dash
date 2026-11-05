@@ -33,6 +33,9 @@ type CheckResult struct {
 	// monitors, including a certificate that failed verification; nil when no
 	// certificate was seen.
 	CertNotAfter *time.Time `json:"cert_not_after,omitempty"`
+	// CertNotBefore is the same certificate's start, which gives its lifetime: a
+	// 6-day certificate is not "expiring soon" for its whole life.
+	CertNotBefore *time.Time `json:"cert_not_before,omitempty"`
 }
 
 // Monitor represents an uptime monitor configuration.
