@@ -1,0 +1,22 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "observed_at": "2026-11-04T03:17:04Z",
+  "target": {
+    "configured": false,
+    "has_credentials": false,
+    "reachable": false
+  },
+  "policy": {
+    "configured": false,
+    "cron_installed": false,
+    "retention": {},
+    "volumes": false,
+    "heartbeat_count": 0
+  },
+  "encrypted": false,
+  "aws_cli": false,
+  "age_cli": false,
+  "entries": [],
+  "uncovered_databases": []
+}

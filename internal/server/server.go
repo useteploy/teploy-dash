@@ -356,6 +356,10 @@ type Server struct {
 	alerts alertingState
 	// domains is domain health (domains.go): the last check per server.
 	domains domainHealthState
+	// backups is the Dash Backups state (backupfleet.go and friends): the
+	// cached fleet backup view, storage/recovery/policy records, the
+	// dash-owned restore tests and the migration evidence.
+	backups backupState
 }
 
 // New creates a new server.
@@ -373,6 +377,7 @@ func New(config Config) *Server {
 	}
 	s.initAlerting(config.DataDir)
 	s.initDomainHealth(config.DataDir)
+	s.initBackups(config.DataDir)
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
 		s.runCLI = cli.RunContext
@@ -1704,6 +1709,12 @@ func (s *Server) routes() {
 	// Restore tests (scheduled backup verification)
 	s.mux.HandleFunc("/api/restore-tests", s.handleRestoreTests)
 	s.mux.HandleFunc("/api/restore-tests/", s.handleRestoreTest)
+
+	// Dash Backups (plan P2, Slice 4): the fleet backup view and its
+	// configuration endpoints. Credential-bearing surfaces (storage connect,
+	// the recovery key) sit under administer.credentials in caps.go.
+	s.mux.HandleFunc("/api/backups", s.handleBackupsPage)
+	s.mux.HandleFunc("/api/backups/", s.handleBackupsAction)
 
 	// Log streaming: SSE-only under /api/ (A24/A32/A33 — the hand-written
 	// WebSocket transport and its /ws/ prefix are gone).

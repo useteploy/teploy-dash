@@ -1,0 +1,215 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "observed_at": "2026-11-04T03:17:04Z",
+  "target": {
+    "configured": true,
+    "bucket": "teploy-backups",
+    "region": "us-east-1",
+    "prefix": "prod",
+    "has_credentials": true,
+    "previous_prefixes": [
+      {
+        "prefix": ""
+      }
+    ],
+    "reachable": true,
+    "incoming_lifecycle": "covered"
+  },
+  "policy": {
+    "configured": true,
+    "path": "/etc/teploy/backup-policy.json",
+    "interval": "1h",
+    "cron_installed": true,
+    "retention": {
+      "keep_last": 3,
+      "keep_daily": 7,
+      "keep_weekly": 4,
+      "keep_monthly": 12,
+      "max_age_days": 2
+    },
+    "excludes": [
+      "blog/volumes"
+    ],
+    "adopted": [
+      {
+        "container": "wordpress-shared-mysql",
+        "engine": "mysql",
+        "databases": "all"
+      },
+      {
+        "container": "omni_postgres",
+        "databases": [
+          "omni"
+        ]
+      }
+    ],
+    "volumes": true,
+    "volume_max_gb": 20,
+    "heartbeat_count": 1,
+    "heartbeat_hosts": [
+      "https://dash.example.internal"
+    ],
+    "recipient": "age1lggyhqrw2nlhcxprm67z43rta597azn8gknawjehu9d9dl0jq3yqqvfafg"
+  },
+  "encrypted": true,
+  "aws_cli": true,
+  "age_cli": true,
+  "last_run": {
+    "at": "2026-11-04T03:17:04Z",
+    "status": "partial",
+    "targets_ok": 3,
+    "targets_failed": 1,
+    "omissions": [
+      "redis-cache: a database container no policy entry covers (adopt or exclude it)"
+    ],
+    "warnings": [
+      "blog-db: prune: shared backup namespace: another server (aaaaaaaaaaaaaaaa) also stores blog backups"
+    ],
+    "stale": false
+  },
+  "entries": [
+    {
+      "name": "blog-db",
+      "kind": "accessory",
+      "app": "blog",
+      "accessory": "db",
+      "engine": "postgres",
+      "detection": "env",
+      "state": "running",
+      "unmanaged": false,
+      "adopted": false,
+      "coverage": "covered",
+      "schedule": "policy",
+      "encrypted": true,
+      "last_success": "2026-11-04T03:17:04Z",
+      "newest": {
+        "id": "20261104-031704-1f2e3d4c5b6a7988",
+        "key": "s3://teploy-backups/prod/blog/accessories/db/20261104-031704-1f2e3d4c5b6a7988.pgdump.age",
+        "size_bytes": 1048576,
+        "created_at": "2026-11-04T03:17:04Z",
+        "encrypted": true
+      },
+      "last_verify": {
+        "at": "2026-11-04T03:17:04Z",
+        "ok": true,
+        "id": "20261104-031704-1f2e3d4c5b6a7988",
+        "metric": "tables=42"
+      }
+    },
+    {
+      "name": "wordpress-shared-mysql",
+      "kind": "adopted",
+      "accessory": "wordpress-shared-mysql",
+      "engine": "mysql",
+      "detection": "policy",
+      "state": "running",
+      "unmanaged": true,
+      "adopted": true,
+      "coverage": "adopted",
+      "schedule": "policy",
+      "encrypted": true,
+      "last_success": "2026-11-04T03:17:04Z",
+      "newest": {
+        "id": "20261104-031704-1f2e3d4c5b6a7988",
+        "key": "s3://teploy-backups/prod/_adopted/accessories/wordpress-shared-mysql/databases/wp_blog/20261104-031704-1f2e3d4c5b6a7988.sql.gz.age",
+        "size_bytes": 2097152,
+        "created_at": "2026-11-04T03:17:04Z",
+        "encrypted": true
+      },
+      "databases": [
+        {
+          "name": "wp_blog",
+          "newest": {
+            "id": "20261104-031704-1f2e3d4c5b6a7988",
+            "key": "s3://teploy-backups/prod/_adopted/accessories/wordpress-shared-mysql/databases/wp_blog/20261104-031704-1f2e3d4c5b6a7988.sql.gz.age",
+            "size_bytes": 2097152,
+            "created_at": "2026-11-04T03:17:04Z",
+            "encrypted": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "omni_postgres",
+      "kind": "adopted",
+      "accessory": "omni_postgres",
+      "engine": "postgres",
+      "detection": "env",
+      "state": "running",
+      "unmanaged": true,
+      "adopted": true,
+      "coverage": "failing",
+      "schedule": "policy",
+      "encrypted": true,
+      "last_failure": "2026-11-04T02:17:04Z",
+      "last_error": "dumping omni: exit status 1",
+      "uncovered_databases": [
+        "reports"
+      ]
+    },
+    {
+      "name": "redis-cache",
+      "kind": "unmanaged",
+      "engine": "redis",
+      "detection": "env",
+      "state": "running",
+      "unmanaged": true,
+      "adopted": false,
+      "coverage": "uncovered",
+      "reason": "no policy entry covers this container (adopt or exclude it)",
+      "schedule": "none",
+      "encrypted": false
+    },
+    {
+      "name": "shop-db",
+      "kind": "accessory",
+      "app": "shop",
+      "accessory": "db",
+      "engine": "postgres",
+      "detection": "env",
+      "state": "running",
+      "unmanaged": false,
+      "adopted": false,
+      "coverage": "stale",
+      "reason": "a run succeeded, but the bucket holds no restorable object for it",
+      "schedule": "own",
+      "schedule_form": "legacy",
+      "encrypted": false,
+      "last_success": "2026-11-04T03:17:04Z"
+    },
+    {
+      "name": "analytics-ch",
+      "kind": "unmanaged",
+      "engine": "clickhouse-server",
+      "detection": "image-name",
+      "state": "running",
+      "unmanaged": true,
+      "adopted": false,
+      "coverage": "uncovered",
+      "reason": "teploy has no backup method for clickhouse-server: back it up another way and exclude it",
+      "schedule": "none",
+      "encrypted": false
+    },
+    {
+      "name": "blog/volumes",
+      "kind": "volumes",
+      "app": "blog",
+      "unmanaged": false,
+      "adopted": false,
+      "coverage": "excluded",
+      "reason": "50.00 GB is over the policy's volume_max_gb 20.00",
+      "schedule": "policy",
+      "encrypted": true,
+      "size_bytes": 53687091200
+    }
+  ],
+  "uncovered_databases": [
+    "analytics-ch",
+    "omni_postgres/reports",
+    "redis-cache"
+  ],
+  "warnings": [
+    "cron marker teploy-accessory-backup:shop:db is a pre-D3 shell line that uploads plaintext whatever the policy says: rewrite it with `teploy server backup-target set`"
+  ]
+}

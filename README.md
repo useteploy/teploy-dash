@@ -268,6 +268,71 @@ a route on any server names it, or public DNS answers. Otherwise it is
 undetermined: none is added and an existing one stays, because a tunnel or another
 box's proxy may be fronting it.
 
+### Backups
+
+**Backups** is one page for the whole fleet's protection, built on the teploy
+CLI's fleet engine (v0.1.52 on the dashboard host, capability `backup-fleet-v1`;
+an older CLI is a note and the page stays empty — mixed fleets keep working
+because the engine runs on each server, not here).
+
+- **First-run checklist** — storage → alert channel → recovery-key drill → first
+  verified backup — shown until complete, then never again.
+- **Connect storage once.** Presets for Backblaze B2 (recommended: application
+  keys can be limited to a bucket *and name prefix*, so one bucket isolates every
+  server) and Cloudflare R2, S3-compatible endpoints behind "advanced". Dash
+  probes write/read/delete first, then pushes `server backup-target set` to every
+  server with the credentials on stdin, then forgets them: the record keeps the
+  bucket name and per-server prefixes only. A B2 key that cannot delete is the
+  documented good setup (a compromised server cannot destroy history; a bucket
+  lifecycle rule removes hidden versions). Rotation re-prompts, pushes, verifies
+  each server and tells you when to revoke the old key.
+- **Recovery key.** `teploy backup keygen` output shown exactly once (re-auth
+  required; the private key is stored nowhere); the public half is pushed to
+  every server and every object is age-encrypted to it *and* the server's own
+  identity — verify and restore run on the server, the owner key recovers
+  anything. Until the **decrypt drill** passes (run `teploy backup fetch <key>
+  --identity` locally, paste the JSON it prints), a persistent banner — not an
+  alert — says recovery is unproven.
+- **One policy** — frequency, retention presets (simple: keep 14 days; standard:
+  7 daily, 4 weekly, 12 monthly), volumes with a size cap — written to every
+  server through the CLI, which changes only what the flags name. Per-app exclude
+  (audited, reason required) and per-app volume schedule overrides are read-
+  merge-write through the same surface.
+- **The fleet table** — every database and volume: engine, last good backup and
+  its age, newest copy size, projected steady-state storage, encryption, restore
+  test verdict, and the coverage word (covered / stale / failing / uncovered /
+  adopted / excluded). A server that could not be read reads **unknown**
+  everywhere, never healthy. Source: `teploy backup status --json` per server,
+  read every 30 minutes into `<data>/backups.json`; page loads read the cache.
+- **Automatic restore tests** — one dash-owned test per covered database, weekly,
+  in a configurable off-hours window (UTC hours, default 02:00–06:00), one per
+  server at a time, with a free RAM/disk precheck over SSH before launch. They
+  run `accessory verify-backup` (a scratch container on the server; the running
+  database is never touched) and their history is kept.
+- **Alerts** (`source: "backup"`, one incident per cause): target unreachable,
+  missing aws/age tooling, backups failing, stale (no success in twice the
+  interval), uncovered database appeared. Missed heartbeats — a server whose
+  cron stopped — alert through the push monitor Dash creates per server
+  (`source: "heartbeat"`). First complete read of a server adopts what was
+  already broken into one summary; recovery needs fresh evidence; a rule whose
+  subject leaves a complete read is retired.
+- **Retiring hand-written backup jobs** (report-only): a row reads *safe to
+  remove* once Dash has watched two consecutive good policy backups arrive AND a
+  restore test of the same engine kind passed. The known hand-written job names
+  (akiroo-backup, teploy-backup.sh, teploy-wp-dbbackup, omni-backup,
+  teploy-nucleus-backup, dash-state-backup) are listed as the owner's checklist;
+  removal itself stays a human action on the server, and old dumps stay until
+  they age out. Dash cannot list a server's systemd/cron jobs — no CLI read for
+  that exists yet (recorded as a gap).
+- **Dash itself** is not yet covered by the policy engine: the CLI cannot encrypt
+  to the owner key alone or target arbitrary paths. Until it can, the page says
+  so and points at [`docs/rebuild-dash.md`](docs/rebuild-dash.md) — the rebuild
+  runbook and the interim dash-state job (age to the owner key only).
+
+Every action is audited; connecting storage and the recovery key need
+`administer.credentials`, the policy and excludes `execute.mutate`, and nothing
+here is exposed over MCP.
+
 ### Alerting
 
 **Incidents, not flips.** A monitor opens an incident after `fail_after`
@@ -575,6 +640,15 @@ so the direct role claim is available here and takes precedence over groups.
 | PUT / DELETE | `/api/notifications/heartbeats/{id}` | Save / remove a self-heartbeat receiver `{name, url}`. `administer.credentials`. |
 | POST | `/api/notifications/heartbeats/{id}/test` | Ping the receiver now. `administer.credentials`. |
 | GET | `/api/domains` | Domain health: one row per domain (DNS, route, certificate, HTTP, first failing layer, evidence age), per-server check state, CLI gate. `view.metadata`. |
+| GET | `/api/backups` | The fleet backups view: cached per-server status (coverage rows, targets, tooling, last run), storage record (never credentials), recovery-key state + drill, the applied policy, dash-owned restore tests with history, migration readiness, projected storage. `view.metadata`. |
+| POST | `/api/backups/refresh` | Ask for a new fleet status read now (the page follows the cache). `execute.mutate`. |
+| POST | `/api/backups/storage` | Probe write/read/delete, then push `server backup-target set` to every server with the credentials on stdin and forget them. `{provider: b2\|r2\|custom, bucket, region/account_id/endpoint, base_prefix, access_key, secret_key, rotate?}`; B2 delete-refusal is accepted, others need `delete_refusal_ok`. `administer.credentials`. |
+| POST | `/api/backups/recovery-key/generate` | `teploy backup keygen` — the private key is returned exactly once and stored nowhere. Re-auth (account password) required. `administer.credentials`. |
+| POST | `/api/backups/recovery-key/confirm` | "I saved it": pushes the public key as `--recipient` to every server. `administer.credentials`. |
+| POST | `/api/backups/recovery-key/drill` | Record the decrypt drill: `{output}` is the JSON `teploy backup fetch --identity` printed; checked against the assigned object and its plausible plaintext size. `administer.credentials`. |
+| POST | `/api/backups/policy` | The one policy to every server: `{interval, preset: simple\|standard, volumes, volume_max_gb, window_start_hour?, window_end_hour?}`. `execute.mutate`. |
+| POST | `/api/backups/exclude` | Read-merge-write one server's exclude list: `{server, name, excluded, reason}` (reason required to exclude; audited). `execute.mutate`. |
+| POST | `/api/backups/override` | Per-app volume schedule override or its removal: `{server, app, cron, keep_last, max_age_days, remove?}`. `execute.mutate`. |
 | GET | `/api/alerts/incidents` | Open incidents and held (suppressed) rules. `view.metadata`. |
 | GET | `/api/alerts/deliveries` | Recent alert deliveries (delivered, pending, dead-lettered, suppressed) and per-channel health. `view.metadata`. |
 | GET / POST | `/api/alerts/silences` | Active silences / create `{scope: all\|app\|monitor, target, reason, duration_minutes}`. POST is `execute.mutate`. |

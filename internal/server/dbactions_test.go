@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -54,16 +55,36 @@ func TestDatabaseActionInventoryCoversD05Classes(t *testing.T) {
 	}
 }
 
-// The inventory reflects the CLI surface this branch was built against:
-// only stop/start/logs (and verify-backup via restore tests) are reachable
-// in server-state mode, so NO D05 class is executable from dash today —
-// and the endpoint must say that rather than wire closest-match commands.
-// When a class flips to supported, this assertion flips with it (and the
+// The inventory reflects the CLI surface this branch was built against
+// (v0.1.52): data-restore is reachable in server-state mode — Dash's
+// Backups tab runs `backup restore` as a durable operation, with a single
+// database (--database) and the --no-backup escape hatch — while the other
+// classes are not. When a class flips, this assertion flips with it (and the
 // grounding comment in dbactions.go is updated in the same change).
 func TestDatabaseActionInventoryMatchesCLISurface(t *testing.T) {
+	supported := map[string]bool{}
 	for _, a := range databaseActionInventory() {
 		if a.Supported {
-			t.Fatalf("action %q marked supported; no D05 database-action class is CLI-reachable from dash's server-state mode today — update this test together with the CLI surface", a.ID)
+			supported[a.ID] = true
+		}
+	}
+	if !supported["data-restore"] {
+		t.Fatal("data-restore is wired from dash (backups/restore) and must be marked supported")
+	}
+	if len(supported) != 1 {
+		t.Fatalf("only data-restore is CLI-reachable from dash's server-state mode today: %v — update this test together with the CLI surface", supported)
+	}
+	for _, a := range databaseActionInventory() {
+		if a.ID != "data-restore" {
+			continue
+		}
+		for _, flag := range []string{"--database", "--no-backup"} {
+			if !strings.Contains(a.Command, flag) {
+				t.Errorf("the restore command must name the v0.1.52 flags (%s missing): %s", flag, a.Command)
+			}
+		}
+		if a.DashAction != "backups/restore" {
+			t.Errorf("dash action = %s", a.DashAction)
 		}
 	}
 }

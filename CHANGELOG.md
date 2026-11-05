@@ -6,6 +6,49 @@ All notable changes to teploy-dash are recorded here.
 
 ### Added
 
+- **Dash Backups** (plan P2, the dash half of Slice 4; needs teploy v0.1.52 on
+  the dashboard host, capability `backup-fleet-v1`; older CLIs get a note and an
+  empty page — the engine runs on each server, not here):
+  - `GET /api/backups` and the **Backups** page: every database and volume across
+    the fleet — engine, last good backup + age, newest copy size, projected
+    steady-state storage, encryption, restore-test verdict, coverage word — from
+    `teploy backup status --json` read per server every 30 minutes into
+    `<data>/backups.json` (never probed on page load). An unread server reads
+    unknown everywhere, never healthy.
+  - First-run checklist (storage → alert channel → recovery-key drill → first
+    verified backup), shown until complete.
+  - Connect storage once: B2/R2 presets with S3-compatible behind "advanced",
+    write/read/delete probe before any push, `server backup-target set` to every
+    server with credentials on stdin, then the credentials are forgotten (the
+    record keeps bucket names and stable per-server prefixes). Rotation
+    re-prompts, pushes and verifies before telling the owner to revoke.
+  - Recovery key: `teploy backup keygen` shown exactly once (re-auth required,
+    stored nowhere), public key pushed as `--recipient`; the decrypt drill
+    (fetch locally with `--identity`, paste the JSON) keeps a persistent banner
+    until it passes. Dash never holds a private key.
+  - One policy: interval, simple/standard GFS retention presets, volumes with a
+    size cap, written per server via the CLI's change-only-what-you-name flags.
+    Dash owns a push heartbeat monitor per server (missed-cron alerting);
+    per-app exclude (audited) and per-app volume schedule overrides ride the
+    same surface.
+  - Automatic restore tests: one dash-owned weekly verification per covered
+    database (`accessory verify-backup` into a scratch container), in a
+    configurable UTC off-hours window (default 02:00–06:00), one per server at a
+    time, with a free RAM/disk SSH precheck. Records are created only for
+    covered databases, retired only on a complete fresh read; history kept.
+  - Backup incidents (`source: "backup"`, one per cause): target unreachable,
+    missing tooling, failing, stale (2× interval), uncovered database appeared;
+    first-read adoption as one summary; recovery only on fresh evidence;
+    retirement when a subject leaves a complete read. Missed heartbeats alert
+    through the per-server push monitor (`source: "heartbeat"`).
+  - Hand-written-job retirement report (P2.9, report-only): per-database
+    readiness from two consecutive watched good policy backups + a green restore
+    test of the same engine kind; the known job names listed as the owner's
+    checklist. Removal stays a human action on the server.
+  - The rebuild runbook `docs/rebuild-dash.md` for Dash itself, unit-checked
+    against the paths the code writes; the page reports the self-backup CLI gap
+    (no arbitrary-path targets, no owner-key-only encryption) instead of
+    pretending.
 - Domains page and `GET /api/domains`: one row per domain joining DNS, route,
   certificate and HTTP, naming the first failing layer with its evidence and age.
 - Certificate expiry from each HTTPS monitor's TLS handshake, stored on the check
@@ -24,8 +67,10 @@ All notable changes to teploy-dash are recorded here.
 - The image bundles teploy CLI v0.1.51 (from v0.1.49): database engine
   detection, safe in-place restore, dump verification, cron checks and
   `domains check`.
-- The database actions panel shows the current restore command, and points to
-  the Backups tab, which already restores without a project folder.
+- The database-actions inventory no longer claims data restore is unsupported:
+  it is wired from the app's Backups tab as a durable operation, and since
+  v0.1.52 names one database and takes the automatic safety backup (the entry,
+  its blast radius and the CLI-surface test were updated together).
 
 ### Added
 - **Alerts v2.** Monitors alert on incidents, not on every flip: per-monitor
