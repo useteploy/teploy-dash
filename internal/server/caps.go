@@ -73,6 +73,10 @@ var administerCredentialsPrefixes = []string{
 	"/api/registries",
 	"/api/notifications", // Alerts v2: channels, test-send, public URL, heartbeat receivers
 	"/api/sources",
+	// Dash Backups: connecting storage pushes bucket credentials to every
+	// server, and the recovery key's generate endpoint shows the private key.
+	"/api/backups/storage",
+	"/api/backups/recovery-key",
 	// The audit trail records credential and alerting changes (who
 	// configured which channel, who silenced what).
 	"/api/audit",

@@ -1,0 +1,9 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "configured": false,
+  "retention": {},
+  "volumes": false,
+  "heartbeat_count": 0,
+  "encrypted": false
+}
