@@ -203,8 +203,9 @@ reconciling.
   seeing it, judged up on any answer below 500 (a root that returns 401 is a
   live site; a 5xx or no answer is not). Retired when no app serves the
   domain any more, and only after a sweep that reached every server.
-  Placeholder, IP-literal and wildcard domains are skipped. Disable one to
-  silence it; deleting it brings it back on the next sweep.
+  Placeholder, IP-literal and wildcard domains are skipped, and so is a
+  host-ingress domain nothing fronts (see [Domain health](#domain-health)).
+  Disable one to silence it; deleting it brings it back on the next sweep.
 - 24-hour stats (uptime %, total / up / down checks, average response time).
 - Storage: Nucleus over pgwire (preferred) or rolling JSONL files
   (fallback). Daily cleanup for the file store keeps 7 days of checks.
@@ -216,6 +217,50 @@ reconciling.
   down when no ping arrives within the interval + grace (default 10% of the
   interval, at least 5 minutes).
 - Alerts: see [Alerting](#alerting).
+
+### Domain health
+
+**Domains** has one row per domain, joining four layers and naming the first
+that fails in plain words: "no DNS record", "route points at a container that no
+longer exists", "certificate failing for 14 days".
+
+| Layer | Source | Cadence |
+|---|---|---|
+| DNS, route, certificate obtain | `teploy domains check --json`, run per server by the CLI on the dashboard host | 15 minutes |
+| Certificate expiry, HTTP | the monitors' own checks | 60 seconds |
+
+Certificate expiry comes from the monitor's TLS handshake, so it covers every
+monitored domain, including ones on no Teploy server and tunnelled ones (where it
+is the edge's certificate). DNS, route and obtain need teploy v0.1.51 or later on
+the dashboard host (capability `domains-check-v1`); an older CLI is a note on the
+page, and the monitor layers keep working. Nothing new runs on your servers.
+
+A server whose check failed is named above the table, and its rows read
+**unknown** with the age of the last good result. Unknown never opens or closes an
+incident. Each row shows how old its evidence is.
+
+Incidents use `source: "domain"`, one per domain and cause, through the same
+debounce, holds, silences and retirement as monitors:
+
+| Rule | Opens when | Severity | Debounce |
+|---|---|---|---|
+| DNS | no record or wrong target, on a route that serves the domain | critical | 2 checks to open, 2 to recover |
+| Certificate expiry | under 14 days | warning, critical under 3 days | 1 reading |
+| Certificate obtain | failing for over 24 hours | warning | 1 reading |
+
+- A Cloudflare answer is a hint, not a failure. A host-ingress or external
+  domain that nothing fronts is a label and is not checked.
+- While a domain's HTTP monitor has an open incident, a domain rule for that host
+  does not open a second one: the monitor's alert owns the outage and the page
+  names the cause. If the cause outlives it, the domain rule opens then.
+- The first results from a server are adopted: what was already broken arrives as
+  one summary, not an alert per domain.
+- A rule retires (`incident_recovered`, reason `retired`) when its domain goes
+  away, only after a sweep that read every server.
+
+Fleet monitors follow the same evidence: a host-ingress domain gets a monitor only
+when a Caddy block names it. Without evidence (an older CLI, a server that could
+not be read) existing monitors stay and none are added.
 
 ### Alerting
 
@@ -523,6 +568,7 @@ so the direct role claim is available here and takes precedence over groups.
 | POST | `/api/notifications/channels/{id}/test` | Send a `kind: "test"` event now; answers `{ok, error}`. `administer.credentials`. |
 | PUT / DELETE | `/api/notifications/heartbeats/{id}` | Save / remove a self-heartbeat receiver `{name, url}`. `administer.credentials`. |
 | POST | `/api/notifications/heartbeats/{id}/test` | Ping the receiver now. `administer.credentials`. |
+| GET | `/api/domains` | Domain health: one row per domain (DNS, route, certificate, HTTP, first failing layer, evidence age), per-server check state, CLI gate. `view.metadata`. |
 | GET | `/api/alerts/incidents` | Open incidents and held (suppressed) rules. `view.metadata`. |
 | GET | `/api/alerts/deliveries` | Recent alert deliveries (delivered, pending, dead-lettered, suppressed) and per-channel health. `view.metadata`. |
 | GET / POST | `/api/alerts/silences` | Active silences / create `{scope: all\|app\|monitor, target, reason, duration_minutes}`. POST is `execute.mutate`. |

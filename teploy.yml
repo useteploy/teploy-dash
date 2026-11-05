@@ -19,7 +19,6 @@
 #   — same format as ~/.teploy/servers.yml on your machine.
 
 app: dash
-domain: dash.example.com
 server: infra-home
 ingress: host
 
