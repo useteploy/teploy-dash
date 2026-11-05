@@ -88,9 +88,9 @@ func databaseActionInventory() []dbAction {
 			ID:          "data-restore",
 			Label:       "Data restore",
 			Supported:   false,
-			Command:     "teploy accessory restore <name> <date> --bucket <bucket> --region <region>",
+			Command:     "teploy backup restore <id> --accessory <name> --app <app> --host <server> --yes",
 			BlastRadius: "REPLACES the database's current contents with the backup's point-in-time state. Everything written since that backup is gone.",
-			Remedy:      "`accessory restore` reads the accessory's config from teploy.yml and must run from the app's project directory. The non-destructive cousin IS wired: Restore Tests (see the Restore Tests page) restore the latest backup into an isolated scratch container and verify it, never touching the running database (`teploy accessory verify-backup`, server-state mode).",
+			Remedy:      "Restore from the app's Backups tab, which runs this command with the app stopped and health-checks it afterwards. The non-destructive cousin is also wired: Restore Tests (see the Restore Tests page) restore the latest backup into an isolated scratch container and verify it, never touching the running database (`teploy accessory verify-backup`, server-state mode).",
 		},
 		{
 			ID:          "destructive-removal",
