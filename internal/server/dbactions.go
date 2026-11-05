@@ -10,14 +10,18 @@ package server
 // that "restarts" via a different operation than labeled is how an
 // operator approves one thing and receives another.
 //
-// The inventory is grounded in the teploy-cli accessory surface as of
-// post-v0.1.37 main (teploy-cli/internal/cli/accessory.go):
+// The inventory is grounded in the teploy-cli accessory surface as of v0.1.52
+// (teploy-cli/internal/cli/accessory.go, backup.go):
 //
-//   - stop / start / logs / list / exec / verify-backup accept --app
+//   - stop / start / logs / list / exec / verify-backup / backup accept --app
 //     (+ --host), i.e. server-state mode — dash-reachable;
-//   - upgrade / backup / restore load accessory config from teploy.yml in
-//     the CURRENT DIRECTORY (loadAppCfgForAccessory) — not dash-reachable
-//     without pretending dash has a project checkout it does not have;
+//   - `backup restore` runs from server state too (Dash's durable operation),
+//     and since v0.1.52 names a single database (--database) and can skip the
+//     automatic pre-restore backup (--no-backup);
+//   - upgrade loads accessory config from teploy.yml in the CURRENT DIRECTORY
+//     (loadAppCfgForAccessory) — not dash-reachable without pretending dash
+//     has a project checkout it does not have — but since v0.1.52 it takes
+//     the same automatic safety backup a restore does;
 //   - there is NO accessory restart and NO credential-rotation command;
 //   - destructive removal exists only at app scope (`teploy remove --app
 //     <app> --purge` deletes volumes); per-accessory removal does not exist.
@@ -74,8 +78,8 @@ func databaseActionInventory() []dbAction {
 			Label:       "Version upgrade",
 			Supported:   false,
 			Command:     "teploy accessory upgrade <name> <new_image>",
-			BlastRadius: "Replaces the database ENGINE image. Minor upgrades are usually in-place; major-version upgrades (e.g. postgres 16 -> 17) can require a dump/restore and can make existing data files unreadable under the old version if it goes wrong. Take a backup first.",
-			Remedy:      "`accessory upgrade` reads the accessory's image config from teploy.yml and must run from the app's project directory on a machine with it — the dashboard has no project checkout. Run it there, after a backup (see Backup scope in the template/catalog docs).",
+			BlastRadius: "Replaces the database ENGINE image. Minor upgrades are usually in-place; major-version upgrades (e.g. postgres 16 -> 17) can require a dump/restore and can make existing data files unreadable under the old version if it goes wrong.",
+			Remedy:      "`accessory upgrade` reads the accessory's image config from teploy.yml and must run from the app's project directory on a machine with it — the dashboard has no project checkout. Run it there: since teploy v0.1.52 it takes an automatic safety backup first (skip only with --no-backup).",
 		},
 		{
 			ID:          "credential-rotation",
@@ -85,12 +89,14 @@ func databaseActionInventory() []dbAction {
 			Remedy:      "The teploy CLI has no credential-rotation command: accessory credentials come from the app's teploy.yml env. Rotate by changing the value there and redeploying, and update dependents. Generated (`generate`) values are shown once at install time by design.",
 		},
 		{
-			ID:          "data-restore",
-			Label:       "Data restore",
-			Supported:   false,
-			Command:     "teploy backup restore <id> --accessory <name> --app <app> --host <server> --yes",
-			BlastRadius: "REPLACES the database's current contents with the backup's point-in-time state. Everything written since that backup is gone.",
-			Remedy:      "Restore from the app's Backups tab, which runs this command with the app stopped and health-checks it afterwards. The non-destructive cousin is also wired: Restore Tests (see the Restore Tests page) restore the latest backup into an isolated scratch container and verify it, never touching the running database (`teploy accessory verify-backup`, server-state mode).",
+			ID:           "data-restore",
+			Label:        "Data restore",
+			Supported:    true,
+			Command:      "teploy backup restore <id> --accessory <name> --app <app> --host <server> [--database <db>] [--no-backup] --yes --json",
+			DashAction:   "backups/restore",
+			BlastRadius:  "REPLACES the database's current contents with the backup's point-in-time state; everything written since that backup is gone. With one database named, only that database is replaced. The app's containers stop for the restore and start again after. A safety backup of the current state is taken first, and a failed safety backup refuses the restore (--no-backup is the explicit way past that).",
+			Confirmation: "Type the app name to confirm.",
+			Remedy:       "Run it from the app's Backups tab, which stops the app, runs this command and health-checks it afterwards. The non-destructive cousin is Restore Tests (the Restore Tests page, and the automatic weekly tests on the Backups page): `teploy accessory verify-backup` restores the latest backup into an isolated scratch container and proves it usable, never touching the running database.",
 		},
 		{
 			ID:          "destructive-removal",
