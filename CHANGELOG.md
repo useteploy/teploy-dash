@@ -4,6 +4,13 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Changed
+
+- The image bundles teploy CLI v0.1.50 (from v0.1.49): database engine
+  detection, safe in-place restore, dump verification and cron checks.
+- The database actions panel shows the current restore command, and points to
+  the Backups tab, which already restores without a project folder.
+
 ### Added
 - **Alerts v2.** Monitors alert on incidents, not on every flip: per-monitor
   `fail_after` (default 3) / `recover_after` (default 2) / optional
