@@ -146,7 +146,8 @@ func TestRollbackToAndBackupBuilders(t *testing.T) {
 	}
 }
 
-func TestBuilderRejectsUnknownCommandsAndFlagLikeIdentifiers(t *testing.T) {	for _, request := range []Request{
+func TestBuilderRejectsUnknownCommandsAndFlagLikeIdentifiers(t *testing.T) {
+	for _, request := range []Request{
 		{Kind: "command", Server: "prod", App: "web"},
 		{Kind: KindAppLifecycle, Server: "prod", App: "web", Action: "shell"},
 		{Kind: KindDeploy, Server: "--help", App: "web"},
