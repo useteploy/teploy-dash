@@ -24,6 +24,7 @@ package server
 // observation_contracts_test.go).
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,6 +32,7 @@ import (
 	"testing"
 
 	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/remote"
 )
 
 func contractsCorpusDir(t *testing.T) string {
@@ -245,4 +247,55 @@ func TestContractsCorpusScreensEnvelopesDecode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// domains-check-envelope (corpus rev 17): the real CLI encoding goes through the
+// MI gate and dash's typed decode, and its rows join into page rows. Skips on a
+// pinned corpus older than the artifact.
+func TestContractsCorpusDomainsCheckDecodes(t *testing.T) {
+	path := filepath.Join(contractsCorpusDir(t), "fixtures", "domains-check-envelope", "valid", "sweep.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("corpus has no domains-check-envelope yet: %v", err)
+	}
+	if _, err := cli.ParseJSON(string(raw)); err != nil {
+		t.Fatalf("MI gate: %v", err)
+	}
+	var env domainCheckEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("typed decode: %v", err)
+	}
+	if len(env.Servers) != 2 || env.Servers[0].State != "unreachable" || len(env.Domains) == 0 {
+		t.Fatalf("envelope = %+v", env)
+	}
+	s := &Server{}
+	s.initDomainHealth("")
+	for i := range env.Servers {
+		srv := remote.ServerConn{Name: env.Servers[i].Server, Host: env.Servers[i].Host}
+		s.recordDomainCheck(srv, &domainCheckEnvelope{Servers: env.Servers, Domains: rowsOf(env.Domains, srv.Name)}, nil, env.CheckedAt)
+	}
+	rows := buildDomainRows(&s.domains.snap, nil, env.CheckedAt)
+	byHost := map[string]domainRowView{}
+	for _, r := range rows {
+		byHost[r.Host] = r
+	}
+	if r := byHost["hand.dev"]; r.FirstFailing != "dns" || r.Evidence != "no DNS record" {
+		t.Errorf("hand.dev = %+v", r)
+	}
+	if r := byHost["dash.example.com"]; r.FirstFailing != "route" || !strings.Contains(r.Evidence, "stale route") {
+		t.Errorf("dash.example.com = %+v", r)
+	}
+	if r := byHost["front.dev"]; !r.LabelOnly {
+		t.Errorf("front.dev = %+v", r)
+	}
+}
+
+func rowsOf(rows []domainCheckRow, server string) []domainCheckRow {
+	var out []domainCheckRow
+	for _, r := range rows {
+		if r.Server == server {
+			out = append(out, r)
+		}
+	}
+	return out
 }

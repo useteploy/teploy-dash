@@ -119,6 +119,9 @@ func (s *NucleusStore) migrate(ctx context.Context) error {
 		// Serves the (monitor_id =) + (checked_at range / ORDER BY) access pattern
 		// in GetChecks/GetStats; without it every query is a full scan.
 		`CREATE INDEX IF NOT EXISTS idx_checks_monitor_time ON checks (monitor_id, checked_at DESC)`,
+		// Additive: the certificate expiry seen on an HTTPS check (NULL otherwise).
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS cert_not_after TIMESTAMP`,
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS cert_not_before TIMESTAMP`,
 		`CREATE TABLE IF NOT EXISTS restore_tests (
 			id TEXT PRIMARY KEY,
 			server TEXT NOT NULL,
@@ -433,12 +436,12 @@ func (s *NucleusStore) SaveCheck(result CheckResult) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO checks (id, monitor_id, status, status_code, response_time_ms, message, checked_at)
-		 SELECT $1, $2, $3, $4, $5, $6, $7
-		 WHERE EXISTS (SELECT 1 FROM monitors WHERE id = $8 AND incarnation = $9)`,
+		`INSERT INTO checks (id, monitor_id, status, status_code, response_time_ms, message, checked_at, cert_not_after, cert_not_before)
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+		 WHERE EXISTS (SELECT 1 FROM monitors WHERE id = $10 AND incarnation = $11)`,
 		randomID(), result.MonitorID, result.Status,
 		result.StatusCode, result.ResponseTime.Milliseconds(),
-		result.Message, result.CheckedAt,
+		result.Message, result.CheckedAt, result.CertNotAfter, result.CertNotBefore,
 		result.MonitorID, result.Incarnation,
 	)
 	if err != nil {
@@ -461,7 +464,7 @@ func (s *NucleusStore) Cleanup() error {
 func (s *NucleusStore) GetChecks(monitorID string, since time.Time, limit int) ([]CheckResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nucleusTimeout)
 	defer cancel()
-	query := "SELECT monitor_id, status, status_code, response_time_ms, message, checked_at FROM checks WHERE monitor_id = $1 AND checked_at > $2 ORDER BY checked_at DESC"
+	query := "SELECT monitor_id, status, status_code, response_time_ms, message, checked_at, cert_not_after, cert_not_before FROM checks WHERE monitor_id = $1 AND checked_at > $2 ORDER BY checked_at DESC"
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
@@ -476,7 +479,7 @@ func (s *NucleusStore) GetChecks(monitorID string, since time.Time, limit int) (
 	for rows.Next() {
 		var r CheckResult
 		var responseMs int64
-		err := rows.Scan(&r.MonitorID, &r.Status, &r.StatusCode, &responseMs, &r.Message, &r.CheckedAt)
+		err := rows.Scan(&r.MonitorID, &r.Status, &r.StatusCode, &responseMs, &r.Message, &r.CheckedAt, &r.CertNotAfter, &r.CertNotBefore)
 		if err != nil {
 			// F040: a row that cannot be decoded is a storage failure, not a
 			// silently smaller history — a partial read used to look like a

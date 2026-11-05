@@ -124,7 +124,7 @@ assert(!!router, 'router store was not registered');
 //    semantics; page titles renamed.
 {
   const html = readFileSync(join(here, '../frontend/index.html'), 'utf8');
-  for (const label of ['>Projects</a>', '>Fleet</a>', '>Activity</a>', '>Monitors</a>', '>Restore Tests</a>', '>Templates</a>', '>Settings</a>']) {
+  for (const label of ['>Projects</a>', '>Fleet</a>', '>Activity</a>', '>Monitors</a>', '>Domains</a>', '>Restore Tests</a>', '>Templates</a>', '>Settings</a>']) {
     assert(html.includes(label), `nav must render ${label}`);
   }
   assert(!html.includes('>Deployments</a>'), 'nav must not render the old Deployments label');

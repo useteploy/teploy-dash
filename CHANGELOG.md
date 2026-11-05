@@ -4,10 +4,26 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- Domains page and `GET /api/domains`: one row per domain joining DNS, route,
+  certificate and HTTP, naming the first failing layer with its evidence and age.
+- Certificate expiry from each HTTPS monitor's TLS handshake, stored on the check
+  result.
+- Domain incidents (`source: "domain"`): DNS no record or wrong target, certificate
+  under 14 days, certificate obtain failing over 24 hours. First results from a
+  server become one summary. Needs teploy v0.1.51 on the dashboard host for the
+  DNS and obtain rules; certificate expiry works without it.
+
 ### Changed
 
-- The image bundles teploy CLI v0.1.50 (from v0.1.49): database engine
-  detection, safe in-place restore, dump verification and cron checks.
+- Fleet monitors: a new host-ingress domain gets a monitor only when a route on any
+  server names it or public DNS answers. Existing monitors are never retired on the
+  absence of that evidence.
+- `teploy.yml` no longer carries the `dash.example.com` placeholder.
+- The image bundles teploy CLI v0.1.51 (from v0.1.49): database engine
+  detection, safe in-place restore, dump verification, cron checks and
+  `domains check`.
 - The database actions panel shows the current restore command, and points to
   the Backups tab, which already restores without a project folder.
 

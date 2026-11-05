@@ -427,3 +427,92 @@ func TestReleaseHoldsOpensWithoutNextObservation(t *testing.T) {
 		t.Fatal("released twice")
 	}
 }
+
+// AdoptFailing opens unannounced whatever the first-run window says, so a new
+// signal source can fold what was already broken into one summary; it respects
+// holds, and a later recovery is announced because the summary announced it.
+func TestAdoptFailing(t *testing.T) {
+	out := &sink{}
+	hold := false
+	tr, err := New(Options{Alerter: out, Hold: func(Rule, time.Time) (bool, string) { return hold, "deploy" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := Rule{Source: "domain", ID: "a", Name: "a", App: "x", Policy: Policy{FailAfter: 2, RecoverAfter: 1}}
+	started := time.Now().Add(-time.Hour)
+	if !tr.AdoptFailing(rule, started, "broken") {
+		t.Fatal("not adopted")
+	}
+	if len(out.sent) != 0 {
+		t.Fatalf("adoption must be silent: %+v", out.sent)
+	}
+	open := tr.Open()
+	if len(open) != 1 || open[0].Notified || !open[0].StartedAt.Equal(started) {
+		t.Fatalf("open = %+v", open)
+	}
+	if tr.AdoptFailing(rule, started, "again") {
+		t.Fatal("an open rule cannot be adopted twice")
+	}
+	rule2 := Rule{Source: "domain", ID: "b", Name: "b", App: "x", Policy: Policy{FailAfter: 1}}
+	tr.AdoptFailing(rule2, started, "broken too")
+	if n := tr.AnnounceUnannounced(); n != 2 {
+		t.Fatalf("announced %d", n)
+	}
+	tr.Observe(rule, true, time.Now(), "fine")
+	var recovered int
+	for _, ev := range out.sent {
+		if ev.Kind == "incident_recovered" {
+			recovered++
+		}
+	}
+	if recovered != 1 {
+		t.Fatalf("events = %+v", out.sent)
+	}
+	hold = true
+	if tr.AdoptFailing(Rule{Source: "domain", ID: "c", App: "x"}, started, "held") {
+		t.Fatal("a held rule goes through Observe, not adoption")
+	}
+}
+
+// Worse than announced: said once, and only when it gets worse.
+func TestObserve_EscalationAlertsOnce(t *testing.T) {
+	out := &sink{}
+	tr, err := New(Options{Alerter: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := Rule{Source: "domain", ID: "c", Name: "c", Severity: alert.SeverityWarning, Policy: Policy{FailAfter: 1}}
+	now := time.Now()
+	tr.Observe(rule, false, now, "expires in 10 days")
+	tr.Observe(rule, false, now, "expires in 9 days")
+	rule.Severity = alert.SeverityCritical
+	tr.Observe(rule, false, now, "expires in 2 days")
+	tr.Observe(rule, false, now, "expires in 1 day")
+	if len(out.sent) != 2 || out.sent[0].Kind != alert.KindOpened || out.sent[1].Kind != alert.KindRepeat || out.sent[1].Severity != alert.SeverityCritical {
+		t.Fatalf("sent = %+v", out.sent)
+	}
+	if out.sent[0].IncidentID != out.sent[1].IncidentID {
+		t.Error("the escalation is the same incident")
+	}
+}
+
+func TestAnnounceWith_NamesWhatFoundIt(t *testing.T) {
+	out := &sink{}
+	tr, err := New(Options{Alerter: out, PublicURL: func() string { return "https://dash.teploy-fixture.dev" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().Add(-time.Hour)
+	tr.AdoptFailing(Rule{Source: "domain", ID: "a", Name: "a"}, started, "broken")
+	tr.AdoptFailing(Rule{Source: "domain", ID: "b", Name: "b"}, started, "broken")
+	tr.AnnounceWith(Summary{Intro: "First domain check. Already failing:", Path: "/domains", Source: "domain"})
+	var summary alert.Event
+	for _, ev := range out.sent {
+		if ev.Kind == alert.KindSummary {
+			summary = ev
+		}
+	}
+	if summary.Source != "domain" || summary.URL != "https://dash.teploy-fixture.dev/domains" || !strings.HasPrefix(summary.Message, "First domain check.") {
+		t.Fatalf("summary = %+v", summary)
+	}
+}

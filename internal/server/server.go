@@ -354,6 +354,8 @@ type Server struct {
 
 	// alerts is the Alerts v2 state (alerting.go).
 	alerts alertingState
+	// domains is domain health (domains.go): the last check per server.
+	domains domainHealthState
 }
 
 // New creates a new server.
@@ -370,6 +372,7 @@ func New(config Config) *Server {
 		outbox:   config.Outbox,
 	}
 	s.initAlerting(config.DataDir)
+	s.initDomainHealth(config.DataDir)
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
 		s.runCLI = cli.RunContext
@@ -1694,6 +1697,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/templates/install", s.handleTemplateInstall)
 
 	// Uptime monitors
+	s.mux.HandleFunc("/api/domains", s.handleDomains)
 	s.mux.HandleFunc("/api/monitors", s.handleMonitors)
 	s.mux.HandleFunc("/api/monitors/", s.handleMonitor)
 

@@ -317,6 +317,18 @@ func describe(inc *Incident, rule Rule) {
 	inc.ExcludeChannels = append([]string(nil), rule.ExcludeChannels...)
 }
 
+func severityRank(severity string) int {
+	switch severity {
+	case alert.SeverityCritical:
+		return 3
+	case alert.SeverityWarning:
+		return 2
+	case alert.SeverityInfo:
+		return 1
+	}
+	return 0
+}
+
 // holdFor returns the reason a rule's open is held now ("" = not held).
 func (t *Tracker) holdFor(rule Rule, at time.Time) string {
 	if t.opts.Silenced != nil {
@@ -356,6 +368,35 @@ func (t *Tracker) AdoptOpen(rule Rule, startedAt time.Time, fails int, message s
 	describe(inc, rule)
 	t.incidents[key] = inc
 	t.persistLocked()
+}
+
+// AdoptFailing records a failure that existed before anything watched it (a
+// domain's first check) as an unannounced open incident, whatever the tracker's
+// own adoption window says. The caller follows a batch with AnnounceUnannounced,
+// so what was already broken arrives as one summary rather than an alert each.
+// A held or silenced rule is left to Observe, which applies the hold; reports
+// whether the rule was adopted.
+func (t *Tracker) AdoptFailing(rule Rule, startedAt time.Time, message string) bool {
+	rule.Policy = rule.Policy.normalized()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := rule.key()
+	if t.incidents[key] != nil {
+		return false
+	}
+	now := t.opts.Now()
+	if why := t.holdFor(rule, now); why != "" {
+		return false
+	}
+	st := t.state(key)
+	st.rule, st.lastMessage = rule, message
+	st.oks, st.fails, st.firstFailAt = 0, rule.Policy.FailAfter, startedAt
+	inc := &Incident{Key: key, ID: newIncidentID(), StartedAt: startedAt, OpenedAt: now,
+		ConsecutiveFailures: st.fails, Message: message}
+	describe(inc, rule)
+	t.incidents[key] = inc
+	t.persistLocked()
+	return true
 }
 
 // EndAdoption closes the adoption window and announces what it collected
@@ -455,9 +496,18 @@ func (t *Tracker) Observe(rule Rule, ok bool, at time.Time, message string) {
 		st.fails++
 		switch {
 		case inc != nil:
+			wasSeverity := inc.Severity
 			describe(inc, rule)
 			inc.ConsecutiveFailures = st.fails
 			inc.Message = message
+			// Worse than it was announced as (a certificate going from warning to
+			// critical): say so once, whatever the repeat policy.
+			if severityRank(inc.Severity) > severityRank(wasSeverity) && inc.Notified && t.holdFor(rule, at) == "" && t.hasChannels() {
+				inc.LastNotifiedAt = at
+				out = append(out, outgoing{ev: t.event(inc, alert.KindRepeat, "", message, at)})
+				changed = true
+				break
+			}
 			if rule.Policy.AutoResolveAfter > 0 {
 				inc.AutoResolveAt = at.Add(rule.Policy.AutoResolveAfter)
 				changed = true
@@ -604,6 +654,19 @@ func (t *Tracker) Sweep() {
 // the individual opens they need to group and later resolve incidents.
 // Every covered incident is then announced, so its recovery is sent.
 func (t *Tracker) AnnounceUnannounced() int {
+	return t.AnnounceWith(Summary{Intro: "Alerts are now configured. Currently open:", Path: "/monitors", Source: alert.SourceMonitor})
+}
+
+// Summary words the one message for several unannounced incidents.
+type Summary struct {
+	Intro  string
+	Path   string
+	Source string
+}
+
+// AnnounceWith is AnnounceUnannounced with the summary's wording, link and source
+// given by whoever found the failures.
+func (t *Tracker) AnnounceWith(sum Summary) int {
 	if !t.hasChannels() {
 		return 0
 	}
@@ -636,13 +699,13 @@ func (t *Tracker) AnnounceUnannounced() int {
 		link := ""
 		if t.opts.PublicURL != nil {
 			if base := strings.TrimRight(t.opts.PublicURL(), "/"); base != "" {
-				link = base + "/monitors"
+				link = base + sum.Path
 			}
 		}
 		summary := alert.Event{
 			MonitorID: "teploy-dash-summary", MonitorName: fmt.Sprintf("%d problems already open", len(pending)),
-			Status: "down", Message: "Alerts are now configured. Currently open:\n" + strings.Join(lines, "\n"),
-			OccurredAt: now.UTC(), Source: alert.SourceMonitor, Version: 2, Kind: alert.KindSummary,
+			Status: "down", Message: sum.Intro + "\n" + strings.Join(lines, "\n"),
+			OccurredAt: now.UTC(), Source: sum.Source, Version: 2, Kind: alert.KindSummary,
 			Severity: alert.SeverityCritical, StartedAt: pending[0].StartedAt.UTC(), URL: link, Audience: alert.AudienceHuman,
 		}
 		out = append([]outgoing{{ev: summary}}, out...)

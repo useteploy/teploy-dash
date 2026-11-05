@@ -3,9 +3,13 @@ package monitor
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,6 +91,10 @@ type Runner struct {
 	// per monitor (seeded from history).
 	pushTokens map[string]pushEntry
 	lastPing   map[string]time.Time
+	// lastResult is each monitor's newest committed check, seeded from history
+	// at start: the domains view joins it on every read, which must not scan
+	// check history per monitor.
+	lastResult map[string]store.CheckResult
 	// wg tracks in-flight checks so Stop can join them before the store
 	// closes (A46).
 	wg      sync.WaitGroup
@@ -102,6 +110,7 @@ func New(st store.Store) *Runner {
 		generations: make(map[string]uint64),
 		pushTokens:  make(map[string]pushEntry),
 		lastPing:    make(map[string]time.Time),
+		lastResult:  make(map[string]store.CheckResult),
 		client: &http.Client{
 			// No client-level Timeout: each check applies the monitor's own
 			// configured timeout via a per-request context (checkHTTP). A
@@ -256,6 +265,7 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	var history []incident.Sample
 	var lastPing time.Time
 	var newestMessage string
+	var newest *store.CheckResult
 	if r.store != nil {
 		// No time floor: the seed only establishes a baseline status, so an old
 		// timestamp is fine. A 24h window meant a monitor down longer than a day
@@ -271,6 +281,7 @@ func (r *Runner) startMonitor(m store.Monitor) {
 			n = 50
 		}
 		if checks, err := r.store.GetChecks(m.ID, time.Time{}, n); err == nil && len(checks) > 0 {
+			newest = &checks[0]
 			seed = checks[0].Status
 			anchor = checks[0].CheckedAt
 			newestMessage = checks[0].Message
@@ -295,6 +306,11 @@ func (r *Runner) startMonitor(m store.Monitor) {
 	r.teardownLocked(m.ID)
 	if seed != "" {
 		r.lastStat[m.ID] = seed
+	}
+	if newest != nil {
+		if cur, ok := r.lastResult[m.ID]; !ok || newest.CheckedAt.After(cur.CheckedAt) {
+			r.lastResult[m.ID] = *newest
+		}
 	}
 	if r.tracker != nil {
 		rule := RuleFor(m)
@@ -438,6 +454,7 @@ func (r *Runner) Remove(id string) {
 	r.teardownLocked(id)
 	delete(r.lastStat, id)
 	delete(r.lastPing, id)
+	delete(r.lastResult, id)
 	r.retireLocked(id, "monitor removed")
 }
 
@@ -511,6 +528,7 @@ func (r *Runner) runCheck(m store.Monitor, expected uint64) {
 		return
 	}
 	r.lastStat[m.ID] = result.Status
+	r.lastResult[m.ID] = result
 	// Alerts v2: every committed check feeds the incident policy (debounce,
 	// one incident per outage, holds). A monitor with no history that comes
 	// up down still opens — after fail_after checks — so fleet monitors for
@@ -558,11 +576,13 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 	if err != nil {
 		result.Status = "down"
 		result.Message = err.Error()
+		recordCert(&result, rejectedCert(err, req.URL.Hostname()))
 		return result
 	}
 	defer resp.Body.Close()
 
 	result.StatusCode = resp.StatusCode
+	recordCert(&result, firstHopCert(resp))
 
 	// If the user configured an exact expected status, require it. Otherwise
 	// treat any 2xx/3xx as up. Previously the configured ExpectedStatus was
@@ -586,6 +606,54 @@ func (r *Runner) checkHTTP(m store.Monitor) store.CheckResult {
 	}
 
 	return result
+}
+
+// firstHopCert reads the certificate the monitored host itself presented: the
+// first hop of the redirect chain, so https://example.dev redirecting to
+// https://www.example.dev reports example.dev's certificate.
+func firstHopCert(resp *http.Response) *x509.Certificate {
+	first := resp
+	for first.Request != nil && first.Request.Response != nil {
+		first = first.Request.Response
+	}
+	if first.TLS == nil || len(first.TLS.PeerCertificates) == 0 {
+		return nil
+	}
+	return first.TLS.PeerCertificates[0]
+}
+
+// rejectedCert recovers the certificate from a handshake the client refused: an
+// expired certificate is exactly when the date matters, and no response exists to
+// read it from. Only the monitored host's: a refusal on a later redirect hop is
+// another host's certificate.
+func rejectedCert(err error, host string) *x509.Certificate {
+	var verify *tls.CertificateVerificationError
+	if !errors.As(err, &verify) || len(verify.UnverifiedCertificates) == 0 {
+		return nil
+	}
+	var request *url.Error
+	if errors.As(err, &request) {
+		if u, perr := url.Parse(request.URL); perr != nil || !strings.EqualFold(u.Hostname(), host) {
+			return nil
+		}
+	}
+	return verify.UnverifiedCertificates[0]
+}
+
+func recordCert(result *store.CheckResult, cert *x509.Certificate) {
+	if cert == nil {
+		return
+	}
+	notBefore, notAfter := cert.NotBefore.UTC(), cert.NotAfter.UTC()
+	result.CertNotBefore, result.CertNotAfter = &notBefore, &notAfter
+}
+
+// LastResult returns a monitor's newest committed check, if any.
+func (r *Runner) LastResult(id string) (store.CheckResult, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	res, ok := r.lastResult[id]
+	return res, ok
 }
 
 func (r *Runner) checkTCP(m store.Monitor) store.CheckResult {
@@ -694,6 +762,7 @@ func (r *Runner) commit(m store.Monitor, generation uint64, result store.CheckRe
 		return false
 	}
 	r.lastStat[m.ID] = result.Status
+	r.lastResult[m.ID] = result
 	if r.tracker != nil {
 		r.tracker.Observe(RuleFor(m), result.Status == "up", result.CheckedAt, result.Message)
 	}

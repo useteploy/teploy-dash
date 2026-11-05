@@ -357,6 +357,14 @@ func run() error {
 		srv.RunFleetMonitors(cleanupCtx)
 	}()
 
+	// Domain health: DNS, certificate and route checks every 15 minutes, joined
+	// with the monitors' HTTP and certificate evidence. Same cancel/join.
+	cleanupWG.Add(1)
+	go func() {
+		defer cleanupWG.Done()
+		srv.RunDomainHealth(cleanupCtx)
+	}()
+
 	// Start the HTTP server on the pre-bound listener. A LATER failure
 	// (accept error, TLS misconfiguration) funnels through the same shutdown
 	// epilogue as a signal — it no longer bypasses runner joins and the

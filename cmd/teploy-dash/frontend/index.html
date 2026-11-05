@@ -75,6 +75,7 @@
     <li><a href="#" title="Operations started through dash — deploys, rollbacks, removals, with live logs" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" :aria-current="$store.router.page === 'operations' || $store.router.page === 'operation-detail' ? 'page' : null" @click.prevent="$store.router.navigate('operations')">Activity</a></li>
     <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
+    <li><a href="#" title="DNS, route, certificate and HTTP health for every domain" :class="{ active: $store.router.page === 'domains' }" :aria-current="$store.router.page === 'domains' ? 'page' : null" @click.prevent="$store.router.navigate('domains')">Domains</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'sources' }" @click.prevent="$store.router.navigate('sources')">Sources</a></li>
@@ -1629,6 +1630,92 @@
   </template>
 
   <!-- ═══ Monitors Page ═══ -->
+  <!-- One row per domain: DNS, route, certificate, HTTP, and the first layer
+       that fails. Results of the scheduled check; each row shows its age. -->
+  <template x-if="$store.router.page === 'domains'">
+    <div x-data="domainsPage">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Domains</h1>
+          <p class="subtitle" x-text="rows.length ? rows.length + ' domain' + (rows.length !== 1 ? 's' : '') + ': ' + countBy('fail') + ' failing, ' + countBy('warn') + ' warning, ' + countBy('unknown') + ' unknown' : 'DNS, route, certificate and HTTP health for every domain'"></p>
+        </div>
+        <div class="header-actions">
+          <label class="checkbox-label"><input type="checkbox" x-model="problemsOnly"> Problems only</label>
+        </div>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+      </template>
+
+      <template x-if="!loading && !cliSupported">
+        <div role="status" class="stale-banner" x-text="note"></div>
+      </template>
+
+      <template x-if="!loading && sweepError">
+        <div role="status" class="stale-banner" x-text="'The last check did not finish: ' + sweepError"></div>
+      </template>
+
+      <template x-for="s in troubledServers" :key="s.server">
+        <div role="status" class="stale-banner" x-text="serverProblem(s)"></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && rows.length === 0">
+        <div class="empty-state"><p x-text="lastSweepAt ? 'No domains found on your servers or monitors.' : 'The first check has not run yet. It starts shortly after Dash does.'"></p></div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && rows.length > 0 && visibleRows.length === 0">
+        <div class="empty-state"><p>No problems.</p></div>
+      </template>
+
+      <template x-if="!loading && visibleRows.length > 0">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Domain</th>
+                <th>DNS</th>
+                <th>Route</th>
+                <th>Certificate</th>
+                <th>HTTP</th>
+                <th>What is wrong</th>
+                <th>Checked</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="row in visibleRows" :key="row.host">
+                <tr>
+                  <td>
+                    <span class="status-dot dot" :class="dotClass(row.overall)"></span>
+                    <span class="mono" x-text="row.host"></span>
+                    <div class="text-muted" x-show="row.app || row.server" x-text="[row.app, row.server].filter(Boolean).join(' on ')"></div>
+                  </td>
+                  <td :title="row.dns.detail" x-text="layerLabel(row.dns)"></td>
+                  <td :title="row.route.detail" x-text="layerLabel(row.route)"></td>
+                  <td :title="row.cert.detail" x-text="layerLabel(row.cert)"></td>
+                  <td :title="row.http.detail" x-text="layerLabel(row.http)"></td>
+                  <td>
+                    <strong x-show="firstFailingLabel(row)" x-text="firstFailingLabel(row) + ': '"></strong>
+                    <span x-text="row.evidence || ''"></span>
+                  </td>
+                  <td class="text-muted" x-text="ageLabel(row.age_seconds)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </template>
+    </div>
+  </template>
+
   <!-- One component serves the list (/monitors) and a monitor's detail
        (/monitors/:id), so moving between them keeps the loaded list. -->
   <template x-if="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail'">

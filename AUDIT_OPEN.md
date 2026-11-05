@@ -10,6 +10,49 @@ Open items: 0 P2 improvements, deferred findings (design/architecture)
 listed per pass below, 2 upstream (teploy-cli) items (both already fixed and
 adopted), plus recorded residuals inside partially-fixed findings.
 
+## 2026-11-05 Slice 5 (domain health) — deferred and recorded residuals
+
+Branch `slice5-domain-health` (plan `_internal/DASH_AUTOCONFIG_PLAN_2026-11-03.md`
+section 8). Built: cert expiry on monitor checks, Domains page + `GET /api/domains`,
+15-minute `domains check` sweep (`<data>/domain-health.json`), `source:"domain"`
+incidents, host-ingress fleet monitor rule. Open:
+
+- **Release order.** Needs a CLI release advertising `domains-check-v1`. Gate value:
+  capability token `domains-check-v1`, named in messages as v0.1.51
+  (`domainsMinCLI`; v0.1.50 advertises no such token, so it reads unsupported). The
+  Dockerfiles still bundle v0.1.50: bump `TEPLOY_VERSION` after the release. The
+  check runs from this host over SSH, so no per-server CLI version is involved.
+- **Second-incident rule is one way.** The DNS and obtain rules and an expired
+  certificate do not open while any monitor for the host has an open incident. The
+  reverse is not suppressed: a domain rule open first, then the monitor going down,
+  gives two incidents. Accepted: it needs DNS to break and HTTP to keep working for
+  at least 30 minutes. An expiring (not expired) certificate always alerts.
+- **Retirement is per server.** A rule retires only when every server that evidenced
+  it reads `ok` this sweep. A record for a server no longer in the fleet has no say.
+  After a restart the evidence is the incident's own server field, so a rule held
+  but not open loses that scope (it can reopen as held; harmless).
+- **Unfronted host-ingress monitors stay.** Per review, `fronted` cannot be proven
+  absent, so plan P4's "retire the ones that no longer qualify" does not apply: a
+  host-ingress monitor only retires when no app serves the domain any more.
+- **Debounce streaks are not restored on restart** (open incidents are). A DNS
+  failure across a restart takes one more sweep to open. Monitors restore theirs
+  from check history; domain rules keep one snapshot, not a history.
+- **Stale route evidence** comes from the CLI's Caddyfile view only. Cloudflare
+  tunnel config is plan v2; a tunnelled host-ingress domain counts as fronted through
+  its proxied DNS answer.
+- **Hand-written blocks alert** like any other domain (DNS, obtain) once adopted.
+  Silence them by rule id or retire the block.
+- **`started_at` on a domain incident** is the first failing check Dash saw, per the
+  event contract, except on adoption, where it is when the failure began. The
+  message always says how long.
+- **Nucleus backend.** `cert_not_after` is an additive column on `checks`, the
+  established pattern; not exercised against a live Nucleus in this slice.
+- **Receivers.** Ship and Akiroo accept `source:"domain"`. Akiroo's room card reads
+  "<name> is down" and emits `monitor.down`/`monitor.up` automation events for every
+  source, including a warning-level expiring certificate; an app-less domain gets a
+  room per rule name. Ship's service for an app-less domain is the rule name, with no
+  project to link. Both are wording/routing, not lost events; owed in those repos.
+
 ## 2026-11-03 Slice 3 (Alerts v2) — deferred and recorded residuals
 
 Branch `slice3-alerts-v2` (plan `_internal/DASH_AUTOCONFIG_PLAN_2026-11-03.md`
@@ -28,9 +71,9 @@ operation-failure incidents. Open:
   `heartbeat` and `audit` and the v2 kinds. Akiroo (dedupe on incident id)
   and Ship intake must be live before this ships to a Dash whose channels
   point at them.
-- **Backup and domain sources** (plan P3.1 "same kinds for backups, domain
-  checks") do not exist in Dash yet (Slices 4/5); they should feed
-  `internal/incident` with their own rules.
+- **Backup source** (plan P3.1 "same kinds for backups") does not exist in Dash
+  yet (Slice 4); it should feed `internal/incident` with its own rules. Domains
+  landed in Slice 5.
 - **Hold freshness.** Maintenance and deploy-lock flags come from the fleet
   cache (page loads + the 5-minute fleet sweep), so a flag flip can take up
   to one sweep to hold or release. Operation holds are live.

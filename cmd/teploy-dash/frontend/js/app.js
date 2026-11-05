@@ -347,6 +347,7 @@ document.addEventListener('alpine:init', () => {
     { page: 'app-detail', path: '/deployments/:server/:name' },
     { page: 'monitors', path: '/monitors' },
     { page: 'monitor-detail', path: '/monitors/:id' },
+    { page: 'domains', path: '/domains' },
     { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
     { page: 'sources', path: '/sources' },
@@ -3505,6 +3506,99 @@ document.addEventListener('alpine:init', () => {
         await api.del(`/api/alerts/silences/${encodeURIComponent(id)}`);
         await this.load();
       } catch (e) { showToast(e.message, 'error'); }
+    },
+  }));
+
+  // ── Domains Page ──
+  // One row per domain joining DNS, route, certificate and HTTP, naming the
+  // first layer that fails. Reads the scheduled check's results; nothing here
+  // runs a check. Every row shows how old its evidence is.
+  Alpine.data('domainsPage', () => withAsyncLoad({
+    rows: [],
+    servers: [],
+    cliSupported: true,
+    minCLI: '',
+    note: '',
+    sweepError: '',
+    lastSweepAt: '',
+    loading: true,
+    problemsOnly: false,
+    refreshInterval: null,
+    _loadGeneration: 0,
+
+    async init() {
+      await this.load();
+      this.refreshInterval = setInterval(() => this.load(), 60000);
+    },
+
+    destroy() {
+      clearInterval(this.refreshInterval);
+      this._loadGeneration++;
+    },
+
+    async load() {
+      const generation = ++this._loadGeneration;
+      try {
+        const data = await api.get('/api/domains');
+        if (generation !== this._loadGeneration) return;
+        this.rows = data.rows || [];
+        this.servers = data.servers || [];
+        this.cliSupported = !!data.cli_supported;
+        this.minCLI = data.min_cli_version || '';
+        this.note = data.note || '';
+        this.sweepError = data.sweep_error || '';
+        this.lastSweepAt = data.last_sweep_at || '';
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
+      } catch (e) {
+        if (generation !== this._loadGeneration) return;
+        this.loadError = `Could not load domains: ${e.message}`;
+      }
+      this.loading = false;
+    },
+
+    get visibleRows() {
+      return this.problemsOnly ? this.rows.filter(r => r.overall !== 'ok' && r.overall !== 'na') : this.rows;
+    },
+
+    // Servers whose evidence is missing or partial stay named above the table,
+    // so a silent gap cannot read as healthy.
+    get troubledServers() {
+      return this.servers.filter(s => s.state !== 'ok');
+    },
+
+    countBy(state) {
+      return this.rows.filter(r => r.overall === state).length;
+    },
+
+    dotClass(state) {
+      return { ok: 'green', warn: 'yellow', fail: 'red', unknown: 'gray', na: 'gray' }[state] || 'gray';
+    },
+
+    layerLabel(layer) {
+      return layer ? ({ ok: 'OK', warn: 'Warning', fail: 'Failing', unknown: 'Unknown', na: 'n/a' }[layer.state] || 'Unknown') : 'Unknown';
+    },
+
+    firstFailingLabel(row) {
+      return { dns: 'DNS', route: 'Route', cert: 'Certificate', http: 'HTTP' }[row.first_failing] || '';
+    },
+
+    ageLabel(seconds) {
+      if (seconds === undefined || seconds === null) return 'not checked';
+      if (seconds < 90) return 'just now';
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 120) return `${minutes} min ago`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 48) return `${hours} h ago`;
+      return `${Math.round(hours / 24)} days ago`;
+    },
+
+    serverProblem(s) {
+      if (s.state === 'unreachable') {
+        return `${s.server} could not be checked${s.error ? ': ' + s.error : ''} (last good result: ${this.ageLabel(s.age_seconds)}).`;
+      }
+      const issues = (s.issues || []).map(i => i.scope + ': ' + i.message).join('; ');
+      return `${s.server}: part of the evidence is missing${issues ? ' (' + issues + ')' : ''}. What it covers reads unknown.`;
     },
   }));
 
