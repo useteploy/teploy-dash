@@ -83,6 +83,7 @@ const artifacts = {
   // <server> --json` — findings with evidence and the remedy command where
   // one exists. The fixture is one of each finding incl. a null-remedy.
   "server-audit-envelope": { schema: "server-audit-envelope.schema.json", classes: { valid: "validate" } },
+  "siblings-envelope": { schema: "siblings-envelope.schema.json", classes: { valid: "validate" } },
   "backup-status-envelope": { schema: "backup-status-envelope.schema.json", classes: { valid: "validate" } },
   "backup-run-envelope": { schema: "backup-run-envelope.schema.json", classes: { valid: "validate" } },
   "backup-policy-envelope": { schema: "backup-policy-envelope.schema.json", classes: { valid: "validate" } },

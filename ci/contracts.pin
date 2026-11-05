@@ -3,5 +3,5 @@
 # this file records WHICH revision dash CI proves it can decode. Bump both
 # lines together, quoting the MANIFEST's revision table, in the same change
 # that updates .github/workflows/ci.yml expectations.
-cli_rev=ebf8aa480b53e46701513e9b010cc279afba7606
-corpus_rev=19
+cli_rev=555aa574f392c3d222a8f4b5ab9a23863c3c4e5c
+corpus_rev=20
