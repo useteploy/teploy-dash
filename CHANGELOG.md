@@ -4,6 +4,8 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-11-05
+
 ### Added
 
 - **Dash Backups** (plan P2, the dash half of Slice 4; needs teploy v0.1.52 on
