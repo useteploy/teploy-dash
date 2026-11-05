@@ -225,6 +225,44 @@ func TestBackupsListAndOperations(t *testing.T) {
 	}
 }
 
+// Slice 4: the fleet engine's flags reach the CLI only when it advertises them. An
+// older CLI gets a clear refusal, never an unknown flag, and keeps today's list.
+func TestBackupFleetFlagsAreGated(t *testing.T) {
+	bodies := map[string]string{
+		"/api/apps/prod/web/backups/restore": `{"id":"20261019-120000","accessory":"postgres","database":"orders"}`,
+		"/api/apps/prod/web/remove":          `{"purge":true,"no_backup":true}`,
+	}
+	s := newScreenOpServer(t)
+	if rec := serve(s.Server, "GET", "/api/apps/prod/web/backups", ""); rec.Code != http.StatusOK {
+		t.Fatalf("backups = %d: %s", rec.Code, rec.Body.String())
+	}
+	if call := s.screenRunner.last("backup list"); call == nil || indexOfArg(call.args, "--databases") >= 0 {
+		t.Fatalf("older CLI backup list argv = %v", call)
+	}
+	for path, body := range bodies {
+		if rec := serve(s.Server, "POST", path, body); rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), backupFleetMinCLI) {
+			t.Errorf("older CLI %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := serve(s.Server, "POST", "/api/apps/prod/web/backups/restore", `{"id":"20261019-120000"}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("older CLI plain restore = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	s = newScreenOpServer(t)
+	s.screenRunner.tokens = withScreenTokens("backup-fleet-v1")
+	if rec := serve(s.Server, "GET", "/api/apps/prod/web/backups", ""); rec.Code != http.StatusOK {
+		t.Fatalf("backups = %d: %s", rec.Code, rec.Body.String())
+	}
+	if call := s.screenRunner.last("backup list"); call == nil || indexOfArg(call.args, "--databases") < 0 {
+		t.Fatalf("fleet CLI backup list argv = %v", call)
+	}
+	for path, body := range bodies {
+		if rec := serve(s.Server, "POST", path, body); rec.Code != http.StatusAccepted {
+			t.Errorf("fleet CLI %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // With the CLI's own env guard (env-config-guard-v1) dash drops its local
 // pre-check: the edit reaches the CLI, whose refusal is surfaced verbatim as
 // a 409 naming the key and the remedy.

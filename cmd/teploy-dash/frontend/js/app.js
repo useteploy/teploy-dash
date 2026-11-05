@@ -1515,7 +1515,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     openBackupRestore(row) {
-      this.backupRestore = { id: row.id, accessory: row.accessory || '' };
+      this.backupRestore = { id: row.id, accessory: row.accessory || '', database: row.database || '', noBackup: false };
       this.backupRestoreConfirm = '';
     },
 
@@ -1532,6 +1532,8 @@ document.addEventListener('alpine:init', () => {
       try {
         const body = { id: this.backupRestore.id };
         if (this.backupRestore.accessory) body.accessory = this.backupRestore.accessory;
+        if (this.backupRestore.database) body.database = this.backupRestore.database;
+        if (this.backupRestore.noBackup) body.no_backup = true;
         const op = await api.post(`${this.appPath()}/backups/restore`, body);
         if (this.resource !== target) return;
         this.backupRestore = null;
@@ -1544,7 +1546,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     backupKindLabel(row) {
-      return row.kind === 'accessory' ? `accessory ${row.accessory}` : row.kind;
+      if (row.kind !== 'accessory') return row.kind;
+      return row.database ? `accessory ${row.accessory}, database ${row.database}` : `accessory ${row.accessory}`;
     },
 
     formatBytes(n) {

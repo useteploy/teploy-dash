@@ -1521,8 +1521,12 @@
                   <h2 id="backup-restore-title">Restore backup</h2>
                   <template x-if="backupRestore">
                     <form @submit.prevent="confirmBackupRestore()">
-                      <p>Restoring <span class="mono" x-text="backupRestore.id"></span><span x-show="backupRestore.accessory" x-text="' (accessory ' + backupRestore.accessory + ')'"></span> replaces this app's current data with the backup's contents.</p>
+                      <p>Restoring <span class="mono" x-text="backupRestore.id"></span><span x-show="backupRestore.accessory" x-text="' (accessory ' + backupRestore.accessory + (backupRestore.database ? ', database ' + backupRestore.database : '') + ')'"></span> replaces this app's current data with the backup's contents.</p>
                       <p>The app's containers are stopped for the restore and started again after; requests fail while they are down. On failure the previous data is kept on the server and its location is named in the operation log.</p>
+                      <div class="field" x-show="hasFeature('backup_fleet')">
+                        <label class="checkbox-label"><input type="checkbox" x-model="backupRestore.noBackup"> Skip the automatic backup taken first</label>
+                        <span class="settings-hint">A fresh backup is stored before the restore, and a failed backup stops it. Skip it only if the backup can't run, such as during disaster recovery.</span>
+                      </div>
                       <div class="field">
                         <label for="backup-restore-confirm">Type <span class="mono" x-text="resource.name"></span> to confirm</label>
                         <input id="backup-restore-confirm" type="text" class="form-input" x-model="backupRestoreConfirm" autocomplete="off">

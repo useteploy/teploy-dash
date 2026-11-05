@@ -2318,15 +2318,19 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 		}
 		var body struct {
 			Purge    bool   `json:"purge"`
+			NoBackup bool   `json:"no_backup"`
 			Redirect string `json:"redirect"`
 		}
 		if err := strictDecode(r, &body); err != nil {
 			writeError(w, "invalid request body")
 			return
 		}
+		if body.NoBackup && !s.requireFeatureMin(w, r, func(f machineFeatures) bool { return f.BackupFleet }, "Skipping the backup before a purge", backupFleetMinCLI) {
+			return
+		}
 		s.enqueueOperation(w, r, operation.Request{
 			Kind: operation.KindRemove, Server: serverName, App: appName,
-			Purge: body.Purge, Redirect: body.Redirect,
+			Purge: body.Purge, NoBackup: body.NoBackup, Redirect: body.Redirect,
 		})
 
 	case "lock":

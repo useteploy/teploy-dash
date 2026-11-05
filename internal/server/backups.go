@@ -21,7 +21,12 @@ func (s *Server) handleBackupsList(w http.ResponseWriter, r *http.Request, serve
 	if !s.requireFeatureMin(w, r, func(f machineFeatures) bool { return f.Backups }, "Backups", "v0.1.45") {
 		return
 	}
-	res, err := s.cliAppRun(r.Context(), serverName, appName, "backup", "list", "--json")
+	args := []string{"backup", "list", "--json"}
+	if s.capabilities(r.Context()).Features.BackupFleet {
+		// Each database's own rows: they carry the database a restore must name.
+		args = append(args, "--databases")
+	}
+	res, err := s.cliAppRun(r.Context(), serverName, appName, args...)
 	if err != nil {
 		writeError(w, err.Error())
 		return
@@ -48,8 +53,11 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request, serv
 	})
 }
 
+// backupFleetMinCLI is the first CLI with the fleet engine's restore and purge flags.
+const backupFleetMinCLI = "v0.1.52"
+
 // handleBackupRestore serves POST /api/apps/{server}/{app}/backups/restore
-// {"id", "accessory"?}: a durable `backup restore <id> --yes --json`. The
+// {"id", "accessory"?, "database"?, "no_backup"?}: a durable `backup restore <id> --yes --json`. The
 // UI collected the typed confirmation (the app name) before admitting this;
 // the operation stops and restarts the app's containers on the server.
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request, serverName, appName string) {
@@ -59,6 +67,8 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request, ser
 	var body struct {
 		ID        string `json:"id"`
 		Accessory string `json:"accessory"`
+		Database  string `json:"database"`
+		NoBackup  bool   `json:"no_backup"`
 	}
 	if err := strictDecode(r, &body); err != nil {
 		writeError(w, "invalid request body")
@@ -68,8 +78,11 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request, ser
 		writeError(w, "id is required")
 		return
 	}
+	if (body.Database != "" || body.NoBackup) && !s.requireFeatureMin(w, r, func(f machineFeatures) bool { return f.BackupFleet }, "Per-database restore and skipping the automatic backup", backupFleetMinCLI) {
+		return
+	}
 	s.enqueueOperation(w, r, operation.Request{
 		Kind: operation.KindBackupRestore, Server: serverName, App: appName,
-		BackupID: body.ID, Accessory: body.Accessory,
+		BackupID: body.ID, Accessory: body.Accessory, Database: body.Database, NoBackup: body.NoBackup,
 	})
 }

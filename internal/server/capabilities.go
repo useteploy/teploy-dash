@@ -82,6 +82,9 @@ type machineFeatures struct {
 	// DomainsCheck gates the DNS, certificate-obtain and route layers of domain
 	// health (CLI v0.1.51; see domainsMinCLI).
 	DomainsCheck bool `json:"domains_check"` // domains-check-v1
+	// BackupFleet gates per-database restores and skipping the automatic backup
+	// before a restore or purge (CLI v0.1.52; see backupFleetMinCLI).
+	BackupFleet bool `json:"backup_fleet"` // backup-fleet-v1
 }
 
 type capabilityError struct {
@@ -182,6 +185,7 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				value.Features.GitSource = hasToken("git-source-v1")
 				value.Features.TriggerPoll = hasToken("trigger-poll-v1")
 				value.Features.DomainsCheck = hasToken("domains-check-v1")
+				value.Features.BackupFleet = hasToken("backup-fleet-v1")
 			}
 		} else {
 			// Pre-MI CLI (or version --json refused): the legacy path.
