@@ -299,3 +299,64 @@ func rowsOf(rows []domainCheckRow, server string) []domainCheckRow {
 	}
 	return out
 }
+
+// Slice 6 (corpus rev 19): the server-audit fixture — one of each finding,
+// including a null-remedy and an unknown check — runs through dash's real
+// decode, and the remedies it names must all be plannable onto operations
+// (the ones with an argv), re-rendered from the allowlist.
+func TestContractsCorpusServerAuditEnvelopeDecodes(t *testing.T) {
+	raw := readCorpusFixture(t, "server-audit-envelope/valid/findings.json")
+	env, err := decodeServerAuditEnvelope(raw)
+	if err != nil {
+		t.Fatalf("server-audit fixture must decode through dash's audit path: %v", err)
+	}
+	if env.State != "partial" || env.Server != "edge" {
+		t.Fatalf("envelope = %s/%s, want partial/edge", env.State, env.Server)
+	}
+	if countUnknownChecks(env) != 1 {
+		t.Fatalf("fixture must carry exactly one unknown check: %+v", env.Checks)
+	}
+	kinds := map[string]bool{}
+	remediable, reportOnly := 0, 0
+	rec := &cleanupServerRecord{Server: env.Server, Host: env.Host, Envelope: env}
+	for _, f := range env.Findings {
+		kinds[f.Kind] = true
+		if f.Remedy.Argv == nil {
+			reportOnly++
+			continue
+		}
+		remediable++
+		if _, err := planCleanupRemedy(rec, f); err != nil {
+			t.Errorf("fixture remedy for %s must be plannable: %v (argv %v)", f.ID, err, f.Remedy.Argv)
+		}
+	}
+	// The fixture's scenario produces 13 of the schema's 14 kinds (it has no
+	// server without a Caddy, so caddyfile_without_caddy cannot appear) and
+	// splits 7 remedy / 8 report-only. The missing kind is recorded as a
+	// teploy-cli corpus gap (AUDIT_OPEN); dash decodes kinds as plain
+	// strings, so it needs no change when the fixture grows.
+	if len(kinds) != 13 || remediable != 7 || reportOnly != 8 {
+		t.Fatalf("fixture changed shape: %d kinds, %d remedy / %d report-only findings", len(kinds), remediable, reportOnly)
+	}
+}
+
+// The fixture's destructive findings confirm with the name the schema names:
+// the app when the finding belongs to one, else the subject.
+func TestContractsCorpusServerAuditConfirmNames(t *testing.T) {
+	raw := readCorpusFixture(t, "server-audit-envelope/valid/findings.json")
+	env, err := decodeServerAuditEnvelope(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, f := range env.Findings {
+		if !f.Remedy.Destructive {
+			continue
+		}
+		if f.App == "" {
+			t.Errorf("a destructive remedy with no app (%s) has nothing to type", f.ID)
+		}
+		if got := remedyConfirmName(f); got != f.App {
+			t.Errorf("confirm name for %s = %q, want the app %q", f.ID, got, f.App)
+		}
+	}
+}
