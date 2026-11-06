@@ -268,6 +268,56 @@
 
       <template x-if="!loading && !loadError">
         <div>
+          <!-- Suggested groups: apps that share a registrable domain (or a
+               name prefix), offered one at a time through the same groups
+               API a person uses. Already-grouped apps never appear. -->
+          <template x-if="visibleSuggestions.length > 0">
+            <div style="margin-bottom: 32px;">
+              <div class="section-header">
+                <h2 class="section-title">Suggested groups</h2>
+                <button class="btn btn-sm" @click="suggestionsHidden = !suggestionsHidden" x-text="suggestionsHidden ? 'Show' : 'Hide'"></button>
+              </div>
+              <template x-if="!suggestionsHidden">
+                <div>
+                  <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
+                    Apps that appear to belong together — they share a registrable domain
+                    (<span class="mono">akiroo.com</span>), or a name prefix when they publish no domain
+                    (<span class="mono">fylun-</span>). Accepting a suggestion uses the ordinary group
+                    assignment (server-bound); nothing is grouped until you accept it.
+                  </p>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th>Group</th><th>Basis</th><th>Apps</th><th style="width: 200px;"></th></tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="s in visibleSuggestions" :key="s.name">
+                          <tr>
+                            <td>
+                              <strong x-text="s.name"></strong>
+                              <div class="text-muted" x-show="s.exists" style="font-size: 12px;">already exists — this adds to it</div>
+                            </td>
+                            <td class="text-muted" x-text="s.basis === 'domain' ? 'shared domain' : 'shared name prefix'"></td>
+                            <td>
+                              <template x-for="a in s.apps" :key="a.server + '/' + a.app">
+                                <div style="font-size: 13px;"><span x-text="a.app"></span> <span class="text-muted" x-text="'on ' + a.server"></span></div>
+                              </template>
+                            </td>
+                            <td>
+                              <button class="btn btn-sm btn-primary" @click="acceptSuggestion(s)" :disabled="suggestionBusy === s.name || suggestionsSaving"
+                                      x-text="suggestionBusy === s.name ? 'Grouping…' : (s.exists ? 'Add to group' : 'Create group')"></button>
+                              <button class="btn btn-sm" @click="dismissSuggestion(s.name)" title="Hide for this visit">Not now</button>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+
           <!-- Groups with their apps -->
           <template x-for="group in groupedApps()" :key="group.name">
             <div style="margin-bottom: 32px;">

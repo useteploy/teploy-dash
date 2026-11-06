@@ -557,11 +557,18 @@ document.addEventListener('alpine:init', () => {
     deployingToGroup: null,
     deploying: false,
     deployForm: { app: '', image: '', domain: '', server: '', port: 80 },
+    // Group suggestions (Programme B item 7): a diff accepted one at a time.
+    suggestions: [],
+    suggestionBusy: '',
+    suggestionsSaving: false,
+    suggestionsHidden: false,
+    dismissedSuggestions: {},
     _alive: true,
     _staleRetry: null,
 
     async init() {
       await this.load();
+      await this.loadSuggestions();
     },
 
     destroy() {
@@ -679,6 +686,50 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.deploying = false;
       }
+    },
+
+    // ── Group suggestions: one accept at a time, through the same API a
+    // person uses (create if needed, then server-bound assignment per app).
+    async loadSuggestions() {
+      try {
+        const data = await api.get('/api/group-suggestions');
+        this.suggestions = (data && data.suggestions) || [];
+      } catch (e) {
+        this.suggestions = [];
+      }
+    },
+
+    get visibleSuggestions() {
+      return (this.suggestions || []).filter(s => !this.dismissedSuggestions[s.name]);
+    },
+
+    dismissSuggestion(name) {
+      this.dismissedSuggestions[name] = true;
+    },
+
+    async acceptSuggestion(s) {
+      if (this.suggestionsSaving) return;
+      this.suggestionBusy = s.name;
+      this.suggestionsSaving = true;
+      try {
+        if (!s.exists) {
+          // Creating a group that appeared meanwhile is not an error.
+          await api.post('/api/groups', { name: s.name }).catch(e => {
+            if (e.status !== 409) throw e;
+          });
+        }
+        for (const a of s.apps) {
+          await api.post('/api/groups/' + encodeURIComponent(s.name) + '/apps', { app: a.app, server: a.server });
+        }
+        showToast('Grouped ' + s.apps.map(a => a.app).join(', ') + ' under ' + s.name, 'success');
+        await this.load({ silent: true });
+        await this.loadSuggestions();
+      } catch (e) {
+        showToast(e.message, 'error');
+        await this.loadSuggestions();
+      }
+      this.suggestionBusy = '';
+      this.suggestionsSaving = false;
     },
 
     get filteredApps() {

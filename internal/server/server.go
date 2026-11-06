@@ -1714,6 +1714,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/registries/", s.handleRegistryAction)
 	s.mux.HandleFunc("/api/groups", s.handleGroups)
 	s.mux.HandleFunc("/api/groups/", s.handleGroupAction)
+	// Programme B: group suggestions — a diff the owner accepts one at a
+	// time through the groups API above (own route so no group named
+	// "suggestions" is shadowed).
+	s.mux.HandleFunc("/api/group-suggestions", s.handleGroupSuggestions)
 
 	// Templates (Umbrel-style app catalog)
 	s.mux.HandleFunc("/api/templates", s.handleTemplates)

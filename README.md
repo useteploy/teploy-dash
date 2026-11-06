@@ -183,7 +183,8 @@ reconciling.
 - Multi-server fleet view with 60-second cache so the page doesn't SSH
   on every refresh.
 - Persistent groups + projects (organisation overlay stored in
-  `~/.teploy/groups.json`, format-compatible with the CLI's embedded UI).
+  `~/.teploy/groups.json`; dash is the only writer — the CLI no longer reads
+  or writes it).
 - Umbrel-style template catalog: install pre-defined apps with one click.
 - Live log tailing per app over Server-Sent Events (`/api/logs/`).
 - **KV** tab: browse, read, set and delete keys in an app's shared Nucleus
