@@ -1896,6 +1896,7 @@
                   <label class="checkbox-label" x-show="storage.provider === 'custom'"><input type="checkbox" x-model="storage.allow_internal"> This endpoint is on a private network (admin choice)</label>
                   <label class="checkbox-label"><input type="checkbox" x-model="storage.delete_refusal_ok"> The store refuses deletes on purpose (a bucket lock)</label>
                   <p class="text-muted">Dash probes write/read/delete first. On B2, a key that cannot delete is the recommended setup: a compromised server cannot destroy history.</p>
+                  <p class="text-muted" x-show="storage.provider === 'b2'">Create a B2 application key limited to this bucket with listFiles, readFiles, writeFiles and readBucketLifecycleRules, and without deleteFiles. If you limit it to a file name prefix, use the same value as the prefix here, because every server stores under it.</p>
                   <button class="btn" type="submit" :disabled="storageBusy" x-text="storageBusy ? 'Working…' : (rotateMode ? 'Push new keys to every server' : 'Probe and connect every server')"></button>
                   <button class="btn btn-sm" type="button" x-show="rotateMode" @click="rotateMode = false">Cancel</button>
                 </form>

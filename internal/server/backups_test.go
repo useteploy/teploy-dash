@@ -938,3 +938,18 @@ func TestBackupRouteCapabilities(t *testing.T) {
 		}
 	}
 }
+
+// B2 keeps hidden versions forever by default, so the guidance must also expire what
+// retention hides, and that rule must never hide live backups.
+func TestB2LifecycleRuleCoversHiddenBackups(t *testing.T) {
+	rule := backupLifecycleRule(&backupStorage{Provider: backupProviderB2}, backupStatTarget{Prefix: "teploy/prod"})
+	for _, want := range []string{
+		"fileNamePrefix teploy/prod/.incoming/, daysFromUploadingToHiding 1, daysFromHidingToDeleting 1",
+		"fileNamePrefix teploy/prod/, daysFromHidingToDeleting 30, daysFromUploadingToHiding empty",
+		"never set daysFromUploadingToHiding on this one",
+	} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("rule %q is missing %q", rule, want)
+		}
+	}
+}

@@ -368,7 +368,7 @@ func (s *Server) probeBackupStorage(ctx context.Context, body *backupStorageRequ
 	case s3probe.DeleteRefused:
 		if body.Provider == backupProviderB2 {
 			res.Error = ""
-			return res, "This key cannot delete files, which is the recommended B2 setup: a compromised server cannot destroy history. Retention hides files, and the bucket's lifecycle rule removes them. The test object stays under .incoming/ until that rule expires it.", true
+			return res, "This key cannot delete files, which is the recommended B2 setup: a compromised server cannot destroy history. Retention hides files, and the bucket's lifecycle rules remove them after 30 days. The test object stays under .incoming/ until that rule expires it.", true
 		}
 		if body.DeleteRefusalOK {
 			res.Error = ""
@@ -463,12 +463,19 @@ func (s *Server) readBackupTargetShow(ctx context.Context, name string) (*backup
 // server's .incoming/ tree.
 func backupLifecycleRule(st *backupStorage, target backupStatTarget) string {
 	incoming := ".incoming/"
+	root := ""
 	if target.Prefix != "" {
-		incoming = target.Prefix + "/.incoming/"
+		root = target.Prefix + "/"
+		incoming = root + ".incoming/"
 	}
 	warn := " Scope it to that prefix: a rule on the whole bucket deletes the backups."
 	if st != nil && st.Provider == backupProviderB2 || strings.Contains(target.Endpoint, "backblazeb2.com") {
-		return "Add a B2 lifecycle rule with fileNamePrefix " + incoming + ", daysFromUploadingToHiding 1 and daysFromHidingToDeleting 1." + warn
+		// B2 keeps hidden versions forever by default, so retention frees no storage
+		// without the second rule. Its 30 days are also how long hidden backups can
+		// still be recovered after a compromised server hides them. Overlapping rules
+		// are allowed; B2 applies the smallest value of each property.
+		return "Add two B2 lifecycle rules. First: fileNamePrefix " + incoming + ", daysFromUploadingToHiding 1, daysFromHidingToDeleting 1." + warn +
+			" Second: fileNamePrefix " + root + ", daysFromHidingToDeleting 30, daysFromUploadingToHiding empty. Without it, backups that retention removes stay stored and billed forever; never set daysFromUploadingToHiding on this one."
 	}
 	return `aws s3api put-bucket-lifecycle-configuration --bucket ` + target.Bucket +
 		` --lifecycle-configuration '{"Rules":[{"ID":"teploy-incoming","Status":"Enabled","Filter":{"Prefix":"` + incoming +
