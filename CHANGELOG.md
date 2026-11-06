@@ -11,7 +11,7 @@ All notable changes to teploy-dash are recorded here.
 ### Added
 
 - **Siblings — product discovery** (Programme B item 1, plan section 10.1;
-  needs teploy v0.1.53 on the dashboard host, capability `siblings-v1`):
+  needs teploy v0.1.54 on the dashboard host, capability `siblings-v1`):
   - `GET /api/siblings` and the **Siblings** page: every Teploy product the
     CLI's label report finds on the fleet (`teploy server siblings --json`,
     hourly sweep + on-demand rescan, cached in `<data>/siblings.json`), each

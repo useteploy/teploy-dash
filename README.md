@@ -368,7 +368,7 @@ disk pressure — each finding with its evidence, size and severity.
 
 **Siblings** answers "what other Teploy products run on my fleet, and can I trust
 it?" with the CLI's label report (`teploy server siblings --json`, capability
-`siblings-v1`, teploy v0.1.53) plus dash's own probe: each candidate's published
+`siblings-v1`, teploy v0.1.54) plus dash's own probe: each candidate's published
 ports are tried for the product's discovery endpoint (`/.well-known/teploy.json`;
 the forgejo family answers `/api/v1/version`), short timeout, read-only.
 

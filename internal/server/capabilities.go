@@ -90,7 +90,7 @@ type machineFeatures struct {
 	// findings name.
 	ServerAudit bool `json:"server_audit"` // server-audit-v1
 	// Siblings gates sibling product discovery riding `server siblings`
-	// (CLI v0.1.53; see siblingsMinCLI): the candidate report dash probes
+	// (CLI v0.1.54; see siblingsMinCLI): the candidate report dash probes
 	// for Teploy/forgejo discovery endpoints. The whole Programme B surface
 	// (Siblings page, Observe connect, telemetry opt-in) gates on it.
 	Siblings bool `json:"siblings"` // siblings-v1

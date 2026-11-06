@@ -25,7 +25,7 @@ const body = (extra = {}) => ({
     candidate({server: 'edge', product: 'forgejo', state: 'not_probeable', error: 'loopback-only bind on the server, not reachable from dash', doc: undefined, addresses: [], version: '11.0.1'}),
     candidate({server: 'edge', product: 'lullmail', state: 'blocked_internal', error: 'target is on a private/tailnet address — enable "allow internal" for sibling probing', doc: undefined, recognized: false, addresses: ['100.108.123.60:8080']}),
   ],
-  allow_internal: false, cli_supported: true, cli_version: 'v0.1.53', min_cli_version: 'v0.1.53',
+  allow_internal: false, cli_supported: true, cli_version: 'v0.1.53', min_cli_version: 'v0.1.54',
   ...extra,
 });
 
@@ -119,12 +119,12 @@ test('the allow-internal toggle posts the setting and starts a rescan', async ()
 
 test('an unsupported CLI keeps the page honest instead of empty', async () => {
   const h = harness('/siblings');
-  h.respond(url => response(body({cli_supported: false, candidates: [], servers: [], note: 'Sibling discovery needs teploy v0.1.53 or later on the dashboard host.'})));
+  h.respond(url => response(body({cli_supported: false, candidates: [], servers: [], note: 'Sibling discovery needs teploy v0.1.54 or later on the dashboard host.'})));
   const p = h.page('siblingsPage');
   try {
     await p.init();
     assert.equal(p.cliSupported, false);
-    assert.ok(p.note.includes('v0.1.53'));
+    assert.ok(p.note.includes('v0.1.54'));
   } finally { p.destroy(); }
 });
 
