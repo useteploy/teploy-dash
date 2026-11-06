@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/useteploy/teploy-dash/internal/cli"
+	"github.com/useteploy/teploy-dash/internal/operation"
 )
 
 const observeDoc = `{"product":"observe","version":"0.2.0","instance_id":"9f2c0c0e6b6d4f5a8e1d3b7a2c4f6e80","dashboard_url":"https://observe.example.org","ingest_url":"https://ingest.example.org","capabilities":["service_tokens","sites_external_ref","otlp_http"]}`
@@ -83,12 +83,54 @@ func newMockObserve(t *testing.T) *mockObserve {
 	return m
 }
 
-func newObserveTestServer(t *testing.T, mock *mockObserve) *Server {
+// observeTestServer bundles the server with its runner so tests can read
+// back every CLI call (argv + stdin).
+type observeTestServer struct {
+	*Server
+	runner *configRunner
+}
+
+// observeCLIWrites calls fn for every CLI invocation the test runner saw.
+func (o *observeTestServer) observeCLIWrites(fn func(args []string, stdin string)) {
+	o.runner.mu.Lock()
+	defer o.runner.mu.Unlock()
+	for _, c := range o.runner.calls {
+		fn(c.args, c.stdin)
+	}
+}
+
+func newObserveTestServer(t *testing.T, mock *mockObserve) *observeTestServer {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	runner := &configRunner{tokens: []string{"siblings-v1"}}
-	s := New(Config{DataDir: t.TempDir(), NoAuth: true, CLIRunner: runner.run})
+	runner := &configRunner{tokens: []string{"siblings-v1", "secret-stdin-v1", "redeploy-v1"}}
+	s := New(Config{
+		DataDir:         t.TempDir(),
+		NoAuth:          true,
+		CLIInstalled:    func() bool { return true },
+		CLIRunner:       runner.run,
+		CLIStdinRunner:  runner.runStdin,
+		CLIIdentity:     func() string { return "test-cli" },
+		EnvStdinSupport: func() (bool, error) { return true, nil },
+		OperationResolver: func(name string) (operation.Server, error) {
+			return operation.Server{Name: name, Host: "192.0.2.10", User: "deploy"}, nil
+		},
+		OperationExecutor: func(_ context.Context, command operation.Command, emit func(operation.Stream, string)) (int, error) {
+			return 0, nil
+		},
+	})
+	t.Cleanup(func() { s.DrainOperations(context.Background()) })
 	_ = mock
+	return &observeTestServer{Server: s, runner: runner}
+}
+
+// connectedObserve returns a server already connected to the mock.
+func connectedObserve(t *testing.T, mock *mockObserve) *observeTestServer {
+	t.Helper()
+	s := newObserveTestServer(t, mock)
+	body := `{"base_url":"` + mock.URL + `","token":"obs_svc_live_token_value","confirm_instance_id":"9f2c0c0e6b6d4f5a8e1d3b7a2c4f6e80","allow_internal":true}`
+	if rec := postObserve(t, s.Server, "/api/observe/connect", body); rec.Code != http.StatusOK {
+		t.Fatalf("connect = %d: %s", rec.Code, rec.Body.String())
+	}
 	return s
 }
 
@@ -137,7 +179,7 @@ func TestObserveConnectFullFlow(t *testing.T) {
 
 	// Connect: wrong instance confirmation refuses.
 	body := `{"base_url":"` + mock.URL + `","token":"obs_svc_live_token_value","confirm_instance_id":"deadbeef","allow_internal":true}`
-	if rec := postObserve(t, s, "/api/observe/connect", body); rec.Code != http.StatusBadRequest {
+	if rec := postObserve(t, s.Server, "/api/observe/connect", body); rec.Code != http.StatusBadRequest {
 		t.Fatalf("mismatched confirm = %d: %s", rec.Code, rec.Body.String())
 	}
 	if _, ok := s.observe.connection(); ok {
@@ -146,7 +188,7 @@ func TestObserveConnectFullFlow(t *testing.T) {
 
 	// Connect: the confirmed id matches the doc.
 	body = `{"base_url":"` + mock.URL + `","token":"obs_svc_live_token_value","confirm_instance_id":"9f2c0c0e6b6d4f5a8e1d3b7a2c4f6e80","allow_internal":true}`
-	rec = postObserve(t, s, "/api/observe/connect", body)
+	rec = postObserve(t, s.Server, "/api/observe/connect", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("connect = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -172,7 +214,7 @@ func TestObserveConnectFullFlow(t *testing.T) {
 	}
 
 	// The view shows the connection, never the token.
-	view := observeBody(t, s)
+	view := observeBody(t, s.Server)
 	if view["connected"] != true {
 		t.Fatalf("view = %v", view)
 	}
@@ -187,13 +229,13 @@ func TestObserveConnectFullFlow(t *testing.T) {
 	}
 
 	// Disconnect forgets it and says where to revoke.
-	if rec := deleteObserve(t, s, "/api/observe/connection"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Revoke") {
+	if rec := deleteObserve(t, s.Server, "/api/observe/connection"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Revoke") {
 		t.Fatalf("disconnect = %d: %s", rec.Code, rec.Body.String())
 	}
 	if _, ok := s.observe.connection(); ok {
 		t.Fatal("disconnect must clear the connection")
 	}
-	if view := observeBody(t, s); view["connected"] != false {
+	if view := observeBody(t, s.Server); view["connected"] != false {
 		t.Fatal("view after disconnect must read disconnected")
 	}
 }
@@ -216,7 +258,7 @@ func TestObserveConnectRefusals(t *testing.T) {
 		if tc.name == "refused token" {
 			mock.tokenVerdict.Store("refused")
 		}
-		rec := postObserve(t, s, "/api/observe/connect", tc.body)
+		rec := postObserve(t, s.Server, "/api/observe/connect", tc.body)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s = %d: %s", tc.name, rec.Code, rec.Body.String())
 		}
@@ -241,7 +283,7 @@ func TestObserveConnectWithoutDiscoveryDocRefuses(t *testing.T) {
 	t.Cleanup(none.Close)
 	s := newObserveTestServer(t, nil)
 	body := `{"base_url":"` + none.URL + `","token":"obs_svc_x","confirm_instance_id":"whatever","allow_internal":true}`
-	if rec := postObserve(t, s, "/api/observe/connect", body); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "discovery") {
+	if rec := postObserve(t, s.Server, "/api/observe/connect", body); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "discovery") {
 		t.Fatalf("no-doc connect = %d: %s", rec.Code, rec.Body.String())
 	}
 }
@@ -252,7 +294,7 @@ func TestObserveInstanceFence(t *testing.T) {
 	mock := newMockObserve(t)
 	s := newObserveTestServer(t, mock)
 	body := `{"base_url":"` + mock.URL + `","token":"obs_svc_live_token_value","confirm_instance_id":"9f2c0c0e6b6d4f5a8e1d3b7a2c4f6e80","allow_internal":true}`
-	if rec := postObserve(t, s, "/api/observe/connect", body); rec.Code != http.StatusOK {
+	if rec := postObserve(t, s.Server, "/api/observe/connect", body); rec.Code != http.StatusOK {
 		t.Fatalf("connect = %d: %s", rec.Code, rec.Body.String())
 	}
 	mock.docBody.Store(`{"product":"observe","version":"0.2.0","instance_id":"00000000000000000000000000000000","dashboard_url":"https://observe.example.org"}`)
@@ -283,6 +325,178 @@ func TestObserveConnectGatedOnSiblingsCapability(t *testing.T) {
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("gated connect = %d, want 501: %s", rec.Code, rec.Body.String())
 	}
-	var res cli.Result
-	_ = res
+}
+
+// ── per-app telemetry (plan item 4) ──────────────────────────────────────────
+
+func getJSONObserve(t *testing.T, s *Server, path string) (int, map[string]any) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	var out map[string]any
+	if rec.Body.Len() > 0 {
+		var env struct {
+			Data map[string]any `json:"data"`
+		}
+		if json.Unmarshal(rec.Body.Bytes(), &env) == nil && env.Data != nil {
+			out = env.Data
+		}
+	}
+	return rec.Code, out
+}
+
+func TestObserveTelemetryPlanFirstThenApply(t *testing.T) {
+	mock := newMockObserve(t)
+	s := connectedObserve(t, mock)
+
+	// Plan: no side effects — no Observe site call, no CLI write.
+	code, plan := getJSONObserve(t, s.Server, "/api/observe/telemetry/plan?server=prod&app=web")
+	if code != http.StatusOK {
+		t.Fatalf("plan = %d: %v", code, plan)
+	}
+	if plan["external_ref"] != "dash/prod/web" || plan["ingest_url"] != "https://ingest.example.org" {
+		t.Fatalf("plan = %v", plan)
+	}
+	env := plan["env"].([]any)
+	if len(env) != 7 {
+		t.Fatalf("plan env writes = %d, want 7", len(env))
+	}
+	if fp, _ := plan["fingerprint"].(string); fp == "" {
+		t.Fatal("plan must carry a fingerprint")
+	}
+	if mock.siteCalls.Load() != 0 {
+		t.Fatal("the plan must not touch Observe")
+	}
+
+	// Apply with a stale fingerprint refuses before any write.
+	stale := `{"server":"prod","app":"web","fingerprint":"00000000000000000000000000000000"}`
+	if rec := postObserve(t, s.Server, "/api/observe/telemetry", stale); rec.Code != http.StatusConflict {
+		t.Fatalf("stale fingerprint = %d: %s", rec.Code, rec.Body.String())
+	}
+	if mock.siteCalls.Load() != 0 {
+		t.Fatal("a refused apply must write nothing")
+	}
+
+	// Apply with the plan's fingerprint: site ensured, key minted, env and
+	// secrets written via the CLI, redeploy queued.
+	apply := `{"server":"prod","app":"web","fingerprint":"` + plan["fingerprint"].(string) + `"}`
+	rec := postObserve(t, s.Server, "/api/observe/telemetry", apply)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply = %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "obs_live_secret_key") {
+		t.Fatal("the minted telemetry key must never appear in a response")
+	}
+	if mock.siteCalls.Load() != 1 || mock.keyMints.Load() != 1 {
+		t.Fatalf("site calls = %d, key mints = %d", mock.siteCalls.Load(), mock.keyMints.Load())
+	}
+	if got := mock.siteCreated.Load(); got != `{"external_ref":"dash/prod/web","name":"web"}` {
+		t.Fatalf("site create body = %v", got)
+	}
+
+	// The CLI wrote 5 env vars (values on stdin) and 2 secrets.
+	var envSets, secretSets int
+	s.observeCLIWrites(func(args []string, stdin string) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(joined, "env set "):
+			envSets++
+		case strings.HasPrefix(joined, "secret set "):
+			secretSets++
+			if !strings.Contains(stdin, "obs_live_secret_key") {
+				t.Fatalf("secret value must ride stdin, got %q for %v", stdin, args)
+			}
+		}
+	})
+	if envSets != 5 || secretSets != 2 {
+		t.Fatalf("env writes = %d, secret writes = %d, want 5 and 2", envSets, secretSets)
+	}
+
+	// The redeploy was queued as a durable operation.
+	var out struct {
+		Data struct {
+			Operation operation.Operation `json:"operation"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decoding the apply response: %v", err)
+	}
+	if out.Data.Operation.ID == "" || out.Data.Operation.Request.Kind != operation.KindRedeploy {
+		t.Fatalf("apply must return the redeploy operation: %s", rec.Body.String())
+	}
+
+	// The stored record names the site and key id, never the key.
+	home, _ := os.UserHomeDir()
+	raw, _ := os.ReadFile(filepath.Join(home, ".teploy", "observe.json"))
+	if strings.Contains(string(raw), "obs_live_secret_key") {
+		t.Fatal("the telemetry key must not be stored")
+	}
+	if !strings.Contains(string(raw), "st_123") || !strings.Contains(string(raw), "k_1") {
+		t.Fatalf("the record must name site and key ids: %s", raw)
+	}
+
+	// The view lists the opt-in.
+	if _, view := getJSONObserve(t, s.Server, "/api/observe"); code != http.StatusOK || len(view["apps"].([]any)) != 1 {
+		t.Fatalf("view apps = %v", view["apps"])
+	}
+
+	// Disable: exactly the recorded keys go, a redeploy is queued, the
+	// record clears.
+	rec = postObserve(t, s.Server, "/api/observe/telemetry/disable", `{"server":"prod","app":"web"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable = %d: %s", rec.Code, rec.Body.String())
+	}
+	var unsets, secretRms int
+	s.observeCLIWrites(func(args []string, stdin string) {
+		joined := strings.Join(args, " ")
+		if strings.HasPrefix(joined, "env unset ") {
+			unsets++
+		}
+		if strings.HasPrefix(joined, "secret rm ") {
+			secretRms++
+		}
+	})
+	if unsets != 5 || secretRms != 2 {
+		t.Fatalf("disable env unsets = %d, secret rm = %d, want 5 and 2", unsets, secretRms)
+	}
+	_, view := getJSONObserve(t, s.Server, "/api/observe")
+	if len(view["apps"].([]any)) != 0 {
+		t.Fatalf("opt-in must be gone after disable: %v", view["apps"])
+	}
+}
+
+// A doc with no ingest URL (separate listener, OBSERVE_INGEST_URL unset)
+// refuses the plan — the ingest address is never guessed.
+func TestObserveTelemetryPlanNeedsIngestURL(t *testing.T) {
+	mock := newMockObserve(t)
+	mock.docBody.Store(`{"product":"observe","version":"0.2.0","instance_id":"9f2c0c0e6b6d4f5a8e1d3b7a2c4f6e80","dashboard_url":"https://observe.example.org"}`)
+	s := connectedObserve(t, mock)
+	rec := httptest.NewRecorder()
+	s.Server.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/observe/telemetry/plan?server=prod&app=web", nil))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "ingest") {
+		t.Fatalf("no-ingest plan = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Re-applying an opted-in app is a rotation: the plan says so, and the new
+// apply replaces the record.
+func TestObserveTelemetryRotation(t *testing.T) {
+	mock := newMockObserve(t)
+	s := connectedObserve(t, mock)
+	_, plan := getJSONObserve(t, s.Server, "/api/observe/telemetry/plan?server=prod&app=web")
+	if plan["rotation"] != nil {
+		t.Fatal("first apply must not read as a rotation")
+	}
+	apply := `{"server":"prod","app":"web","fingerprint":"` + plan["fingerprint"].(string) + `"}`
+	if rec := postObserve(t, s.Server, "/api/observe/telemetry", apply); rec.Code != http.StatusOK {
+		t.Fatalf("apply = %d: %s", rec.Code, rec.Body.String())
+	}
+	_, plan2 := getJSONObserve(t, s.Server, "/api/observe/telemetry/plan?server=prod&app=web")
+	rot := plan2["rotation"]
+	if rot == nil {
+		t.Fatal("a second plan must carry the rotation note")
+	}
+	if plan2["fingerprint"] == plan["fingerprint"] {
+		t.Fatal("the rotation plan must have its own fingerprint")
+	}
 }

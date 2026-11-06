@@ -54,6 +54,7 @@ import (
 
 	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/monitor"
+	"github.com/useteploy/teploy-dash/internal/operation"
 )
 
 const (
@@ -465,6 +466,7 @@ func (s *Server) observeView(ctx context.Context) map[string]any {
 
 func (s *Server) handleObserve(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/observe"), "/")
+	path = strings.Trim(path, "/")
 	noStore(w)
 	switch {
 	case path == "" && r.Method == http.MethodGet:
@@ -475,6 +477,12 @@ func (s *Server) handleObserve(w http.ResponseWriter, r *http.Request) {
 		s.handleObserveConnect(w, r)
 	case path == "connection" && r.Method == http.MethodDelete:
 		s.handleObserveDisconnect(w, r)
+	case path == "telemetry/plan" && r.Method == http.MethodGet:
+		s.handleObserveTelemetryPlan(w, r)
+	case path == "telemetry" && r.Method == http.MethodPost:
+		s.handleObserveTelemetryApply(w, r)
+	case path == "telemetry/disable" && r.Method == http.MethodPost:
+		s.handleObserveTelemetryDisable(w, r)
 	default:
 		writeErrorStatus(w, "observe route not found", http.StatusNotFound)
 	}
@@ -611,4 +619,467 @@ func (s *Server) handleObserveDisconnect(w http.ResponseWriter, r *http.Request)
 		s.auditf(r, "observe.disconnect", "observe/"+conn.InstanceID, "disconnected from %s — revoke the token in Observe Settings", conn.BaseURL)
 	}
 	writeData(w, map[string]any{"ok": true, "note": "Revoke the service token in Observe (Settings → Service Tokens) if you want it dead; dash no longer holds it."})
+}
+
+// ── per-app telemetry opt-in (plan item 4) ───────────────────────────────────
+//
+// Opt-in is plan-first: the plan endpoint computes EXACTLY what apply will
+// do (site ensure by external_ref, one labelled telemetry key, the env and
+// secret writes with their values or [secret] markers, the redeploy
+// operation that makes them reach the container) and returns a fingerprint;
+// apply recomputes the plan and refuses a fingerprint that moved, so what
+// the owner approved is what runs.
+
+const (
+	observeExternalRefPrefix = "dash/"
+	observeKeyLabel          = "dash-telemetry"
+	// observeResourceAttrs is written literally as the programme contract
+	// specifies it: the $TEPLOY_VERSION reference resolves inside the app's
+	// container, where the CLI injects TEPLOY_VERSION at deploy time.
+	observeResourceAttrs = "service.version=$TEPLOY_VERSION,deployment.environment=production"
+)
+
+type observeEnvWrite struct {
+	Key    string `json:"key"`
+	Value  string `json:"value"` // [secret] marker in plans when the value is a secret
+	Secret bool   `json:"secret,omitempty"`
+}
+
+type observeTelemetryPlan struct {
+	Server      string `json:"server"`
+	App         string `json:"app"`
+	ExternalRef string `json:"external_ref"`
+	KeyLabel    string `json:"key_label"`
+	IngestURL   string `json:"ingest_url"`
+	InstanceID  string `json:"instance_id"`
+	// SiteAction says whether the site already exists under this ref (a
+	// local re-apply) or will be created — Observe answers that at apply
+	// time (create-by-ref is idempotent), so the plan words it honestly.
+	SiteAction string            `json:"site_action"`
+	Env        []observeEnvWrite `json:"env"`
+	Redeploy   string            `json:"redeploy"`
+	// Rotation names the previous opt-in when this apply replaces one.
+	Rotation    *observeAppTelemetry `json:"rotation,omitempty"`
+	Fingerprint string               `json:"fingerprint"`
+}
+
+// observeTelemetryTarget validates a (server, app) pair the caller already
+// decoded from its request.
+func (s *Server) observeTelemetryTarget(w http.ResponseWriter, serverName, appName string) (string, string, bool) {
+	serverName, appName = strings.TrimSpace(serverName), strings.TrimSpace(appName)
+	if serverName == "" || appName == "" {
+		writeError(w, "server and app are required")
+		return "", "", false
+	}
+	if _, found := s.lookupServer(serverName); !found {
+		writeErrorStatus(w, "server not found: "+serverName, http.StatusNotFound)
+		return "", "", false
+	}
+	return serverName, appName, true
+}
+
+// buildObserveTelemetryPlan computes the plan and its fingerprint. Pure: no
+// Observe call, no CLI call — the owner approves words, not side effects.
+func buildObserveTelemetryPlan(serverName, appName, ingestURL, instanceID string, rotation *observeAppTelemetry) observeTelemetryPlan {
+	ref := observeExternalRefPrefix + serverName + "/" + appName
+	plan := observeTelemetryPlan{
+		Server: serverName, App: appName,
+		ExternalRef: ref, KeyLabel: observeKeyLabel,
+		IngestURL: ingestURL, InstanceID: instanceID,
+		SiteAction: "ensure the site for " + ref + " (created on Observe if absent — idempotent)",
+		Env: []observeEnvWrite{
+			{Key: "OBSERVE_ENDPOINT", Value: ingestURL},
+			{Key: "OBSERVE_API_KEY", Value: "[secret: the telemetry key]", Secret: true},
+			{Key: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: ingestURL},
+			{Key: "OTEL_EXPORTER_OTLP_HEADERS", Value: "[secret: x-api-key=<the telemetry key>]", Secret: true},
+			{Key: "OTEL_EXPORTER_OTLP_PROTOCOL", Value: "http/protobuf"},
+			{Key: "OTEL_SERVICE_NAME", Value: appName},
+			{Key: "OTEL_RESOURCE_ATTRIBUTES", Value: observeResourceAttrs},
+		},
+		Redeploy: "queue a redeploy (durable operation) so the new environment reaches the app's containers",
+		Rotation: rotation,
+	}
+	raw := plan.Server + "\x00" + plan.App + "\x00" + plan.ExternalRef + "\x00" + plan.KeyLabel + "\x00" +
+		plan.IngestURL + "\x00" + plan.InstanceID + "\x00" + fmt.Sprint(rotation != nil)
+	for _, e := range plan.Env {
+		raw += "\x00" + e.Key + "=" + e.Value
+	}
+	sum := sha256.Sum256([]byte(raw))
+	plan.Fingerprint = hex.EncodeToString(sum[:16])
+	return plan
+}
+
+// handleObserveTelemetryPlan serves GET /api/observe/telemetry/plan: what
+// apply would do, with nothing done.
+func (s *Server) handleObserveTelemetryPlan(w http.ResponseWriter, r *http.Request) {
+	if !s.requireFeatureMin(w, r, func(f machineFeatures) bool { return f.Siblings && f.Secrets && f.Redeploy }, "Per-app telemetry", siblingsMinCLI) {
+		return
+	}
+	serverName, appName, ok := s.observeTelemetryTarget(w, r.URL.Query().Get("server"), r.URL.Query().Get("app"))
+	if !ok {
+		return
+	}
+	conn, connected := s.observe.connection()
+	if !connected {
+		writeErrorStatus(w, "connect Observe first (no connection is stored)", http.StatusConflict)
+		return
+	}
+	doc, err := observeDocStillCurrent(r.Context(), &conn)
+	if err != nil {
+		writeErrorStatus(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if doc.IngestURL == "" {
+		// Never guess: a separate ingest listener without OBSERVE_INGEST_URL
+		// publishes no ingest address; the owner sets it in Observe.
+		writeErrorStatus(w, "the discovery doc publishes no ingest URL (Observe has a separate ingest listener and OBSERVE_INGEST_URL is unset) — set it in Observe and plan again", http.StatusConflict)
+		return
+	}
+	o := &s.observe
+	o.mu.Lock()
+	rotation, rotating := o.rec.Apps[serverName+"/"+appName]
+	o.mu.Unlock()
+	var rotPtr *observeAppTelemetry
+	if rotating {
+		rotPtr = &rotation
+	}
+	writeData(w, buildObserveTelemetryPlan(serverName, appName, doc.IngestURL, conn.InstanceID, rotPtr))
+}
+
+// observeEnsureSite creates-or-gets the site by external_ref (Observe's
+// idempotent create; a replay returns the same site).
+func observeEnsureSite(ctx context.Context, conn *observeConnection, externalRef, name string) (siteID string, created bool, err error) {
+	resp := observeCall(ctx, conn, http.MethodPost, "/api/v1/service/sites", map[string]string{"external_ref": externalRef, "name": name})
+	if resp.Err != nil {
+		return "", false, resp.Err
+	}
+	var out struct {
+		Created bool `json:"created"`
+		Site    struct {
+			SiteID      string `json:"site_id"`
+			ExternalRef string `json:"external_ref"`
+			ManagedBy   string `json:"managed_by"`
+		} `json:"site"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return "", false, fmt.Errorf("Observe's site answer could not be read (HTTP %d)", resp.Status)
+	}
+	switch resp.Status {
+	case http.StatusCreated, http.StatusOK:
+		if out.Site.SiteID == "" {
+			return "", false, fmt.Errorf("Observe's site answer carried no site id")
+		}
+		return out.Site.SiteID, out.Created, nil
+	case http.StatusForbidden:
+		return "", false, fmt.Errorf("the service token lacks sites:create — re-mint it in Observe with the scope")
+	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
+		return "", false, fmt.Errorf("Observe is busy (HTTP %d) — try again", resp.Status)
+	default:
+		msg := out.Error
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", resp.Status)
+		}
+		return "", false, fmt.Errorf("creating the site failed: %s", msg)
+	}
+}
+
+// observeMintKey mints one labelled telemetry key for the site.
+func observeMintKey(ctx context.Context, conn *observeConnection, siteID, label string) (key, keyID string, err error) {
+	resp := observeCall(ctx, conn, http.MethodPost, "/api/v1/service/sites/"+siteID+"/keys", map[string]string{"label": label})
+	if resp.Err != nil {
+		return "", "", resp.Err
+	}
+	var out struct {
+		Key  string `json:"key"`
+		Info struct {
+			KeyID string `json:"key_id"`
+		} `json:"info"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return "", "", fmt.Errorf("Observe's key answer could not be read (HTTP %d)", resp.Status)
+	}
+	switch resp.Status {
+	case http.StatusCreated:
+		if out.Key == "" {
+			return "", "", fmt.Errorf("Observe's key answer carried no key")
+		}
+		return out.Key, out.Info.KeyID, nil
+	case http.StatusForbidden:
+		return "", "", fmt.Errorf("the service token lacks keys:mint — re-mint it in Observe with the scope")
+	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
+		return "", "", fmt.Errorf("Observe is busy (HTTP %d) — try again", resp.Status)
+	default:
+		msg := out.Error
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", resp.Status)
+		}
+		return "", "", fmt.Errorf("minting the telemetry key failed: %s", msg)
+	}
+}
+
+// writeObserveSecret writes one secret via `secret set KEY --stdin` (value on
+// the CLI's stdin, never argv).
+func (s *Server) writeObserveSecret(r *http.Request, serverName, appName, key, value string) error {
+	if !s.cliInstalled() {
+		return errors.New("teploy CLI not installed")
+	}
+	target, err := s.appTargetArgs(r.Context(), serverName, appName)
+	if err != nil {
+		return err
+	}
+	args := append([]string{"secret", "set", key, "--stdin"}, target...)
+	args = append(args, s.requestActorArgs(r)...)
+	if _, err := s.runCLIStdin(r.Context(), value, args...); err != nil {
+		return errors.New(scrubSecret(err.Error(), value))
+	}
+	return nil
+}
+
+// handleObserveTelemetryApply serves POST /api/observe/telemetry: the
+// owner-approved plan, executed in order — instance fence, site ensure, key
+// mint, env/secret writes, then the redeploy operation.
+func (s *Server) handleObserveTelemetryApply(w http.ResponseWriter, r *http.Request) {
+	if !s.requireFeatureMin(w, r, func(f machineFeatures) bool { return f.Siblings && f.Secrets && f.Redeploy }, "Per-app telemetry", siblingsMinCLI) {
+		return
+	}
+	var body struct {
+		Server      string `json:"server"`
+		App         string `json:"app"`
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := strictDecode(r, &body); err != nil {
+		writeError(w, "invalid request body: "+err.Error())
+		return
+	}
+	serverName, appName, ok := s.observeTelemetryTarget(w, body.Server, body.App)
+	if !ok {
+		return
+	}
+	conn, connected := s.observe.connection()
+	if !connected {
+		writeErrorStatus(w, "connect Observe first (no connection is stored)", http.StatusConflict)
+		return
+	}
+	doc, err := observeDocStillCurrent(r.Context(), &conn)
+	if err != nil {
+		writeErrorStatus(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if doc.IngestURL == "" {
+		writeErrorStatus(w, "the discovery doc publishes no ingest URL — set OBSERVE_INGEST_URL in Observe and plan again", http.StatusConflict)
+		return
+	}
+	o := &s.observe
+	o.mu.Lock()
+	prev, rotating := o.rec.Apps[serverName+"/"+appName]
+	o.mu.Unlock()
+	var rotPtr *observeAppTelemetry
+	if rotating {
+		rotPtr = &prev
+	}
+	plan := buildObserveTelemetryPlan(serverName, appName, doc.IngestURL, conn.InstanceID, rotPtr)
+	if strings.TrimSpace(body.Fingerprint) == "" {
+		writeError(w, "the plan's fingerprint is required — load the plan, approve it, then apply")
+		return
+	}
+	if body.Fingerprint != plan.Fingerprint {
+		writeErrorStatus(w, "the plan changed since it was approved (Observe moved, or the app changed) — review the plan and approve again", http.StatusConflict)
+		return
+	}
+	// The redeploy is a deploy-flow action: the credential capability that
+	// gates this route is not enough to run it.
+	if !s.callerHolds(r, "execute.deploy") {
+		writeErrorStatus(w, "missing capability: execute.deploy", http.StatusForbidden)
+		return
+	}
+
+	siteID, _, err := observeEnsureSite(r.Context(), &conn, plan.ExternalRef, appName)
+	if err != nil {
+		writeError(w, scrubSecret(err.Error(), conn.Token))
+		return
+	}
+	key, keyID, err := observeMintKey(r.Context(), &conn, siteID, plan.KeyLabel)
+	if err != nil {
+		writeError(w, scrubSecret(err.Error(), conn.Token))
+		return
+	}
+
+	headers := "x-api-key=" + key
+	plain := map[string]string{
+		"OBSERVE_ENDPOINT":            plan.IngestURL,
+		"OTEL_EXPORTER_OTLP_ENDPOINT": plan.IngestURL,
+		"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+		"OTEL_SERVICE_NAME":           appName,
+		"OTEL_RESOURCE_ATTRIBUTES":    observeResourceAttrs,
+	}
+	written := []string{}
+	for _, k := range sortedKeys(plain) {
+		if _, err := s.envSet(r, serverName, appName, k, plain[k]); err != nil {
+			s.observePartialFailure(w, r, serverName, appName, written, err, key)
+			return
+		}
+		written = append(written, k)
+	}
+	if err := s.writeObserveSecret(r, serverName, appName, "OBSERVE_API_KEY", key); err != nil {
+		s.observePartialFailure(w, r, serverName, appName, written, err, key)
+		return
+	}
+	written = append(written, "OBSERVE_API_KEY")
+	if err := s.writeObserveSecret(r, serverName, appName, "OTEL_EXPORTER_OTLP_HEADERS", headers); err != nil {
+		s.observePartialFailure(w, r, serverName, appName, written, err, key)
+		return
+	}
+	written = append(written, "OTEL_EXPORTER_OTLP_HEADERS")
+
+	record := observeAppTelemetry{
+		Server: serverName, App: appName, ExternalRef: plan.ExternalRef,
+		SiteID: siteID, KeyID: keyID, KeyLabel: plan.KeyLabel,
+		IngestURL: plan.IngestURL, InstanceID: conn.InstanceID,
+		EnvKeys:    []string{"OBSERVE_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"},
+		SecretKeys: []string{"OBSERVE_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"},
+		AppliedAt:  time.Now().UTC(), AppliedBy: requestActor(r),
+	}
+
+	op, _, err := s.operations.Enqueue(operation.Request{Kind: operation.KindRedeploy, Server: serverName, App: appName}, r.Header.Get("Idempotency-Key"), actorFromRequest(r))
+	if err != nil {
+		// The env writes stand; the redeploy is the only missing piece.
+		o.mu.Lock()
+		o.rec.Apps[serverName+"/"+appName] = record
+		saveErr := o.saveLocked()
+		o.mu.Unlock()
+		s.auditf(r, "observe.telemetry", "server/"+serverName+" app/"+appName, "telemetry wired (site %s, key %s) but the redeploy could not be queued: %v — run it from the app page", siteID, keyID, err)
+		writeErrorStatus(w, "Telemetry is wired but the redeploy could not be queued: "+err.Error()+". Run the redeploy from the app's page.", http.StatusServiceUnavailable)
+		if saveErr != nil {
+			log.Printf("[observe] persisting the opt-in failed after a partial apply: %v", saveErr)
+		}
+		return
+	}
+
+	o.mu.Lock()
+	if o.rec.Apps == nil {
+		o.rec.Apps = map[string]observeAppTelemetry{}
+	}
+	o.rec.Apps[serverName+"/"+appName] = record
+	if err := o.saveLocked(); err != nil {
+		o.mu.Unlock()
+		s.auditf(r, "observe.telemetry", "server/"+serverName+" app/"+appName, "telemetry wired (site %s, key %s, redeploy %s) but the record could not be stored", siteID, keyID, op.ID)
+		writeError(w, "Telemetry is wired and the redeploy is queued, but the opt-in record could not be stored: "+err.Error())
+		return
+	}
+	o.mu.Unlock()
+
+	rotation := ""
+	if plan.Rotation != nil {
+		rotation = " (rotated from key " + plan.Rotation.KeyID + " — revoke it in Observe if it is no longer used)"
+	}
+	s.auditf(r, "observe.telemetry", "server/"+serverName+" app/"+appName, "telemetry wired: site %s, key %s%s, 7 env/secret writes, redeploy %s", siteID, keyID, rotation, op.ID)
+	writeData(w, map[string]any{
+		"site_id": siteID, "key_id": keyID, "operation": op,
+		"env_keys": record.EnvKeys, "secret_keys": record.SecretKeys,
+		"note": "Redeploy queued — follow it in Activity. The telemetry key was shown to nobody; it lives in the app's secrets.",
+	})
+}
+
+// observePartialFailure answers a failed apply honestly: what is already
+// written stands, nothing is recorded, and the owner is told a spare key may
+// exist in Observe until revoked there.
+func (s *Server) observePartialFailure(w http.ResponseWriter, r *http.Request, serverName, appName string, written []string, err error, key string) {
+	msg := scrubSecret(err.Error(), key)
+	s.auditf(r, "observe.telemetry", "server/"+serverName+" app/"+appName, "telemetry apply failed after %d write(s): %v", len(written), msg)
+	writeErrorStatus(w, fmt.Sprintf("the apply failed part-way (%s). Written so far: %s. Nothing was recorded — re-running the plan is safe (the site is idempotent); a re-run mints a fresh key, so revoke the spare in Observe Settings.", msg, strings.Join(written, ", ")), http.StatusBadGateway)
+}
+
+// handleObserveTelemetryDisable undoes exactly what the opt-in recorded:
+// the env keys and secrets dash wrote are removed, a redeploy is queued,
+// and the owner is told the site and key live on in Observe until revoked
+// there. Works without a live connection — it undoes dash's own writes.
+func (s *Server) handleObserveTelemetryDisable(w http.ResponseWriter, r *http.Request) {
+	if !s.requireFeatureMin(w, r, func(f machineFeatures) bool { return f.Secrets && f.Redeploy }, "Per-app telemetry", "v0.1.45") {
+		return
+	}
+	var body struct {
+		Server string `json:"server"`
+		App    string `json:"app"`
+	}
+	if err := strictDecode(r, &body); err != nil {
+		writeError(w, "invalid request body: "+err.Error())
+		return
+	}
+	serverName, appName, ok := s.observeTelemetryTarget(w, body.Server, body.App)
+	if !ok {
+		return
+	}
+	o := &s.observe
+	o.mu.Lock()
+	record, exists := o.rec.Apps[serverName+"/"+appName]
+	if exists {
+		delete(o.rec.Apps, serverName+"/"+appName)
+	}
+	o.mu.Unlock()
+	if !exists {
+		writeErrorStatus(w, appName+" on "+serverName+" is not opted in", http.StatusNotFound)
+		return
+	}
+
+	var removed, failed []string
+	for _, k := range record.EnvKeys {
+		if _, err := s.envUnset(r, serverName, appName, k); err != nil {
+			failed = append(failed, k)
+			continue
+		}
+		removed = append(removed, k)
+	}
+	for _, k := range record.SecretKeys {
+		if _, err := s.cliAppRun(r.Context(), serverName, appName, append([]string{"secret", "rm", k}, s.requestActorArgs(r)...)...); err != nil {
+			failed = append(failed, k)
+			continue
+		}
+		removed = append(removed, k)
+	}
+	if len(failed) > 0 {
+		// Put the record back with what is still set: a failed disable must
+		// not leave the page believing telemetry is gone.
+		remaining := observeAppTelemetry(record)
+		remaining.EnvKeys, remaining.SecretKeys = nil, nil
+		for _, k := range failed {
+			if k == "OBSERVE_API_KEY" || k == "OTEL_EXPORTER_OTLP_HEADERS" {
+				remaining.SecretKeys = append(remaining.SecretKeys, strings.SplitN(k, " (", 2)[0])
+			} else {
+				remaining.EnvKeys = append(remaining.EnvKeys, strings.SplitN(k, " (", 2)[0])
+			}
+		}
+		o.mu.Lock()
+		o.rec.Apps[serverName+"/"+appName] = remaining
+		o.saveLocked()
+		o.mu.Unlock()
+		writeError(w, "the disable removed "+strings.Join(removed, ", ")+" but failed on "+strings.Join(failed, ", ")+" — the opt-in stays recorded for what is still set; retry after fixing the failure")
+		return
+	}
+
+	op, _, err := s.operations.Enqueue(operation.Request{Kind: operation.KindRedeploy, Server: serverName, App: appName}, r.Header.Get("Idempotency-Key"), actorFromRequest(r))
+	if err != nil {
+		o.mu.Lock()
+		o.rec.Apps[serverName+"/"+appName] = record
+		o.saveLocked()
+		o.mu.Unlock()
+		writeErrorStatus(w, "the env writes are gone but the redeploy could not be queued: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	o.mu.Lock()
+	o.saveLocked()
+	o.mu.Unlock()
+	s.auditf(r, "observe.telemetry.disable", "server/"+serverName+" app/"+appName, "telemetry unwired (site %s and key %s stay in Observe until revoked there), redeploy %s", record.SiteID, record.KeyID, op.ID)
+	writeData(w, map[string]any{"operation": op, "removed": removed,
+		"note": "Redeploy queued so the app restarts without telemetry. The site and key remain in Observe — revoke the key there if you want it dead."})
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

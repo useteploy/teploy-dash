@@ -4079,6 +4079,7 @@ document.addEventListener('alpine:init', () => {
       this._alive = true;
       await this.load();
       await this.loadObserve();
+      await this.loadTelemetry();
       this.refreshInterval = setInterval(() => { if (this._alive) { this.load(); this.loadObserve(); } }, 60000);
     },
 
@@ -4115,6 +4116,7 @@ document.addEventListener('alpine:init', () => {
         this.observeConnected = !!data.connected;
         this.observeConnection = data.connection || null;
         this.observeHintData = data.hint || null;
+        this.telemetryApps = data.apps || [];
         if (!this.observeConnected && !this.connectForm.base_url && data.hint && data.hint.base_url) {
           this.connectForm.base_url = data.hint.base_url;
         }
@@ -4200,6 +4202,83 @@ document.addEventListener('alpine:init', () => {
         showToast(e.message, 'error');
       }
       this.connectBusy = false;
+    },
+
+    // ── per-app telemetry opt-in (plan first, approve, then apply) ──
+    fleetApps: [],
+    telemetryForm: { server: '', app: '' },
+    telemetryPlan: null,
+    telemetryPlanError: '',
+    telemetryBusy: false,
+    telemetryApplied: null,
+    confirmDisable: null,
+    disableBusy: false,
+
+    async loadTelemetry() {
+      try {
+        const apps = await api.get('/api/apps');
+        this.fleetApps = Array.isArray(apps) ? apps : [];
+      } catch (e) {
+        this.fleetApps = [];
+      }
+    },
+
+    get appSuggestions() {
+      return this.fleetApps.filter(a => !this.telemetryForm.server || a.server === this.telemetryForm.server);
+    },
+
+    async planTelemetry() {
+      this.telemetryPlan = null;
+      this.telemetryPlanError = '';
+      this.telemetryApplied = null;
+      this.telemetryBusy = true;
+      try {
+        const q = '?server=' + encodeURIComponent(this.telemetryForm.server) + '&app=' + encodeURIComponent(this.telemetryForm.app);
+        this.telemetryPlan = await api.get('/api/observe/telemetry/plan' + q);
+      } catch (e) {
+        this.telemetryPlanError = e.message;
+      }
+      this.telemetryBusy = false;
+    },
+
+    async applyTelemetry() {
+      if (!this.telemetryPlan) return;
+      this.telemetryBusy = true;
+      try {
+        const out = await api.post('/api/observe/telemetry', {
+          server: this.telemetryForm.server,
+          app: this.telemetryForm.app,
+          fingerprint: this.telemetryPlan.fingerprint,
+        });
+        this.telemetryApplied = out;
+        this.telemetryPlan = null;
+        this.telemetryForm = { server: '', app: '' };
+        showToast('Telemetry wired — redeploy queued', 'success');
+        await this.loadTelemetry();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.telemetryBusy = false;
+    },
+
+    openDisable(entry) { this.confirmDisable = entry; },
+    async disableTelemetry() {
+      const e = this.confirmDisable;
+      if (!e) return;
+      this.disableBusy = true;
+      try {
+        await api.post('/api/observe/telemetry/disable', { server: e.server, app: e.app });
+        this.confirmDisable = null;
+        showToast('Telemetry unwired — redeploy queued', 'success');
+        await this.loadTelemetry();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+      this.disableBusy = false;
+    },
+
+    envDisplay(entry) {
+      return (entry.env_keys || []).concat((entry.secret_keys || []).map(k => k + ' (secret)')).join(', ');
     },
 
     serverStateLabel(state) {

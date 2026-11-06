@@ -2470,10 +2470,93 @@
                   token <span class="mono" x-text="observeConnection.token_fp"></span></span>
               </p>
               <p class="text-muted" style="margin: 0 0 8px 0; font-size: 13px;">
-                Per-app telemetry appears on each app below once you opt it in. The service token stays on this dash; revoke it in Observe Settings → Service Tokens.
+                Per-app telemetry is opt-in, one app at a time, always shown as a plan first.
                 <a x-show="observeConnection.dashboard_url" :href="observeConnection.dashboard_url" target="_blank" rel="noopener">Open Observe</a>
               </p>
-              <button class="btn btn-sm" @click="disconnectObserve()" :disabled="connectBusy" x-text="connectBusy ? 'Working…' : 'Disconnect'"></button>
+
+              <!-- Opted-in apps -->
+              <template x-if="telemetryApps.length > 0">
+                <div style="margin: 12px 0;">
+                  <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Apps sending telemetry</h3>
+                  <table style="width: 100%; font-size: 13px;">
+                    <tbody>
+                      <template x-for="entry in telemetryApps" :key="entry.server + '/' + entry.app">
+                        <tr>
+                          <td style="padding: 4px 8px 4px 0;"><span x-text="entry.app"></span> <span class="text-muted" x-text="'on ' + entry.server"></span></td>
+                          <td class="text-muted" style="padding: 4px 8px 4px 0;" x-text="envDisplay(entry)"></td>
+                          <td style="padding: 4px 0; text-align: right;">
+                            <button type="button" class="btn btn-sm" @click="openDisable(entry)" :disabled="disableBusy">Stop telemetry</button>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <!-- Opt-in: plan → approve → apply -->
+              <form @submit.prevent="planTelemetry()" style="margin-top: 8px; display: flex; gap: 8px; align-items: end; flex-wrap: wrap;">
+                <div class="field">
+                  <label for="telemetry-server">Server</label>
+                  <input id="telemetry-server" class="form-input" style="min-width: 140px;" x-model="telemetryForm.server" list="telemetry-servers" autocomplete="off" :disabled="telemetryBusy">
+                  <datalist id="telemetry-servers">
+                    <template x-for="a in [...new Set(fleetApps.map(a => a.server))]" :key="a"><option :value="a"></option></template>
+                  </datalist>
+                </div>
+                <div class="field">
+                  <label for="telemetry-app">App</label>
+                  <input id="telemetry-app" class="form-input" style="min-width: 180px;" x-model="telemetryForm.app" list="telemetry-apps" autocomplete="off" :disabled="telemetryBusy">
+                  <datalist id="telemetry-apps">
+                    <template x-for="a in appSuggestions" :key="a.server + '/' + a.app"><option :value="a.app"></option></template>
+                  </datalist>
+                </div>
+                <button type="submit" class="btn btn-sm" :disabled="telemetryBusy || !telemetryForm.server || !telemetryForm.app"
+                        x-text="telemetryBusy ? 'Planning…' : 'Plan telemetry'"></button>
+                <button type="button" class="btn btn-sm" @click="disconnectObserve()" :disabled="connectBusy" x-text="connectBusy ? 'Working…' : 'Disconnect'"></button>
+              </form>
+
+              <template x-if="telemetryPlanError">
+                <p role="alert" style="color: var(--danger, #c0392b); margin: 8px 0; font-size: 13px;" x-text="telemetryPlanError"></p>
+              </template>
+
+              <!-- The plan: exactly what apply will do. Approving this is
+                   consenting to these writes and the redeploy. -->
+              <template x-if="telemetryPlan">
+                <div role="dialog" aria-label="Telemetry plan" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-top: 10px;">
+                  <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Plan — <span x-text="telemetryPlan.app"></span> <span class="text-muted" x-text="'on ' + telemetryPlan.server"></span></h3>
+                  <ol style="margin: 0 0 8px 0; padding-left: 20px; font-size: 13px;">
+                    <li x-text="telemetryPlan.site_action"></li>
+                    <li>mint the telemetry key “<span class="mono" x-text="telemetryPlan.key_label"></span>” for that site</li>
+                    <li>write these environment variables and secrets:
+                      <table style="width: 100%; font-size: 12px; margin-top: 4px;">
+                        <tbody>
+                          <template x-for="w in telemetryPlan.env" :key="w.key">
+                            <tr>
+                              <td class="mono" style="padding: 1px 8px 1px 0;" x-text="w.key"></td>
+                              <td class="mono" style="padding: 1px 0;" :class="w.secret ? 'text-muted' : ''" x-text="w.value"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </li>
+                    <li x-text="telemetryPlan.redeploy"></li>
+                  </ol>
+                  <p class="text-muted" style="margin: 0 0 8px 0; font-size: 12px;" x-show="telemetryPlan.rotation"
+                     x-text="telemetryPlan.rotation ? 'This replaces the previous opt-in (key ' + telemetryPlan.rotation.key_id + ') — a NEW key is minted; revoke the old one in Observe if nothing else uses it.' : ''"></p>
+                  <div style="display: flex; gap: 8px;">
+                    <button type="button" class="btn btn-sm btn-primary" @click="applyTelemetry()" :disabled="telemetryBusy"
+                            x-text="telemetryBusy ? 'Applying…' : 'Approve and apply'"></button>
+                    <button type="button" class="btn btn-sm" @click="telemetryPlan = null" :disabled="telemetryBusy">Cancel</button>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="telemetryApplied">
+                <div role="status" class="stale-banner" style="margin-top: 8px;">
+                  <span x-text="telemetryApplied.note"></span>
+                  <a :href="'/operations/' + (telemetryApplied.operation ? telemetryApplied.operation.id : '')">follow the redeploy</a>
+                </div>
+              </template>
             </div>
           </template>
           <template x-if="!observeConnected">
@@ -2567,6 +2650,25 @@
           </table>
         </div>
       </template>
+
+      <!-- Stopping telemetry: the dialog names exactly what goes, and that
+           the site and key live on in Observe until revoked there. -->
+      <div class="dialog-overlay" x-show="confirmDisable" @click.self="confirmDisable = null" @keydown.escape.window="confirmDisable && (confirmDisable = null)" x-cloak>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="observe-disable-title" tabindex="-1" x-effect="confirmDisable && $nextTick(() => $el.focus())">
+          <h2 id="observe-disable-title">Stop telemetry for <span x-text="confirmDisable ? confirmDisable.app : ''"></span>?</h2>
+          <template x-if="confirmDisable">
+            <div>
+              <p>These environment variables and secrets come off the app:</p>
+              <p class="mono text-muted" style="font-size: 12px;" x-text="envDisplay(confirmDisable)"></p>
+              <p class="text-muted">A redeploy is queued so the app restarts without them. The site and the telemetry key stay in Observe — revoke the key there if you want it dead.</p>
+              <div class="dialog-actions">
+                <button type="button" class="btn" @click="confirmDisable = null">Keep it</button>
+                <button type="button" class="btn btn-danger" @click="disableTelemetry()" :disabled="disableBusy" x-text="disableBusy ? 'Stopping…' : 'Stop telemetry'"></button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
 
       <!-- Per-server read state: which reports are complete, partial or
            missing, with their age. -->

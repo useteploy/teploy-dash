@@ -203,3 +203,112 @@ test('a connected Observe shows the instance summary and disconnects', async () 
     assert.equal(p.observeConnected, false);
   } finally { p.destroy(); }
 });
+
+// ── per-app telemetry opt-in ──────────────────────────────────────────────
+
+const planBody = {
+  server: 'prod', app: 'web', external_ref: 'dash/prod/web', key_label: 'dash-telemetry',
+  ingest_url: 'https://ingest.example.org', instance_id: doc.instance_id,
+  site_action: 'ensure the site for dash/prod/web (created on Observe if absent — idempotent)',
+  env: [
+    {key: 'OBSERVE_ENDPOINT', value: 'https://ingest.example.org'},
+    {key: 'OBSERVE_API_KEY', value: '[secret: the telemetry key]', secret: true},
+    {key: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: 'https://ingest.example.org'},
+    {key: 'OTEL_EXPORTER_OTLP_HEADERS', value: '[secret: x-api-key=<the telemetry key>]', secret: true},
+    {key: 'OTEL_EXPORTER_OTLP_PROTOCOL', value: 'http/protobuf'},
+    {key: 'OTEL_SERVICE_NAME', value: 'web'},
+    {key: 'OTEL_RESOURCE_ATTRIBUTES', value: 'service.version=$TEPLOY_VERSION,deployment.environment=production'},
+  ],
+  redeploy: 'queue a redeploy (durable operation) so the new environment reaches the app\u2019s containers',
+  fingerprint: 'deadbeef12345678',
+};
+
+test('opt-in is plan-first: the plan shows every write, apply sends its fingerprint', async () => {
+  const h = harness('/siblings');
+  let applies = [];
+  h.respond(url => {
+    if (url.includes('/api/observe/telemetry/plan')) return response(planBody);
+    if (url.endsWith('/api/observe/telemetry')) { applies.push(url); return response({site_id: 'st_123', key_id: 'k_1', operation: {id: 'op9', status: 'queued', request: {kind: 'redeploy'}}, env_keys: planBody.env.filter(e => !e.secret).map(e => e.key), secret_keys: ['OBSERVE_API_KEY', 'OTEL_EXPORTER_OTLP_HEADERS'], note: 'Redeploy queued — follow it in Activity.'}); }
+    if (url.startsWith('/api/observe')) return response({connected: true, apps: [], connection: {base_url: 'http://observe.internal:3000', instance_id: doc.instance_id, token_fp: 'abc123def456'}, hint: {available: true}});
+    if (url === '/api/apps') return response([{server: 'prod', app: 'web'}, {server: 'prod', app: 'api'}]);
+    return response(body());
+  });
+  const p = h.page('siblingsPage');
+  try {
+    await p.init();
+    // The fleet apps feed the picker's suggestions.
+    assert.deepEqual(p.appSuggestions.map(a => a.app).sort(), ['api', 'web']);
+    p.telemetryForm = {server: 'prod', app: 'web'};
+    await p.planTelemetry();
+    assert.equal(p.telemetryPlan.fingerprint, 'deadbeef12345678');
+    assert.equal(p.telemetryPlan.env.length, 7);
+    // Approve: apply carries the approved fingerprint.
+    await p.applyTelemetry();
+    const apply = h.requests.find(r => r.url.endsWith('/api/observe/telemetry'));
+    assert.equal(apply.body.fingerprint, 'deadbeef12345678');
+    assert.equal(apply.body.app, 'web');
+    assert.ok(p.telemetryApplied.operation.id === 'op9');
+    assert.equal(p.telemetryPlan, null); // the plan is consumed
+  } finally { p.destroy(); }
+});
+
+test('a changed plan refuses to apply: the fingerprint gate is server-side, the UI surfaces it', async () => {
+  const h = harness('/siblings');
+  h.respond(url => {
+    if (url.includes('/api/observe/telemetry/plan')) return response(planBody);
+    if (url.endsWith('/api/observe/telemetry')) return response({error: 'the plan changed since it was approved (Observe moved, or the app changed) — review the plan and approve again'}, {raw: true, status: 409});
+    if (url.startsWith('/api/observe')) return response({connected: true, apps: [], connection: {instance_id: doc.instance_id, token_fp: 'abc'}, hint: {available: true}});
+    if (url === '/api/apps') return response([]);
+    return response(body());
+  });
+  const p = h.page('siblingsPage');
+  try {
+    await p.init();
+    p.telemetryForm = {server: 'prod', app: 'web'};
+    await p.planTelemetry();
+    await p.applyTelemetry();
+    assert.ok(p.telemetryPlan, 'a refused apply keeps the plan up for re-approval');
+    assert.ok(h.toasts.some(t => t.includes('plan changed')), 'the refusal reaches the owner');
+  } finally { p.destroy(); }
+});
+
+test('a plan without an ingest URL names the gap instead of guessing', async () => {
+  const h = harness('/siblings');
+  h.respond(url => {
+    if (url.includes('/api/observe/telemetry/plan')) return response({error: 'the discovery doc publishes no ingest URL (Observe has a separate ingest listener and OBSERVE_INGEST_URL is unset) — set it in Observe and plan again'}, {raw: true, status: 409});
+    if (url.startsWith('/api/observe')) return response({connected: true, apps: [], connection: {instance_id: doc.instance_id, token_fp: 'abc'}, hint: {available: true}});
+    if (url === '/api/apps') return response([]);
+    return response(body());
+  });
+  const p = h.page('siblingsPage');
+  try {
+    await p.init();
+    p.telemetryForm = {server: 'prod', app: 'web'};
+    await p.planTelemetry();
+    assert.equal(p.telemetryPlan, null);
+    assert.ok(p.telemetryPlanError.includes('no ingest URL'));
+  } finally { p.destroy(); }
+});
+
+test('stopping telemetry lists exactly the recorded keys in the confirm dialog', async () => {
+  const h = harness('/siblings');
+  const entry = {server: 'prod', app: 'web', env_keys: ['OBSERVE_ENDPOINT', 'OTEL_SERVICE_NAME'], secret_keys: ['OBSERVE_API_KEY'], key_id: 'k_1', site_id: 'st_123'};
+  let disabled = null;
+  h.respond(url => {
+    if (url.endsWith('/api/observe/telemetry/disable')) { disabled = true; return response({operation: {id: 'op10', status: 'queued'}, removed: ['OBSERVE_ENDPOINT', 'OTEL_SERVICE_NAME', 'OBSERVE_API_KEY'], note: 'Redeploy queued.'}); }
+    if (url.startsWith('/api/observe')) return response({connected: true, apps: [entry], connection: {instance_id: doc.instance_id, token_fp: 'abc'}, hint: {available: true}});
+    if (url === '/api/apps') return response([]);
+    return response(body());
+  });
+  const p = h.page('siblingsPage');
+  try {
+    await p.init();
+    assert.equal(p.telemetryApps.length, 1);
+    const display = p.envDisplay(entry);
+    assert.ok(display.includes('OBSERVE_API_KEY (secret)'));
+    p.openDisable(entry);
+    await p.disableTelemetry();
+    assert.equal(disabled, true);
+    assert.equal(p.confirmDisable, null);
+  } finally { p.destroy(); }
+});
