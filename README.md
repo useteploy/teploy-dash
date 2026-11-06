@@ -284,8 +284,8 @@ because the engine runs on each server, not here).
   probes write/read/delete first, then pushes `server backup-target set` to every
   server with the credentials on stdin, then forgets them: the record keeps the
   bucket name and per-server prefixes only. A B2 key that cannot delete is the
-  documented good setup (a compromised server cannot destroy history; a bucket
-  lifecycle rule removes hidden versions). Rotation re-prompts, pushes, verifies
+  documented good setup (a compromised server cannot destroy history; the bucket's
+  lifecycle rules remove hidden versions after 30 days). Rotation re-prompts, pushes, verifies
   each server and tells you when to revoke the old key.
 - **Recovery key.** `teploy backup keygen` output shown exactly once (re-auth
   required; the private key is stored nowhere); the public half is pushed to
