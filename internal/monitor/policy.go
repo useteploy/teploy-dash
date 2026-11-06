@@ -195,8 +195,15 @@ func httpClientFor(base *http.Client, allowInternal bool) *http.Client {
 
 // PolicyDialContext exposes the DASH-010 dial guard for other outbound
 // requests Dash makes on an operator's behalf (alert channels, heartbeat
-// pings): same resolve-once, check-every-address, dial-the-checked-address
-// discipline.
+// pings, sibling discovery probes): same resolve-once, check-every-address,
+// dial-the-checked-address discipline.
 func PolicyDialContext(allowInternal bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return policyDialContext(allowInternal)
 }
+
+// IsBlockedAddr reports whether ip is in the set PolicyDialContext refuses
+// without allowInternal (loopback, unspecified, private, shared-address,
+// multicast, link-local, cloud metadata). Exported so an outbound surface
+// (the sibling probes) can classify a target WITHOUT dialing it — showing
+// "blocked, enable allow internal" instead of an unspecific timeout.
+func IsBlockedAddr(ip net.IP) bool { return isBlockedAddr(ip) }

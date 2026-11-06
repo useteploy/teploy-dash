@@ -77,6 +77,7 @@
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" title="DNS, route, certificate and HTTP health for every domain" :class="{ active: $store.router.page === 'domains' }" :aria-current="$store.router.page === 'domains' ? 'page' : null" @click.prevent="$store.router.navigate('domains')">Domains</a></li>
     <li><a href="#" title="What is left over on each server — stale routes, old versions, reclaimable space — with the fix where one exists" :class="{ active: $store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' }" :aria-current="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' ? 'page' : null" @click.prevent="$store.router.navigate('cleanup')">Cleanup</a></li>
+    <li><a href="#" title="Teploy products on your servers — discovered, probed, and connected where you allow it" :class="{ active: $store.router.page === 'siblings' }" :aria-current="$store.router.page === 'siblings' ? 'page' : null" @click.prevent="$store.router.navigate('siblings')">Siblings</a></li>
     <li><a href="#" title="Every database and volume across the fleet — coverage, encryption, restore tests" :class="{ active: $store.router.page === 'backups' }" :aria-current="$store.router.page === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
@@ -267,6 +268,56 @@
 
       <template x-if="!loading && !loadError">
         <div>
+          <!-- Suggested groups: apps that share a registrable domain (or a
+               name prefix), offered one at a time through the same groups
+               API a person uses. Already-grouped apps never appear. -->
+          <template x-if="visibleSuggestions.length > 0">
+            <div style="margin-bottom: 32px;">
+              <div class="section-header">
+                <h2 class="section-title">Suggested groups</h2>
+                <button class="btn btn-sm" @click="suggestionsHidden = !suggestionsHidden" x-text="suggestionsHidden ? 'Show' : 'Hide'"></button>
+              </div>
+              <template x-if="!suggestionsHidden">
+                <div>
+                  <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
+                    Apps that appear to belong together — they share a registrable domain
+                    (<span class="mono">akiroo.com</span>), or a name prefix when they publish no domain
+                    (<span class="mono">fylun-</span>). Accepting a suggestion uses the ordinary group
+                    assignment (server-bound); nothing is grouped until you accept it.
+                  </p>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th>Group</th><th>Basis</th><th>Apps</th><th style="width: 200px;"></th></tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="s in visibleSuggestions" :key="s.name">
+                          <tr>
+                            <td>
+                              <strong x-text="s.name"></strong>
+                              <div class="text-muted" x-show="s.exists" style="font-size: 12px;">already exists — this adds to it</div>
+                            </td>
+                            <td class="text-muted" x-text="s.basis === 'domain' ? 'shared domain' : 'shared name prefix'"></td>
+                            <td>
+                              <template x-for="a in s.apps" :key="a.server + '/' + a.app">
+                                <div style="font-size: 13px;"><span x-text="a.app"></span> <span class="text-muted" x-text="'on ' + a.server"></span></div>
+                              </template>
+                            </td>
+                            <td>
+                              <button class="btn btn-sm btn-primary" @click="acceptSuggestion(s)" :disabled="suggestionBusy === s.name || suggestionsSaving"
+                                      x-text="suggestionBusy === s.name ? 'Grouping…' : (s.exists ? 'Add to group' : 'Create group')"></button>
+                              <button class="btn btn-sm" @click="dismissSuggestion(s.name)" title="Hide for this visit">Not now</button>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+
           <!-- Groups with their apps -->
           <template x-for="group in groupedApps()" :key="group.name">
             <div style="margin-bottom: 32px;">
@@ -2398,6 +2449,311 @@
           </template>
         </div>
       </div>
+    </div>
+  </template>
+
+  <!-- Programme B: sibling products on the fleet — discovery evidence,
+       probe verdicts, and (for Observe only) the deep connect flow. -->
+  <template x-if="$store.router.page === 'siblings'">
+    <div x-data="siblingsPage">
+
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Siblings</h1>
+          <p class="subtitle">Teploy products running on your servers, found by their labels and probed on their published ports. Nothing is connected until you confirm it.</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-sm" @click="load()">Refresh</button>
+          <button class="btn btn-sm btn-primary" @click="rescan()" :disabled="scanBusy || !cliSupported" x-text="scanBusy ? 'Scanning…' : 'Rescan now'" title="Reads each server's containers and probes the candidates — quick, read-only"></button>
+        </div>
+      </div>
+
+      <template x-if="loading">
+        <div class="loading"><div class="spinner"></div></div>
+      </template>
+
+      <template x-if="!loading && loadFailed && !showingStale">
+        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+      </template>
+
+      <template x-if="showingStale">
+        <div role="status" class="stale-banner" x-text="'Showing the last discovery — the refresh failed: ' + loadError"></div>
+      </template>
+
+      <template x-if="!loading && !cliSupported">
+        <div role="status" class="stale-banner" x-text="note"></div>
+      </template>
+
+      <template x-if="sweepError">
+        <div role="status" class="stale-banner" x-text="'The last sweep did not finish: ' + sweepError"></div>
+      </template>
+
+      <!-- Probing consent: internal addresses (tailnet, LAN) are probed only
+           when an admin allows it. The A13 rule applies: an editor cannot
+           flip this. -->
+      <template x-if="!loading && cliSupported">
+        <div class="stale-banner" role="status" style="display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;">
+          <span x-text="allowInternal
+            ? 'Probing reaches internal addresses (tailnet/LAN) — matches where siblings usually run.'
+            : 'Internal addresses (tailnet/LAN) are not probed — candidates there read “Blocked (internal)” until an admin allows it.'"></span>
+          <button class="btn btn-sm" @click="setAllowInternal(!allowInternal)" :disabled="settingsBusy"
+                  x-text="settingsBusy ? 'Saving…' : (allowInternal ? 'Stop probing internal' : 'Allow probing internal')"></button>
+        </div>
+      </template>
+
+      <template x-if="!loading && !loadFailed && servers.length === 0">
+        <div class="empty-state"><p x-text="cliSupported ? 'No servers configured, or the first sweep has not run yet.' : 'Sibling discovery needs teploy ' + minCLI + ' on the dashboard host.'"></p></div>
+      </template>
+
+      <!-- Observe connect: the one sibling with a deep flow. The owner
+           confirms the instance identity from the discovery doc BEFORE any
+           token moves; dash re-checks it on every later write. -->
+      <template x-if="!loading && cliSupported">
+        <div style="border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 16px; margin-bottom: 16px;">
+          <template x-if="observeConnected && observeConnection">
+            <div>
+              <h2 class="section-title" style="margin-bottom: 8px;">Observe <span class="status-dot dot green"></span> connected</h2>
+              <p style="margin: 0 0 8px 0;">
+                <span x-text="observeConnection.base_url"></span>
+                <span class="text-muted"> — instance <span class="mono" x-text="observeConnection.instance_id.slice(0, 8) + '…'"></span>,
+                  <span x-text="observeConnection.version || 'version unknown'"></span>,
+                  token <span class="mono" x-text="observeConnection.token_fp"></span></span>
+              </p>
+              <p class="text-muted" style="margin: 0 0 8px 0; font-size: 13px;">
+                Per-app telemetry is opt-in, one app at a time, always shown as a plan first.
+                <a x-show="observeConnection.dashboard_url" :href="observeConnection.dashboard_url" target="_blank" rel="noopener">Open Observe</a>
+              </p>
+
+              <!-- Opted-in apps -->
+              <template x-if="telemetryApps.length > 0">
+                <div style="margin: 12px 0;">
+                  <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Apps sending telemetry</h3>
+                  <table style="width: 100%; font-size: 13px;">
+                    <tbody>
+                      <template x-for="entry in telemetryApps" :key="entry.server + '/' + entry.app">
+                        <tr>
+                          <td style="padding: 4px 8px 4px 0;"><span x-text="entry.app"></span> <span class="text-muted" x-text="'on ' + entry.server"></span></td>
+                          <td class="text-muted" style="padding: 4px 8px 4px 0;" x-text="envDisplay(entry)"></td>
+                          <td style="padding: 4px 0; text-align: right;">
+                            <button type="button" class="btn btn-sm" @click="openDisable(entry)" :disabled="disableBusy">Stop telemetry</button>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <!-- Opt-in: plan → approve → apply -->
+              <form @submit.prevent="planTelemetry()" style="margin-top: 8px; display: flex; gap: 8px; align-items: end; flex-wrap: wrap;">
+                <div class="field">
+                  <label for="telemetry-server">Server</label>
+                  <input id="telemetry-server" class="form-input" style="min-width: 140px;" x-model="telemetryForm.server" list="telemetry-servers" autocomplete="off" :disabled="telemetryBusy">
+                  <datalist id="telemetry-servers">
+                    <template x-for="a in [...new Set(fleetApps.map(a => a.server))]" :key="a"><option :value="a"></option></template>
+                  </datalist>
+                </div>
+                <div class="field">
+                  <label for="telemetry-app">App</label>
+                  <input id="telemetry-app" class="form-input" style="min-width: 180px;" x-model="telemetryForm.app" list="telemetry-apps" autocomplete="off" :disabled="telemetryBusy">
+                  <datalist id="telemetry-apps">
+                    <template x-for="a in appSuggestions" :key="a.server + '/' + a.app"><option :value="a.app"></option></template>
+                  </datalist>
+                </div>
+                <button type="submit" class="btn btn-sm" :disabled="telemetryBusy || !telemetryForm.server || !telemetryForm.app"
+                        x-text="telemetryBusy ? 'Planning…' : 'Plan telemetry'"></button>
+                <button type="button" class="btn btn-sm" @click="disconnectObserve()" :disabled="connectBusy" x-text="connectBusy ? 'Working…' : 'Disconnect'"></button>
+              </form>
+
+              <template x-if="telemetryPlanError">
+                <p role="alert" style="color: var(--danger, #c0392b); margin: 8px 0; font-size: 13px;" x-text="telemetryPlanError"></p>
+              </template>
+
+              <!-- The plan: exactly what apply will do. Approving this is
+                   consenting to these writes and the redeploy. -->
+              <template x-if="telemetryPlan">
+                <div role="dialog" aria-label="Telemetry plan" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-top: 10px;">
+                  <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Plan — <span x-text="telemetryPlan.app"></span> <span class="text-muted" x-text="'on ' + telemetryPlan.server"></span></h3>
+                  <ol style="margin: 0 0 8px 0; padding-left: 20px; font-size: 13px;">
+                    <li x-text="telemetryPlan.site_action"></li>
+                    <li>mint the telemetry key “<span class="mono" x-text="telemetryPlan.key_label"></span>” for that site</li>
+                    <li>write these environment variables and secrets:
+                      <table style="width: 100%; font-size: 12px; margin-top: 4px;">
+                        <tbody>
+                          <template x-for="w in telemetryPlan.env" :key="w.key">
+                            <tr>
+                              <td class="mono" style="padding: 1px 8px 1px 0;" x-text="w.key"></td>
+                              <td class="mono" style="padding: 1px 0;" :class="w.secret ? 'text-muted' : ''" x-text="w.value"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </li>
+                    <li x-text="telemetryPlan.redeploy"></li>
+                  </ol>
+                  <p class="text-muted" style="margin: 0 0 8px 0; font-size: 12px;" x-show="telemetryPlan.rotation"
+                     x-text="telemetryPlan.rotation ? 'This replaces the previous opt-in (key ' + telemetryPlan.rotation.key_id + ') — a NEW key is minted; revoke the old one in Observe if nothing else uses it.' : ''"></p>
+                  <div style="display: flex; gap: 8px;">
+                    <button type="button" class="btn btn-sm btn-primary" @click="applyTelemetry()" :disabled="telemetryBusy"
+                            x-text="telemetryBusy ? 'Applying…' : 'Approve and apply'"></button>
+                    <button type="button" class="btn btn-sm" @click="telemetryPlan = null" :disabled="telemetryBusy">Cancel</button>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="telemetryApplied">
+                <div role="status" class="stale-banner" style="margin-top: 8px;">
+                  <span x-text="telemetryApplied.note"></span>
+                  <a :href="'/operations/' + (telemetryApplied.operation ? telemetryApplied.operation.id : '')">follow the redeploy</a>
+                </div>
+              </template>
+            </div>
+          </template>
+          <template x-if="!observeConnected">
+            <form @submit.prevent="previewDoc ? connectObserve() : previewObserve()">
+              <h2 class="section-title" style="margin-bottom: 8px;">Connect Observe</h2>
+              <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
+                Mint a service token in Observe (Settings → Service Tokens; scopes <span class="mono">sites:create</span> and <span class="mono">keys:mint</span>).
+                Dash never sees an Observe admin login, and nothing is written until you confirm this instance's identity.
+                <span x-show="observeHintData && observeHintData.available">A confirmed Observe was found on the fleet — its address is prefilled.</span>
+              </p>
+              <div style="display: grid; grid-template-columns: 2fr 2fr auto; gap: 8px; align-items: end;">
+                <div class="field">
+                  <label for="observe-base">Observe address</label>
+                  <input id="observe-base" class="form-input" x-model="connectForm.base_url" placeholder="http://observe.tailnet-host:3000" autocomplete="off" :disabled="connectBusy">
+                </div>
+                <div class="field">
+                  <label for="observe-token">Service token</label>
+                  <input id="observe-token" class="form-input" type="password" x-model="connectForm.token" placeholder="obs_svc_…" autocomplete="off" :disabled="connectBusy || !previewDoc">
+                </div>
+                <div class="field" style="padding-bottom: 6px;">
+                  <label style="display: flex; gap: 6px; align-items: center; font-weight: 400;">
+                    <input type="checkbox" x-model="connectForm.allow_internal"> allow internal
+                  </label>
+                </div>
+              </div>
+              <template x-if="previewError">
+                <p role="alert" class="text-muted" style="color: var(--danger, #c0392b); margin: 8px 0;" x-text="previewError"></p>
+              </template>
+              <template x-if="previewDoc">
+                <div role="status" class="stale-banner" style="margin: 8px 0;">
+                  <p style="margin: 0;">Discovery doc: <strong x-text="previewDoc.product"></strong>
+                    <span x-text="previewDoc.version || ''"></span>,
+                    instance <span class="mono" x-text="previewDoc.instance_id.slice(0, 8) + '…'"></span>
+                    (<span class="mono" x-text="previewDoc.instance_id"></span>)</p>
+                  <p style="margin: 4px 0 0 0;" class="text-muted"
+                     x-text="'dashboard ' + (previewDoc.dashboard_url || 'not published') + ' · ingest ' + (previewDoc.ingest_url || 'not published')"></p>
+                  <p style="margin: 4px 0 0 0;">Confirm this is the Observe you mean, then paste the token and connect.</p>
+                </div>
+              </template>
+              <div style="margin-top: 8px; display: flex; gap: 8px;">
+                <button type="button" class="btn btn-sm" @click="previewObserve()" :disabled="connectBusy || !connectForm.base_url"
+                        x-text="connectBusy ? 'Reading…' : (previewDoc ? 'Re-read' : 'Preview the instance')"></button>
+                <button type="submit" class="btn btn-sm btn-primary" x-show="previewDoc" :disabled="connectBusy || !connectForm.token"
+                        x-text="connectBusy ? 'Connecting…' : 'Connect this instance'"></button>
+              </div>
+            </form>
+          </template>
+        </div>
+      </template>
+
+      <!-- Candidates: one row per (server, product) with the probe verdict.
+           Honest unknowns stay unknown — nothing renders as “no siblings”
+           when a server was only partly read. -->
+      <template x-if="candidates.length > 0">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Probe</th>
+                <th>Where</th>
+                <th>Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="c in candidates" :key="c.server + '/' + c.product">
+                <tr>
+                  <td>
+                    <strong x-text="c.product"></strong>
+                    <span class="text-muted" x-show="c.label_version" x-text="c.label_version"></span>
+                    <div class="text-muted" x-show="!c.recognized" title="The CLI did not recognise this product label; it is shown as reported">unrecognised label</div>
+                  </td>
+                  <td>
+                    <span class="status-dot dot" :class="probeClass(c.state)"></span>
+                    <span x-text="probeLabel(c.state)"></span>
+                    <div class="text-muted" x-text="'probed ' + ageLabel(c.age_seconds)"></div>
+                  </td>
+                  <td>
+                    <div x-text="c.server"></div>
+                    <div class="text-muted mono" style="font-size: 12px;" x-text="(c.addresses || []).join(', ') || 'no published port'"></div>
+                    <div class="text-muted" x-show="c.container_state && c.container_state !== 'running'" x-text="'container ' + c.container_state"></div>
+                  </td>
+                  <td>
+                    <div x-text="probeHint(c)"></div>
+                    <div class="text-muted mono" style="font-size: 12px;" x-show="c.doc && c.doc.dashboard_url"><a :href="c.doc.dashboard_url" target="_blank" rel="noopener" x-text="c.doc.dashboard_url"></a></div>
+                    <div class="text-muted" x-show="c.base_url && (!c.doc || !c.doc.dashboard_url)"><a :href="c.base_url" target="_blank" rel="noopener" x-text="c.base_url"></a></div>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <!-- Stopping telemetry: the dialog names exactly what goes, and that
+           the site and key live on in Observe until revoked there. -->
+      <div class="dialog-overlay" x-show="confirmDisable" @click.self="confirmDisable = null" @keydown.escape.window="confirmDisable && (confirmDisable = null)" x-cloak>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="observe-disable-title" tabindex="-1" x-effect="confirmDisable && $nextTick(() => $el.focus())">
+          <h2 id="observe-disable-title">Stop telemetry for <span x-text="confirmDisable ? confirmDisable.app : ''"></span>?</h2>
+          <template x-if="confirmDisable">
+            <div>
+              <p>These environment variables and secrets come off the app:</p>
+              <p class="mono text-muted" style="font-size: 12px;" x-text="envDisplay(confirmDisable)"></p>
+              <p class="text-muted">A redeploy is queued so the app restarts without them. The site and the telemetry key stay in Observe — revoke the key there if you want it dead.</p>
+              <div class="dialog-actions">
+                <button type="button" class="btn" @click="confirmDisable = null">Keep it</button>
+                <button type="button" class="btn btn-danger" @click="disableTelemetry()" :disabled="disableBusy" x-text="disableBusy ? 'Stopping…' : 'Stop telemetry'"></button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Per-server read state: which reports are complete, partial or
+           missing, with their age. -->
+      <template x-if="servers.length > 0">
+        <div>
+          <h2 class="section-title" style="margin-top: 24px;">Server reads</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Server</th>
+                  <th>Read</th>
+                  <th>Last report</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in servers" :key="row.server">
+                  <tr>
+                    <td x-text="row.server"></td>
+                    <td>
+                      <span class="status-dot dot" :class="serverStateClass(row.state)"></span>
+                      <span x-text="serverStateLabel(row.state)"></span>
+                      <div class="text-muted" x-show="row.error" x-text="row.error"></div>
+                    </td>
+                    <td>
+                      <div x-text="ageLabel(row.age_seconds)"></div>
+                      <div class="text-muted" x-show="!row.checked_at">never completed</div>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
     </div>
   </template>
 

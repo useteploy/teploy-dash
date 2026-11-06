@@ -8,6 +8,47 @@ All notable changes to teploy-dash are recorded here.
 
 ### Added
 
+- **Siblings — product discovery** (Programme B item 1, plan section 10.1;
+  needs teploy v0.1.53 on the dashboard host, capability `siblings-v1`):
+  - `GET /api/siblings` and the **Siblings** page: every Teploy product the
+    CLI's label report finds on the fleet (`teploy server siblings --json`,
+    hourly sweep + on-demand rescan, cached in `<data>/siblings.json`), each
+    candidate probed on its published ports for `/.well-known/teploy.json`
+    (the forgejo family for `/api/v1/version`). Verdicts are honest:
+    confirmed (with the doc's product, version, instance id and published
+    URLs), found-not-discoverable (Ship ships discovery off), no answer, not
+    probeable from dash, or blocked (internal). Unknown `dev.teploy.product`
+    values pass through and render as unrecognised labels.
+  - Probes run on the monitor network guard; tailnet/LAN addresses are probed
+    only after an admin allows internal probing (audited; an editor cannot
+    flip it — the A13 rule). A failed sweep keeps the last report with its
+    age; a partially-read server is never shown as "no siblings".
+  - The nav switcher fills from CONFIRMED discovery docs' `dashboard_url`
+    only (never guessed; `TEPLOY_NAV_*_URL` still wins, the fleet-name
+    fallback stays); a confirmed forgejo joins as a plain link.
+- **Observe connect + per-app telemetry** (Programme B items 2-4): connect
+  with an Observe service token (minted in Observe Settings; dash never sees
+  an Observe admin login). Two-step connect — preview the instance so the
+  owner confirms its id from the discovery doc BEFORE any token moves, then
+  paste the token; dash re-reads the doc, enforces the confirmed id, and
+  verifies the token with a harmless authenticated read. The token persists
+  in `~/.teploy/observe.json` (0600; the notifications.json secrets-file
+  pattern), surfaces only as a fingerprint, and is scrubbed from every
+  stored or answered error. Per-app telemetry is opt-in, plan-first: the plan
+  names the site (by `external_ref`, created if absent), the labelled
+  telemetry key, every env/secret write (the OBSERVE_*/OTEL_* contract,
+  `$TEPLOY_VERSION` written literally as specified) and the redeploy;
+  approval sends the plan's fingerprint and apply refuses if anything moved.
+  Values ride the CLI's stdin contracts; the minted key appears in no
+  response, record or log. Stop-telemetry removes exactly the recorded keys
+  and says the site/key live on in Observe until revoked there.
+- **Group suggestions** (Programme B item 7): `GET /api/group-suggestions`
+  and a Projects-page section — apps sharing a registrable domain
+  (`golang.org/x/net/publicsuffix`, new dependency) or a name prefix,
+  singletons dropped, already-grouped apps never suggested. Accepting uses
+  the ordinary groups API (create + server-bound assignment), one suggestion
+  at a time; dash never writes a group on its own.
+
 - **Dash Backups** (plan P2, the dash half of Slice 4; needs teploy v0.1.52 on
   the dashboard host, capability `backup-fleet-v1`; older CLIs get a note and an
   empty page — the engine runs on each server, not here):
@@ -81,6 +122,9 @@ All notable changes to teploy-dash are recorded here.
 
 ### Changed
 
+- README: the groups overlay wording — dash is the only writer of
+  `~/.teploy/groups.json`; the CLI no longer reads or writes it (the stale
+  "format-compatible with the CLI's embedded UI" claim removed).
 - Fleet monitors: a new host-ingress domain gets a monitor only when a route on any
   server names it or public DNS answers. Existing monitors are never retired on the
   absence of that evidence.

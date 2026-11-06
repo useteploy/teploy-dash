@@ -360,3 +360,30 @@ func TestContractsCorpusServerAuditConfirmNames(t *testing.T) {
 		}
 	}
 }
+
+// Programme B (corpus rev 20): the siblings fixtures — the mixed scenario
+// (a second Dash, Observe on the tailnet, a forgejo, a multi-container app,
+// an unknown-labeled product) and the empty fleet — run through dash's real
+// decode, and the mixed one must group into the products the page probes.
+func TestContractsCorpusSiblingsEnvelopeDecodes(t *testing.T) {
+	raw := readCorpusFixture(t, "siblings-envelope/valid/mixed.json")
+	env, err := decodeSiblingsEnvelope(raw)
+	if err != nil {
+		t.Fatalf("siblings fixture must decode through dash's siblings path: %v", err)
+	}
+	if env.State != "ok" || env.Server != "infra-home" || len(env.Siblings) != 4 || len(env.UnknownLabeled) != 1 {
+		t.Fatalf("mixed fixture = %s/%s with %d+%d rows", env.State, env.Server, len(env.Siblings), len(env.UnknownLabeled))
+	}
+	rows := append(append([]siblingRow{}, env.Siblings...), env.UnknownLabeled...)
+	groups := groupSiblingRows(rows)
+	if len(groups) != 4 {
+		t.Fatalf("mixed fixture groups into %d products, want 4 (dash, observe×2 containers, forgejo, lullmail)", len(groups))
+	}
+	empty, err := decodeSiblingsEnvelope(readCorpusFixture(t, "siblings-envelope/valid/none.json"))
+	if err != nil {
+		t.Fatalf("none fixture must decode: %v", err)
+	}
+	if len(empty.Siblings) != 0 || empty.State != "ok" {
+		t.Fatalf("none fixture = %+v, want an empty ok report", empty)
+	}
+}

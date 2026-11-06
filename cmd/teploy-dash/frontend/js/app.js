@@ -350,6 +350,7 @@ document.addEventListener('alpine:init', () => {
     { page: 'domains', path: '/domains' },
     { page: 'cleanup', path: '/cleanup' },
     { page: 'cleanup-detail', path: '/cleanup/:server' },
+    { page: 'siblings', path: '/siblings' },
     { page: 'backups', path: '/backups' },
     { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
@@ -556,11 +557,18 @@ document.addEventListener('alpine:init', () => {
     deployingToGroup: null,
     deploying: false,
     deployForm: { app: '', image: '', domain: '', server: '', port: 80 },
+    // Group suggestions (Programme B item 7): a diff accepted one at a time.
+    suggestions: [],
+    suggestionBusy: '',
+    suggestionsSaving: false,
+    suggestionsHidden: false,
+    dismissedSuggestions: {},
     _alive: true,
     _staleRetry: null,
 
     async init() {
       await this.load();
+      await this.loadSuggestions();
     },
 
     destroy() {
@@ -678,6 +686,50 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.deploying = false;
       }
+    },
+
+    // ── Group suggestions: one accept at a time, through the same API a
+    // person uses (create if needed, then server-bound assignment per app).
+    async loadSuggestions() {
+      try {
+        const data = await api.get('/api/group-suggestions');
+        this.suggestions = (data && data.suggestions) || [];
+      } catch (e) {
+        this.suggestions = [];
+      }
+    },
+
+    get visibleSuggestions() {
+      return (this.suggestions || []).filter(s => !this.dismissedSuggestions[s.name]);
+    },
+
+    dismissSuggestion(name) {
+      this.dismissedSuggestions[name] = true;
+    },
+
+    async acceptSuggestion(s) {
+      if (this.suggestionsSaving) return;
+      this.suggestionBusy = s.name;
+      this.suggestionsSaving = true;
+      try {
+        if (!s.exists) {
+          // Creating a group that appeared meanwhile is not an error.
+          await api.post('/api/groups', { name: s.name }).catch(e => {
+            if (e.status !== 409) throw e;
+          });
+        }
+        for (const a of s.apps) {
+          await api.post('/api/groups/' + encodeURIComponent(s.name) + '/apps', { app: a.app, server: a.server });
+        }
+        showToast('Grouped ' + s.apps.map(a => a.app).join(', ') + ' under ' + s.name, 'success');
+        await this.load({ silent: true });
+        await this.loadSuggestions();
+      } catch (e) {
+        showToast(e.message, 'error');
+        await this.loadSuggestions();
+      }
+      this.suggestionBusy = '';
+      this.suggestionsSaving = false;
     },
 
     get filteredApps() {
@@ -4049,6 +4101,273 @@ document.addEventListener('alpine:init', () => {
       if (c.info) parts.push(c.info + ' info');
       if (c.dismissed) parts.push(c.dismissed + ' dismissed');
       return parts.length ? parts.join(', ') : 'no findings';
+    },
+  }));
+
+  // ── Siblings Page (Programme B: discovery + Observe connect) ──
+  Alpine.data('siblingsPage', () => withAsyncLoad({
+    servers: [],
+    candidates: [],
+    allowInternal: false,
+    cliSupported: true,
+    minCLI: '',
+    note: '',
+    sweepError: '',
+    scanBusy: false,
+    settingsBusy: false,
+    // Observe connect (the one sibling with a deep flow).
+    observeConnected: false,
+    observeConnection: null,
+    observeHintData: null,
+    connectForm: { base_url: '', token: '', allow_internal: false },
+    connectBusy: false,
+    previewDoc: null,
+    previewError: '',
+    _loadGeneration: 0,
+    _alive: false,
+
+    async init() {
+      this._alive = true;
+      await this.load();
+      await this.loadObserve();
+      await this.loadTelemetry();
+      this.refreshInterval = setInterval(() => { if (this._alive) { this.load(); this.loadObserve(); } }, 60000);
+    },
+
+    destroy() {
+      this._alive = false;
+      clearInterval(this.refreshInterval);
+      this._loadGeneration++;
+    },
+
+    async load() {
+      const generation = ++this._loadGeneration;
+      try {
+        const data = await api.get('/api/siblings');
+        if (generation !== this._loadGeneration) return;
+        this.servers = data.servers || [];
+        this.candidates = data.candidates || [];
+        this.allowInternal = !!data.allow_internal;
+        this.cliSupported = !!data.cli_supported;
+        this.minCLI = data.min_cli_version || '';
+        this.note = data.note || '';
+        this.sweepError = data.sweep_error || '';
+        this.loadError = null;
+        this.loadedAt = new Date().toISOString();
+      } catch (e) {
+        if (generation !== this._loadGeneration) return;
+        this.loadError = `Could not load sibling discovery: ${e.message}`;
+      }
+      this.loading = false;
+    },
+
+    async loadObserve() {
+      try {
+        const data = await api.get('/api/observe');
+        this.observeConnected = !!data.connected;
+        this.observeConnection = data.connection || null;
+        this.observeHintData = data.hint || null;
+        this.telemetryApps = data.apps || [];
+        if (!this.observeConnected && !this.connectForm.base_url && data.hint && data.hint.base_url) {
+          this.connectForm.base_url = data.hint.base_url;
+        }
+      } catch (e) {
+        // The connect card stays collapsed; the candidates table above
+        // carries the page's main content.
+      }
+    },
+
+    async rescan() {
+      if (this.scanBusy) return;
+      this.scanBusy = true;
+      try {
+        await api.post('/api/siblings/scan', {});
+        showToast('Sibling sweep started — the page refreshes as it lands', 'success');
+        setTimeout(() => { if (this._alive) this.load(); }, 4000);
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.scanBusy = false;
+    },
+
+    async setAllowInternal(value) {
+      if (this.settingsBusy) return;
+      this.settingsBusy = true;
+      try {
+        const data = await api.post('/api/siblings/settings', { allow_internal: value });
+        this.allowInternal = !!data.allow_internal;
+        showToast(value ? 'Internal addresses will be probed' : 'Internal addresses are no longer probed', 'success');
+        await this.rescan();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.settingsBusy = false;
+    },
+
+    // Step 1 of connect: read the discovery doc so the owner confirms the
+    // instance identity BEFORE any token is sent.
+    async previewObserve() {
+      this.previewDoc = null;
+      this.previewError = '';
+      this.connectBusy = true;
+      try {
+        const url = '/api/observe/preview?url=' + encodeURIComponent(this.connectForm.base_url) +
+          '&allow_internal=' + encodeURIComponent(!!this.connectForm.allow_internal);
+        this.previewDoc = await api.get(url);
+      } catch (e) {
+        this.previewError = e.message;
+      }
+      this.connectBusy = false;
+    },
+
+    // Step 2: paste the token, confirm the instance the preview showed.
+    // Dash re-checks the doc server-side; a doc that moved between preview
+    // and connect refuses.
+    async connectObserve() {
+      if (!this.previewDoc) return;
+      this.connectBusy = true;
+      try {
+        await api.post('/api/observe/connect', {
+          base_url: this.connectForm.base_url,
+          token: this.connectForm.token,
+          confirm_instance_id: this.previewDoc.instance_id,
+          allow_internal: !!this.connectForm.allow_internal,
+        });
+        this.connectForm.token = '';
+        this.previewDoc = null;
+        showToast('Connected to Observe', 'success');
+        await this.loadObserve();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.connectBusy = false;
+    },
+
+    async disconnectObserve() {
+      this.connectBusy = true;
+      try {
+        const out = await api.del('/api/observe/connection');
+        showToast((out && out.note) || 'Disconnected from Observe', 'info');
+        await this.loadObserve();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.connectBusy = false;
+    },
+
+    // ── per-app telemetry opt-in (plan first, approve, then apply) ──
+    fleetApps: [],
+    telemetryForm: { server: '', app: '' },
+    telemetryPlan: null,
+    telemetryPlanError: '',
+    telemetryBusy: false,
+    telemetryApplied: null,
+    confirmDisable: null,
+    disableBusy: false,
+
+    async loadTelemetry() {
+      try {
+        const apps = await api.get('/api/apps');
+        this.fleetApps = Array.isArray(apps) ? apps : [];
+      } catch (e) {
+        this.fleetApps = [];
+      }
+    },
+
+    get appSuggestions() {
+      return this.fleetApps.filter(a => !this.telemetryForm.server || a.server === this.telemetryForm.server);
+    },
+
+    async planTelemetry() {
+      this.telemetryPlan = null;
+      this.telemetryPlanError = '';
+      this.telemetryApplied = null;
+      this.telemetryBusy = true;
+      try {
+        const q = '?server=' + encodeURIComponent(this.telemetryForm.server) + '&app=' + encodeURIComponent(this.telemetryForm.app);
+        this.telemetryPlan = await api.get('/api/observe/telemetry/plan' + q);
+      } catch (e) {
+        this.telemetryPlanError = e.message;
+      }
+      this.telemetryBusy = false;
+    },
+
+    async applyTelemetry() {
+      if (!this.telemetryPlan) return;
+      this.telemetryBusy = true;
+      try {
+        const out = await api.post('/api/observe/telemetry', {
+          server: this.telemetryForm.server,
+          app: this.telemetryForm.app,
+          fingerprint: this.telemetryPlan.fingerprint,
+        });
+        this.telemetryApplied = out;
+        this.telemetryPlan = null;
+        this.telemetryForm = { server: '', app: '' };
+        showToast('Telemetry wired — redeploy queued', 'success');
+        await this.loadTelemetry();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.telemetryBusy = false;
+    },
+
+    openDisable(entry) { this.confirmDisable = entry; },
+    async disableTelemetry() {
+      const e = this.confirmDisable;
+      if (!e) return;
+      this.disableBusy = true;
+      try {
+        await api.post('/api/observe/telemetry/disable', { server: e.server, app: e.app });
+        this.confirmDisable = null;
+        showToast('Telemetry unwired — redeploy queued', 'success');
+        await this.loadTelemetry();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+      this.disableBusy = false;
+    },
+
+    envDisplay(entry) {
+      return (entry.env_keys || []).concat((entry.secret_keys || []).map(k => k + ' (secret)')).join(', ');
+    },
+
+    serverStateLabel(state) {
+      return { ok: 'Read complete', partial: 'Partially read', unreachable: 'Unreachable', never: 'Not swept yet' }[state] || state;
+    },
+    serverStateClass(state) {
+      return { ok: 'green', partial: 'yellow', unreachable: 'red', never: 'gray' }[state] || 'gray';
+    },
+    probeLabel(state) {
+      return {
+        confirmed: 'Confirmed',
+        found_not_discoverable: 'Found, not discoverable',
+        unreachable: 'No answer',
+        not_probeable: 'Not probeable from dash',
+        blocked_internal: 'Blocked (internal)',
+      }[state] || state;
+    },
+    probeClass(state) {
+      return { confirmed: 'green', found_not_discoverable: 'yellow', unreachable: 'red', not_probeable: 'gray', blocked_internal: 'gray' }[state] || 'gray';
+    },
+    probeHint(candidate) {
+      if (candidate.state === 'confirmed' && candidate.doc) {
+        const bits = [candidate.doc.product + (candidate.doc.version ? ' ' + candidate.doc.version : '')];
+        if (candidate.doc.instance_id) bits.push('instance ' + candidate.doc.instance_id.slice(0, 8) + '…');
+        if (!candidate.doc.dashboard_url) bits.push('no dashboard URL published');
+        if (!candidate.doc.ingest_url) bits.push('no ingest URL published');
+        return bits.join(' · ');
+      }
+      return candidate.error || '';
+    },
+    ageLabel(seconds) {
+      if (seconds === undefined || seconds === null) return 'never';
+      if (seconds < 90) return 'just now';
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 120) return `${minutes} min ago`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 48) return `${hours} h ago`;
+      return `${Math.round(hours / 24)} days ago`;
     },
   }));
 

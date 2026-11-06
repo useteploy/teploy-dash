@@ -10,6 +10,67 @@ Open items: 0 P2 improvements, deferred findings (design/architecture)
 listed per pass below, 2 upstream (teploy-cli) items (both already fixed and
 adopted), plus recorded residuals inside partially-fixed findings.
 
+## 2026-11-05 Programme B (siblings, Observe connect, group suggestions) — deferred and recorded residuals
+
+Branch `programme-b-dash` (plan `_internal/DASH_AUTOCONFIG_PLAN_2026-11-03.md`
+section 10, items 1, 4 and 7). Built: the siblings fleet scan + probe cache
+(`<data>/siblings.json`, capability `siblings-v1`), the Siblings page, nav fill
+from confirmed discovery docs only, the Observe connect flow (service token,
+instance-confirmed, verified) with per-app telemetry opt-in (plan-first,
+fingerprinted approval, redeploy as a durable operation), group suggestions
+(`GET /api/group-suggestions`, accepted one at a time through the existing
+groups API). Open:
+
+- **The Observe service token is stored in plaintext.** Chose
+  `~/.teploy/observe.json` (0600, atomic write) — exactly the existing
+  secrets-file pattern for dash's own secrets (`notifications.json` holds SMTP
+  passwords and channel tokens the same way). The age-encrypted Dash secrets
+  file remains the deferred P2 item recorded under Slice 3; when it lands this
+  record moves into it. The token never appears in an API response (only
+  sha256[:12]), audit row, log line or stored error (scrubbed).
+- **Observe API mismatch worked around: no list-sites read.** The service API
+  (`docs/service-tokens.md`, `service_routes.go`) offers only per-site scoped
+  reads, so token verification calls `GET /api/v1/service/sites/<random
+  id>/alerts/rules`: the guard's own ordering makes 401 = refused and
+  403/404 = authenticated, with no side effects. The cost is one "denied"
+  audit row on Observe's trail per verification — Observe's designed answer to
+  token-shaped calls, but a cheap authenticated whoami/list read would remove
+  the noise. Reported to teploy-observe (upstream).
+- **`$TEPLOY_VERSION` is written literally** in `OTEL_RESOURCE_ATTRIBUTES`, as
+  the programme contract specifies. Observe's SDKs read the attribute
+  verbatim today (`sdk/go/env.go` does no `$ref` expansion), so `Release`
+  shows the literal until an SDK expands container-env references; the value
+  is correct for any consumer that does expand (the container itself has
+  `TEPLOY_VERSION` from the CLI). Owes an Observe-side decision; not worked
+  around here because inventing a second env format would fork the contract.
+- **Re-apply rotates keys.** Observe mints a new telemetry key on every call,
+  so a repeated opt-in leaves the previous key as a spare until revoked in
+  Observe (the plan text says so). Dash records only the newest key id; it
+  does not track the spares.
+- **A failed apply is honest but not rolled back.** Env writes that landed
+  stand (named in the error), no opt-in record is kept, and a re-run is safe
+  (site create is idempotent) — modulo the key-rotation note above.
+- **The siblings sweep is inline, not an operation.** `server siblings` is one
+  SSH read + docker inspect per server (seconds), so it sweeps like domain
+  health (hourly + on-demand) rather than riding the operation queue like the
+  five-minute `server audit`. If big fleets prove it slow, wrapping it as an
+  operation is mechanical (the audit path shows how).
+- **Probing consent is fleet-wide, not per candidate.** One `allow_internal`
+  switch covers all probes (an admin act, audited, A13 rule). Per-destination
+  consent like monitors' would need a UI per candidate; nothing in the plan
+  asked for that granularity.
+- **Group suggestions read the warm fleet cache only** (like nav; no SSH is
+  triggered). Apps the cache has not seen cannot be suggested, and an app
+  serving several registrable domains evidences each — accepting one
+  suggestion groups it out of the rest on the next read (deliberate; the
+  diff is advisory until accepted). Suggestions carry no persistence: a
+  dismissed suggestion reappears next visit (the section is collapsible).
+- **`GET /api/observe` and everything under it is administer.credentials** —
+  the connect flow pastes and stores a credential and mints keys, so the
+  whole surface is admin work like storage connect. The connection view
+  itself is non-secret; splitting it out is possible if a viewer-visible
+  status is ever wanted.
+
 ## 2026-11-05 Slice 4 dash half (Dash Backups, P2) — deferred and recorded residuals
 
 Branch `dash-backups` (plan section 6). Built: fleet status sweep + Backups page,
@@ -64,8 +125,8 @@ allowlist with server-enforced typed confirmations, audited dismissals with
 retire-on-cleared semantics, capability `server-audit-v1`, contracts pin rev 19.
 Open:
 
-- **Release order.** The gate names v0.1.53 (released); the Dockerfiles still
-  bundle v0.1.52 — bump `TEPLOY_VERSION` when this ships, as Slice 5 did.
+- **Release order.** Resolved: c70a075 bumped both Dockerfiles to bundle
+  v0.1.53, matching the gate.
 - **No background audit cadence.** Audits run only when asked (button or
   post-remedy offer). A fleet sweep every N minutes was deliberately not built:
   one audit is a multi-minute SSH burst per server, and nothing in the plan
