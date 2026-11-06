@@ -364,6 +364,72 @@ disk pressure — each finding with its evidence, size and severity.
   read the server and no longer reports the finding retires the dismissal; a
   partial or unreachable audit retires nothing (missing is not cleared).
 
+### Siblings (product discovery)
+
+**Siblings** answers "what other Teploy products run on my fleet, and can I trust
+it?" with the CLI's label report (`teploy server siblings --json`, capability
+`siblings-v1`, teploy v0.1.53) plus dash's own probe: each candidate's published
+ports are tried for the product's discovery endpoint (`/.well-known/teploy.json`;
+the forgejo family answers `/api/v1/version`), short timeout, read-only.
+
+- Probes run on the monitor network guard: tailnet/LAN addresses are probed only
+  after an admin allows internal probing (the same rule as internal monitors —
+  an editor cannot flip it), and loopback-only binds read "not probeable from
+  dash" instead of pretending.
+- Verdicts are honest: **confirmed** (a discovery doc answered, with its product,
+  version, instance id and published URLs), **found, not discoverable** (the
+  product answered but ships discovery off — Ship does by default), **no
+  answer**, **not probeable**, or **blocked (internal)**. A doc with no
+  dashboard or ingest URL says so — dash never guesses one.
+- Products the CLI does not recognise pass through and render as unrecognised
+  labels, so a product newer than the CLI stays visible.
+- The **nav switcher** fills only from confirmed docs' own `dashboard_url`
+  (explicit `TEPLOY_NAV_*_URL` still wins, the fleet-name fallback stays); a
+  confirmed forgejo joins as a plain link. The sweep runs hourly, cached in
+  `<data>/siblings.json`; **Rescan now** re-reads on demand.
+
+### Observe connect
+
+Observe is the one sibling with a deep connect flow (the Observe side:
+`docs/service-tokens.md`). **Connect Observe** on the Siblings page:
+
+1. Mint a service token in Observe (Settings → Service Tokens; scopes
+   `sites:create` and `keys:mint` at minimum). Dash never sees an Observe admin
+   login.
+2. **Preview the instance**: dash reads the unauthenticated discovery doc so you
+   confirm the instance id *before* any token moves. Connect re-reads the doc and
+   enforces the confirmed id, then verifies the token with a harmless
+   authenticated read.
+3. The token is stored in `~/.teploy/observe.json` (0600, atomic — the same
+   secrets-file pattern as `notifications.json`); the UI ever shows only a
+   fingerprint, and errors are scrubbed of the token before they are stored or
+   answered. Disconnect forgets it and tells you to revoke it in Observe.
+
+**Per-app telemetry** is opt-in, one app at a time, and always a plan first: the
+plan names the site that will be ensured by `external_ref` (created if absent —
+idempotent), the labelled telemetry key that will be minted, every environment
+write (`OBSERVE_ENDPOINT`, `OBSERVE_API_KEY` (secret),
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` (secret),
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, `OTEL_SERVICE_NAME`,
+`OTEL_RESOURCE_ATTRIBUTES=service.version=$TEPLOY_VERSION,…`), and the redeploy
+that makes them reach the container. Approving the plan sends its fingerprint;
+apply recomputes the plan and refuses if anything moved. Values ride the CLI's
+stdin contracts, never argv; the minted key appears in no response, record or
+log. **Stop telemetry** removes exactly the recorded keys, redeploys, and says
+the site and key live on in Observe until revoked there. Before every write dash
+re-checks the discovery doc's instance id — a restored Observe behind the same
+URL refuses until you reconnect.
+
+### Group suggestions
+
+The Projects page offers **suggested groups**: apps that share a registrable
+domain (`publicsuffix` — the union of an app's domains, so `www.` and subdomains
+fold into one), or — when they publish no domain — the first hyphen token of
+their name. Singletons never appear; an app already in any group is never
+suggested; dash never writes a group itself. Accepting a suggestion uses the
+ordinary groups API (create, then server-bound assignment per app) — one
+suggestion at a time, your click, your groups.
+
 ### Alerting
 
 **Incidents, not flips.** A monitor opens an incident after `fail_after`
@@ -685,6 +751,17 @@ so the direct role claim is available here and takes precedence over groups.
 | POST | `/api/cleanup/{server}/audit` | Queue a durable `server audit` operation (one per server at a time; 409 while one is live). `execute.deploy`. |
 | POST | `/api/cleanup/{server}/remedy` | Run a finding's remedy as an operation: `{id, confirm}`; `confirm` must be the finding's app or subject name exactly when the remedy is destructive. The command is rebuilt from dash's allowlist, never passed through from the envelope. `execute.deploy`. |
 | POST | `/api/cleanup/{server}/dismiss` `/undismiss` | Hide or restore a finding by id (audited; a full audit that no longer reports the finding retires the dismissal). `execute.mutate`. |
+| GET | `/api/siblings` | Sibling discovery: per-server read state and one probe row per (server, product) with its verdict (`confirmed` / `found_not_discoverable` / `unreachable` / `not_probeable` / `blocked_internal`), the discovery doc when confirmed, and the `allow_internal` setting. `view.metadata`. |
+| POST | `/api/siblings/scan` | Start a sweep now (409 while one runs). `execute.mutate`. |
+| POST | `/api/siblings/settings` | `{allow_internal}` — probe tailnet/LAN addresses. Admin session required to flip (the A13 rule); audited. `execute.mutate`. |
+| GET | `/api/observe` | Observe connection state (token as fingerprint only), per-app telemetry opt-ins, and the confirmed-probe prefill hint. `administer.credentials`. |
+| GET | `/api/observe/preview?url=&allow_internal=` | Read the discovery doc at an address so the instance id can be confirmed before any token moves. `administer.credentials`. |
+| POST | `/api/observe/connect` | `{base_url, token, confirm_instance_id, allow_internal}` — the confirmed id must match the doc; the token is verified with a harmless read; stored 0600 in `~/.teploy/observe.json`. `administer.credentials`. |
+| DELETE | `/api/observe/connection` | Forget the connection (the token stays valid in Observe until revoked there). `administer.credentials`. |
+| GET | `/api/observe/telemetry/plan?server=&app=` | The exact apply plan (site ensure, key mint, every env/secret write, the redeploy) with a fingerprint. No side effects. `administer.credentials`. |
+| POST | `/api/observe/telemetry` | `{server, app, fingerprint}` — apply the approved plan; a moved fingerprint refuses (409). Needs `execute.deploy` too (the redeploy). |
+| POST | `/api/observe/telemetry/disable` | `{server, app}` — remove exactly the recorded env/secret keys, queue the redeploy. `administer.credentials` + `execute.deploy`. |
+| GET | `/api/group-suggestions` | Grouping diff: apps that share a registrable domain (or name prefix), never grouped apps, singletons dropped. `view.metadata`. |
 | GET | `/api/alerts/incidents` | Open incidents and held (suppressed) rules. `view.metadata`. |
 | GET | `/api/alerts/deliveries` | Recent alert deliveries (delivered, pending, dead-lettered, suppressed) and per-channel health. `view.metadata`. |
 | GET / POST | `/api/alerts/silences` | Active silences / create `{scope: all\|app\|monitor, target, reason, duration_minutes}`. POST is `execute.mutate`. |
