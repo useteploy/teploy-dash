@@ -4,6 +4,8 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-11-05
+
 ## [0.1.23] - 2026-11-05
 
 ## [0.1.22] - 2026-11-05
