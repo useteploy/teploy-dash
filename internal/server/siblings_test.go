@@ -230,7 +230,13 @@ func newSiblingsTestServer(t *testing.T, envelope string) *siblingsTestServer {
 		}
 		return &cli.Result{Stdout: "{}"}, nil
 	}
-	s := New(Config{DataDir: t.TempDir(), NoAuth: true, CLIRunner: runner.run})
+	s := New(Config{
+		DataDir:      t.TempDir(),
+		NoAuth:       true,
+		CLIInstalled: func() bool { return true },
+		CLIRunner:    runner.run,
+		CLIIdentity:  func() string { return "test-cli" },
+	})
 	return &siblingsTestServer{Server: s, runner: runner}
 }
 
@@ -295,6 +301,9 @@ func TestSiblingsSweepFailureKeepsLastReport(t *testing.T) {
 	s.siblings.mu.Lock()
 	defer s.siblings.mu.Unlock()
 	rec := s.siblings.snap.Servers["prod"]
+	if rec == nil {
+		t.Fatal("the failed sweep must keep the server's record")
+	}
 	if rec.State != "unreachable" || !strings.Contains(rec.Error, "connection refused") {
 		t.Fatalf("record = %+v, want unreachable with the sanitized error", rec)
 	}

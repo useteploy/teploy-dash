@@ -320,7 +320,7 @@ func TestObserveConnectGatedOnSiblingsCapability(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	runner := &configRunner{tokens: []string{}} // no siblings-v1
 	_ = runner
-	s := New(Config{DataDir: t.TempDir(), NoAuth: true, CLIRunner: runner.run})
+	s := New(Config{DataDir: t.TempDir(), NoAuth: true, CLIInstalled: func() bool { return true }, CLIRunner: runner.run})
 	rec := postObserve(t, s, "/api/observe/connect", `{"base_url":"http://x","token":"obs_svc_x","confirm_instance_id":"y"}`)
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("gated connect = %d, want 501: %s", rec.Code, rec.Body.String())
