@@ -55,7 +55,7 @@ import (
 
 // siblingsMinCLI is the release that brings `server siblings`: a CLI that
 // does not advertise siblings-v1 reads as unsupported, whatever its version.
-const siblingsMinCLI = "v0.1.53"
+const siblingsMinCLI = "v0.1.54"
 
 const (
 	// siblingsSweepInterval: siblings change rarely (a deploy), so an hour
