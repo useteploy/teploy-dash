@@ -2455,6 +2455,75 @@
         <div class="empty-state"><p x-text="cliSupported ? 'No servers configured, or the first sweep has not run yet.' : 'Sibling discovery needs teploy ' + minCLI + ' on the dashboard host.'"></p></div>
       </template>
 
+      <!-- Observe connect: the one sibling with a deep flow. The owner
+           confirms the instance identity from the discovery doc BEFORE any
+           token moves; dash re-checks it on every later write. -->
+      <template x-if="!loading && cliSupported">
+        <div style="border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 16px; margin-bottom: 16px;">
+          <template x-if="observeConnected && observeConnection">
+            <div>
+              <h2 class="section-title" style="margin-bottom: 8px;">Observe <span class="status-dot dot green"></span> connected</h2>
+              <p style="margin: 0 0 8px 0;">
+                <span x-text="observeConnection.base_url"></span>
+                <span class="text-muted"> — instance <span class="mono" x-text="observeConnection.instance_id.slice(0, 8) + '…'"></span>,
+                  <span x-text="observeConnection.version || 'version unknown'"></span>,
+                  token <span class="mono" x-text="observeConnection.token_fp"></span></span>
+              </p>
+              <p class="text-muted" style="margin: 0 0 8px 0; font-size: 13px;">
+                Per-app telemetry appears on each app below once you opt it in. The service token stays on this dash; revoke it in Observe Settings → Service Tokens.
+                <a x-show="observeConnection.dashboard_url" :href="observeConnection.dashboard_url" target="_blank" rel="noopener">Open Observe</a>
+              </p>
+              <button class="btn btn-sm" @click="disconnectObserve()" :disabled="connectBusy" x-text="connectBusy ? 'Working…' : 'Disconnect'"></button>
+            </div>
+          </template>
+          <template x-if="!observeConnected">
+            <form @submit.prevent="previewDoc ? connectObserve() : previewObserve()">
+              <h2 class="section-title" style="margin-bottom: 8px;">Connect Observe</h2>
+              <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
+                Mint a service token in Observe (Settings → Service Tokens; scopes <span class="mono">sites:create</span> and <span class="mono">keys:mint</span>).
+                Dash never sees an Observe admin login, and nothing is written until you confirm this instance's identity.
+                <span x-show="observeHintData && observeHintData.available">A confirmed Observe was found on the fleet — its address is prefilled.</span>
+              </p>
+              <div style="display: grid; grid-template-columns: 2fr 2fr auto; gap: 8px; align-items: end;">
+                <div class="field">
+                  <label for="observe-base">Observe address</label>
+                  <input id="observe-base" class="form-input" x-model="connectForm.base_url" placeholder="http://observe.tailnet-host:3000" autocomplete="off" :disabled="connectBusy">
+                </div>
+                <div class="field">
+                  <label for="observe-token">Service token</label>
+                  <input id="observe-token" class="form-input" type="password" x-model="connectForm.token" placeholder="obs_svc_…" autocomplete="off" :disabled="connectBusy || !previewDoc">
+                </div>
+                <div class="field" style="padding-bottom: 6px;">
+                  <label style="display: flex; gap: 6px; align-items: center; font-weight: 400;">
+                    <input type="checkbox" x-model="connectForm.allow_internal"> allow internal
+                  </label>
+                </div>
+              </div>
+              <template x-if="previewError">
+                <p role="alert" class="text-muted" style="color: var(--danger, #c0392b); margin: 8px 0;" x-text="previewError"></p>
+              </template>
+              <template x-if="previewDoc">
+                <div role="status" class="stale-banner" style="margin: 8px 0;">
+                  <p style="margin: 0;">Discovery doc: <strong x-text="previewDoc.product"></strong>
+                    <span x-text="previewDoc.version || ''"></span>,
+                    instance <span class="mono" x-text="previewDoc.instance_id.slice(0, 8) + '…'"></span>
+                    (<span class="mono" x-text="previewDoc.instance_id"></span>)</p>
+                  <p style="margin: 4px 0 0 0;" class="text-muted"
+                     x-text="'dashboard ' + (previewDoc.dashboard_url || 'not published') + ' · ingest ' + (previewDoc.ingest_url || 'not published')"></p>
+                  <p style="margin: 4px 0 0 0;">Confirm this is the Observe you mean, then paste the token and connect.</p>
+                </div>
+              </template>
+              <div style="margin-top: 8px; display: flex; gap: 8px;">
+                <button type="button" class="btn btn-sm" @click="previewObserve()" :disabled="connectBusy || !connectForm.base_url"
+                        x-text="connectBusy ? 'Reading…' : (previewDoc ? 'Re-read' : 'Preview the instance')"></button>
+                <button type="submit" class="btn btn-sm btn-primary" x-show="previewDoc" :disabled="connectBusy || !connectForm.token"
+                        x-text="connectBusy ? 'Connecting…' : 'Connect this instance'"></button>
+              </div>
+            </form>
+          </template>
+        </div>
+      </template>
+
       <!-- Candidates: one row per (server, product) with the probe verdict.
            Honest unknowns stay unknown — nothing renders as “no siblings”
            when a server was only partly read. -->

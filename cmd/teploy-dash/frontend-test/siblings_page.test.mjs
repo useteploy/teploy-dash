@@ -127,3 +127,79 @@ test('an unsupported CLI keeps the page honest instead of empty', async () => {
     assert.ok(p.note.includes('v0.1.53'));
   } finally { p.destroy(); }
 });
+
+// ── Observe connect ───────────────────────────────────────────────────────
+
+const doc = {product: 'observe', version: '0.2.0', instance_id: '9f2c0c0e6b6d4f5a8e1d3b7a2c4f6e80', dashboard_url: 'https://observe.example.org', ingest_url: 'https://ingest.example.org', capabilities: ['service_tokens']};
+
+test('connect is two steps: preview the instance, then confirm with the token', async () => {
+  const h = harness('/siblings');
+  const posts = [];
+  h.respond(url => {
+    if (url.includes('/api/observe/preview')) return response(doc);
+    if (url.endsWith('/api/observe/connect')) {
+      posts.push('connect');
+      return response({base_url: 'http://observe.internal:3000', instance_id: doc.instance_id, product: 'observe', token_fp: 'abc123def456', connected_at: '2026-11-05T12:00:00Z', connected_by: 'admin'});
+    }
+    if (url.startsWith('/api/observe')) return response({connected: false, apps: [], hint: {available: true, base_url: 'http://observe.internal:3000', instance_id: doc.instance_id}});
+    return response(body());
+  });
+  const p = h.page('siblingsPage');
+  try {
+    await p.init();
+    // The confirmed probe prefilled the form.
+    assert.equal(p.connectForm.base_url, 'http://observe.internal:3000');
+    // Step 1: preview shows the identity, token stays locked.
+    await p.previewObserve();
+    assert.equal(p.previewDoc.instance_id, doc.instance_id);
+    assert.equal(p.previewError, '');
+    // Step 2: connect sends the PREVIEWED instance id as the confirmation.
+    p.connectForm.token = 'obs_svc_secret';
+    await p.connectObserve();
+    const connect = h.requests.find(r => r.url.endsWith('/api/observe/connect'));
+    assert.equal(connect.body.confirm_instance_id, doc.instance_id);
+    assert.equal(connect.body.token, 'obs_svc_secret');
+    assert.equal(posts.length, 1);
+  } finally { p.destroy(); }
+});
+
+test('a preview failure keeps the token locked and names the reason', async () => {
+  const h = harness('/siblings');
+  h.respond(url => {
+    if (url.includes('/api/observe/preview')) return response({error: 'the discovery doc did not answer at http://x: no route'}, {raw: true, status: 400});
+    if (url.startsWith('/api/observe')) return response({connected: false, apps: [], hint: {available: false}});
+    return response(body());
+  });
+  const p = h.page('siblingsPage');
+  try {
+    await p.init();
+    await p.previewObserve();
+    assert.equal(p.previewDoc, null);
+    assert.ok(p.previewError.includes('discovery doc did not answer'));
+    assert.equal(h.requests.some(r => r.url.endsWith('/api/observe/connect')), false);
+  } finally { p.destroy(); }
+});
+
+test('a connected Observe shows the instance summary and disconnects', async () => {
+  const h = harness('/siblings');
+  let del = 0;
+  h.respond(url => {
+    if (url.endsWith('/api/observe/connection') ) { del++; return response({ok: true, note: 'Revoke the service token in Observe (Settings → Service Tokens).'}); }
+    if (url.startsWith('/api/observe')) {
+      // After the DELETE, the next read shows disconnected.
+      return response(del > 0
+        ? {connected: false, apps: [], hint: {available: true, base_url: 'http://observe.internal:3000'}}
+        : {connected: true, apps: [], connection: {base_url: 'http://observe.internal:3000', instance_id: doc.instance_id, product: 'observe', version: '0.2.0', token_fp: 'abc123def456', connected_at: '2026-11-05T12:00:00Z', connected_by: 'admin'}, hint: {available: true}});
+    }
+    return response(body());
+  });
+  const p = h.page('siblingsPage');
+  try {
+    await p.init();
+    assert.equal(p.observeConnected, true);
+    assert.equal(p.observeConnection.instance_id, doc.instance_id);
+    await p.disconnectObserve();
+    assert.equal(del, 1);
+    assert.equal(p.observeConnected, false);
+  } finally { p.destroy(); }
+});

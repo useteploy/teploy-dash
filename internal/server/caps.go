@@ -84,7 +84,6 @@ var administerCredentialsPrefixes = []string{
 	// credential dash stores and reuses) and mints telemetry keys; the whole
 	// surface is admin/credential work like storage connect.
 	"/api/observe",
-	"/api/observe/",
 }
 
 // requiredCapabilities returns the capability(s) a route requires. It fails

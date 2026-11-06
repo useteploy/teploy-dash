@@ -4064,13 +4064,22 @@ document.addEventListener('alpine:init', () => {
     sweepError: '',
     scanBusy: false,
     settingsBusy: false,
+    // Observe connect (the one sibling with a deep flow).
+    observeConnected: false,
+    observeConnection: null,
+    observeHintData: null,
+    connectForm: { base_url: '', token: '', allow_internal: false },
+    connectBusy: false,
+    previewDoc: null,
+    previewError: '',
     _loadGeneration: 0,
     _alive: false,
 
     async init() {
       this._alive = true;
       await this.load();
-      this.refreshInterval = setInterval(() => { if (this._alive) this.load(); }, 60000);
+      await this.loadObserve();
+      this.refreshInterval = setInterval(() => { if (this._alive) { this.load(); this.loadObserve(); } }, 60000);
     },
 
     destroy() {
@@ -4100,6 +4109,21 @@ document.addEventListener('alpine:init', () => {
       this.loading = false;
     },
 
+    async loadObserve() {
+      try {
+        const data = await api.get('/api/observe');
+        this.observeConnected = !!data.connected;
+        this.observeConnection = data.connection || null;
+        this.observeHintData = data.hint || null;
+        if (!this.observeConnected && !this.connectForm.base_url && data.hint && data.hint.base_url) {
+          this.connectForm.base_url = data.hint.base_url;
+        }
+      } catch (e) {
+        // The connect card stays collapsed; the candidates table above
+        // carries the page's main content.
+      }
+    },
+
     async rescan() {
       if (this.scanBusy) return;
       this.scanBusy = true;
@@ -4125,6 +4149,57 @@ document.addEventListener('alpine:init', () => {
         showToast(e.message, 'error');
       }
       this.settingsBusy = false;
+    },
+
+    // Step 1 of connect: read the discovery doc so the owner confirms the
+    // instance identity BEFORE any token is sent.
+    async previewObserve() {
+      this.previewDoc = null;
+      this.previewError = '';
+      this.connectBusy = true;
+      try {
+        const url = '/api/observe/preview?url=' + encodeURIComponent(this.connectForm.base_url) +
+          '&allow_internal=' + encodeURIComponent(!!this.connectForm.allow_internal);
+        this.previewDoc = await api.get(url);
+      } catch (e) {
+        this.previewError = e.message;
+      }
+      this.connectBusy = false;
+    },
+
+    // Step 2: paste the token, confirm the instance the preview showed.
+    // Dash re-checks the doc server-side; a doc that moved between preview
+    // and connect refuses.
+    async connectObserve() {
+      if (!this.previewDoc) return;
+      this.connectBusy = true;
+      try {
+        await api.post('/api/observe/connect', {
+          base_url: this.connectForm.base_url,
+          token: this.connectForm.token,
+          confirm_instance_id: this.previewDoc.instance_id,
+          allow_internal: !!this.connectForm.allow_internal,
+        });
+        this.connectForm.token = '';
+        this.previewDoc = null;
+        showToast('Connected to Observe', 'success');
+        await this.loadObserve();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.connectBusy = false;
+    },
+
+    async disconnectObserve() {
+      this.connectBusy = true;
+      try {
+        const out = await api.del('/api/observe/connection');
+        showToast((out && out.note) || 'Disconnected from Observe', 'info');
+        await this.loadObserve();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      this.connectBusy = false;
     },
 
     serverStateLabel(state) {

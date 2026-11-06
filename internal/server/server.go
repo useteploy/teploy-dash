@@ -366,6 +366,10 @@ type Server struct {
 	// siblings is Programme B sibling discovery (siblings.go): the last
 	// `server siblings` envelope per server plus dash's probe verdicts.
 	siblings siblingsState
+	// observe is the Programme B Observe connection (observe.go): the
+	// service token (a secret in ~/.teploy/observe.json) and the per-app
+	// telemetry opt-ins.
+	observe observeState
 }
 
 // New creates a new server.
@@ -386,6 +390,7 @@ func New(config Config) *Server {
 	s.initBackups(config.DataDir)
 	s.initCleanup(config.DataDir)
 	s.initSiblings(config.DataDir)
+	s.initObserve()
 	s.runCLI = config.CLIRunner
 	if s.runCLI == nil {
 		s.runCLI = cli.RunContext
@@ -1722,6 +1727,9 @@ func (s *Server) routes() {
 	// Programme B: sibling product discovery (fleet scan + probes).
 	s.mux.HandleFunc("/api/siblings", s.handleSiblings)
 	s.mux.HandleFunc("/api/siblings/", s.handleSiblingsAction)
+	// Programme B: the Observe connection and per-app telemetry opt-in.
+	s.mux.HandleFunc("/api/observe", s.handleObserve)
+	s.mux.HandleFunc("/api/observe/", s.handleObserve)
 	s.mux.HandleFunc("/api/monitors", s.handleMonitors)
 	s.mux.HandleFunc("/api/monitors/", s.handleMonitor)
 
