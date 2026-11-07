@@ -15,10 +15,12 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/b2"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/s3probe"
 )
@@ -32,8 +34,9 @@ const (
 
 const (
 	backupPushConcurrency = 3
-	// backupPushTimeout covers the CLI's set (which may install age and the aws
-	// CLI, then rewrites cron lines) and the status read that verifies it.
+	// backupPushTimeout covers the CLI's set (which may install age, and refuses
+	// rather than installs a missing aws CLI, then rewrites cron lines) and the status
+	// read that verifies it.
 	backupPushTimeout  = 10 * time.Minute
 	backupProbeTimeout = 45 * time.Second
 )
@@ -325,6 +328,15 @@ func (s *Server) handleBackupStorage(w http.ResponseWriter, r *http.Request) {
 			b.rec.Storage = &backupStorage{Provider: body.Provider, Bucket: body.Bucket, Region: body.Region, Endpoint: body.Endpoint,
 				BasePrefix: body.BasePrefix, AllowInternal: body.AllowInternal, Prefixes: prefixes, ConnectedAt: now}
 		}
+		// A key entered by hand replaces what the setup flow made: say where that one went.
+		if setup := b.rec.Setup; setup != nil {
+			for _, res := range resp.Servers {
+				if k := setup.Keys[res.Server]; k != nil && res.Pushed {
+					setup.Leftovers = append(setup.Leftovers, backupLeftoverKey{KeyID: k.KeyID, KeyName: k.KeyName, Server: res.Server, Reason: "replaced by a key entered by hand"})
+					delete(setup.Keys, res.Server)
+				}
+			}
+		}
 		b.saveLocked()
 		b.mu.Unlock()
 	}
@@ -344,9 +356,10 @@ func (s *Server) handleBackupStorage(w http.ResponseWriter, r *http.Request) {
 }
 
 // probeBackupStorage runs the write/read/delete probe. B2 keys deliberately lack
-// deleteFiles (plan D2), so there a refused delete is the expected, safer setup.
-// The object sits in the first server's .incoming/ tree, where the lifecycle rule
-// the CLI's README asks for expires it if it could not be removed.
+// deleteFiles (plan D2), and retention's delete must still hide the object through such
+// a key, or retention cannot work: so on B2 a refused delete stops here, and an accepted
+// one must leave the object unreadable. The object sits in the first server's .incoming/
+// tree, where the lifecycle rule removes it.
 func (s *Server) probeBackupStorage(ctx context.Context, body *backupStorageRequest, firstPrefix string) (s3probe.Result, string, bool) {
 	pctx, cancel := context.WithTimeout(ctx, backupProbeTimeout)
 	defer cancel()
@@ -363,12 +376,20 @@ func (s *Server) probeBackupStorage(ctx context.Context, body *backupStorageRequ
 	}
 	switch res.Delete {
 	case s3probe.DeleteRemoved:
+		if body.Provider == backupProviderB2 {
+			if !res.Hidden {
+				res.Error = "Backblaze accepted the delete, but the test object can still be read. Retention would not work with this key, so nothing was pushed."
+				return res, "", false
+			}
+			res.Error = ""
+			return res, "This key hid the test object, which is how retention works on B2. A key without deleteFiles cannot destroy history: hidden copies can still be recovered until the bucket's lifecycle rule removes them after " + strconv.Itoa(b2.DefaultHideDays) + " days.", true
+		}
 		res.Error = ""
 		return res, "", true
 	case s3probe.DeleteRefused:
-		if body.Provider == backupProviderB2 {
-			res.Error = ""
-			return res, "This key cannot delete files, which is the recommended B2 setup: a compromised server cannot destroy history. Retention hides files, and the bucket's lifecycle rules remove them after 30 days. The test object stays under .incoming/ until that rule expires it.", true
+		if body.Provider == backupProviderB2 && !body.DeleteRefusalOK {
+			res.Error = "Backblaze refused to hide the test object through this key, so retention cannot work: old backups would never be removed, and growth would be the only symptom. Nothing was pushed. Give the key writeFiles and try again."
+			return res, "", false
 		}
 		if body.DeleteRefusalOK {
 			res.Error = ""
@@ -471,11 +492,11 @@ func backupLifecycleRule(st *backupStorage, target backupStatTarget) string {
 	warn := " Scope it to that prefix: a rule on the whole bucket deletes the backups."
 	if st != nil && st.Provider == backupProviderB2 || strings.Contains(target.Endpoint, "backblazeb2.com") {
 		// B2 keeps hidden versions forever by default, so retention frees no storage
-		// without the second rule. Its 30 days are also how long hidden backups can
+		// without the second rule. Its 14 days are also how long hidden backups can
 		// still be recovered after a compromised server hides them. Overlapping rules
 		// are allowed; B2 applies the smallest value of each property.
 		return "Add two B2 lifecycle rules. First: fileNamePrefix " + incoming + ", daysFromUploadingToHiding 1, daysFromHidingToDeleting 1." + warn +
-			" Second: fileNamePrefix " + root + ", daysFromHidingToDeleting 30, daysFromUploadingToHiding empty. Without it, backups that retention removes stay stored and billed forever; never set daysFromUploadingToHiding on this one."
+			" Second: fileNamePrefix " + root + ", daysFromHidingToDeleting 14, daysFromUploadingToHiding empty. Without it, backups that retention removes stay stored and billed forever; never set daysFromUploadingToHiding on this one."
 	}
 	return `aws s3api put-bucket-lifecycle-configuration --bucket ` + target.Bucket +
 		` --lifecycle-configuration '{"Rules":[{"ID":"teploy-incoming","Status":"Enabled","Filter":{"Prefix":"` + incoming +

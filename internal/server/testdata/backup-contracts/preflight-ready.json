@@ -1,0 +1,49 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "observed_at": "2026-11-06T12:00:00Z",
+  "reachable": true,
+  "binary": {
+    "path": "/usr/local/bin/teploy",
+    "state": "ok",
+    "version": "0.1.55",
+    "fleet_engine": true,
+    "cli_version": "0.1.55",
+    "same_as_cli": true
+  },
+  "tools": {
+    "aws": {
+      "state": "ok",
+      "version": "2.30.1"
+    },
+    "age": {
+      "state": "ok",
+      "version": "v1.2.1"
+    },
+    "python3": {
+      "state": "ok",
+      "version": "Python 3.12.3"
+    }
+  },
+  "disk": {
+    "path": "/var/tmp",
+    "free_bytes": 107374182400
+  },
+  "target": {
+    "state": "configured",
+    "bucket": "b",
+    "prefix": "teploy/srv1",
+    "has_credentials": true
+  },
+  "policy": {
+    "state": "configured",
+    "path": "/etc/teploy/backup-policy.json",
+    "interval": "1h",
+    "encrypted": true,
+    "heartbeat_hosts": [
+      "https://dash.example.internal"
+    ],
+    "cron_installed": true,
+    "managed_elsewhere": "no"
+  }
+}

@@ -77,6 +77,9 @@ var administerCredentialsPrefixes = []string{
 	// server, and the recovery key's generate endpoint shows the private key.
 	"/api/backups/storage",
 	"/api/backups/recovery-key",
+	// "Protect my data": each step handles a Backblaze key or a server's storage, or
+	// reads backup objects. The state it reports is on GET /api/backups.
+	"/api/backups/setup",
 	// The audit trail records credential and alerting changes (who
 	// configured which channel, who silenced what).
 	"/api/audit",

@@ -94,6 +94,9 @@ type machineFeatures struct {
 	// for Teploy/forgejo discovery endpoints. The whole Programme B surface
 	// (Siblings page, Observe connect, telemetry opt-in) gates on it.
 	Siblings bool `json:"siblings"` // siblings-v1
+	// BackupSetup gates "Protect my data" riding `server backup-preflight`, `backup
+	// head` and `backup run --all --detach` (CLI v0.1.55; see backupSetupMinCLI).
+	BackupSetup bool `json:"backup_setup"` // backup-setup-v1
 }
 
 type capabilityError struct {
@@ -197,6 +200,7 @@ func (s *Server) capabilities(ctx context.Context) capabilities {
 				value.Features.BackupFleet = hasToken("backup-fleet-v1")
 				value.Features.ServerAudit = hasToken("server-audit-v1")
 				value.Features.Siblings = hasToken("siblings-v1")
+				value.Features.BackupSetup = hasToken("backup-setup-v1")
 			}
 		} else {
 			// Pre-MI CLI (or version --json refused): the legacy path.

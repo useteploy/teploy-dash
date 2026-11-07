@@ -67,6 +67,9 @@ func backupObservations(rec *backupServerRecord, now time.Time) (obs []backupObs
 		switch {
 		case !st.Target.HasCredentials:
 			add(backupObservation{rule, false, "the target has no stored credentials — connect storage again"})
+		case !st.Target.Reachable && backupTargetCapped(st.Target.Error):
+			// Not an outage, and the server is fine: say what it is.
+			add(backupObservation{rule, false, backupCappedMessage})
 		case !st.Target.Reachable:
 			msg := "the server cannot reach its backup target"
 			if st.Target.Error != "" {
@@ -75,6 +78,18 @@ func backupObservations(rec *backupServerRecord, now time.Time) (obs []backupObs
 			add(backupObservation{rule, false, msg})
 		default:
 			add(backupObservation{rule, true, "the backup target answers"})
+		}
+	}
+
+	// The bucket's rule, rechecked on every read through the server's own key. A key that
+	// cannot read rules says unknown, which proves nothing either way and raises nothing.
+	if st.Target.Configured {
+		rule := backupRule(rec.Server, "lifecycle", "", "backup lifecycle rule on "+rec.Server, alert.SeverityWarning)
+		switch st.Target.IncomingLifecycle {
+		case "covered":
+			add(backupObservation{rule, true, "the lifecycle rule is in place"})
+		case "absent":
+			add(backupObservation{rule, false, "the bucket has no lifecycle rule for this server's pending uploads, so what retention removes stays billed: " + backupLifecycleRule(nil, st.Target)})
 		}
 	}
 

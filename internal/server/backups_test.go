@@ -46,6 +46,8 @@ type backupCLI struct {
 	keygenErr error
 	// verify answers `accessory verify-backup ... --json` per accessory name.
 	verify map[string]func(args []string) (*cli.Result, error)
+	// hook answers a command first when it returns handled (the setup flow's commands).
+	hook func(args []string, stdin string) (res *cli.Result, err error, handled bool)
 	// every argv seen, with stdin payloads where a command took one.
 	calls []backupCLIcall
 }
@@ -93,6 +95,11 @@ func (c *backupCLI) run(ctx context.Context, args ...string) (*cli.Result, error
 
 func (c *backupCLI) runStdin(ctx context.Context, stdin string, args ...string) (*cli.Result, error) {
 	c.ran(args, stdin)
+	if c.hook != nil {
+		if res, err, handled := c.hook(args, stdin); handled {
+			return res, err
+		}
+	}
 	switch {
 	case len(args) >= 1 && args[0] == "version":
 		out := c.handshake
@@ -451,7 +458,7 @@ func TestBackupStorageConnect_ProbePushForgetVerify(t *testing.T) {
 		if !strings.Contains(cfg.Key, "/.incoming/dash-probe-") {
 			t.Errorf("the probe object must sit under .incoming/: %s", cfg.Key)
 		}
-		return s3probe.Result{Write: true, Read: true, Delete: s3probe.DeleteRemoved}
+		return s3probe.Result{Write: true, Read: true, Delete: s3probe.DeleteRemoved, Hidden: true}
 	}
 
 	rec := postJSON(t, s, "/api/backups/storage", storageBody())
@@ -529,13 +536,13 @@ func TestBackupStorageConnect_ProbeFailurePushesNothing(t *testing.T) {
 	}
 }
 
-// A B2 key without deleteFiles is the recommended setup (plan D2): the probe
-// notes it, connects, and says why the object stays.
-func TestBackupStorageConnect_B2DeleteRefusalIsFine(t *testing.T) {
+// A B2 key that hides the object is the recommended setup (plan D2): the probe notes
+// it, connects, and names the recovery window.
+func TestBackupStorageConnect_B2HideIsFine(t *testing.T) {
 	c := &backupCLI{status: statusesFromTestdata(t)}
 	s := newBackupsServer(t, c)
 	s.backups.probe = func(context.Context, s3probe.Config) s3probe.Result {
-		return s3probe.Result{Write: true, Read: true, Delete: s3probe.DeleteRefused}
+		return s3probe.Result{Write: true, Read: true, Delete: s3probe.DeleteRemoved, Hidden: true}
 	}
 	rec := postJSON(t, s, "/api/backups/storage", storageBody())
 	if rec.Code != http.StatusOK {
@@ -543,8 +550,40 @@ func TestBackupStorageConnect_B2DeleteRefusalIsFine(t *testing.T) {
 	}
 	var resp backupStorageResponse
 	decodeData(t, rec, &resp)
-	if resp.ProbeNote == "" || !strings.Contains(resp.ProbeNote, "cannot delete files") {
+	if !strings.Contains(resp.ProbeNote, "hid the test object") || !strings.Contains(resp.ProbeNote, "14 days") {
 		t.Fatalf("probe note = %q", resp.ProbeNote)
+	}
+}
+
+// A refused hide used to read as the recommended setup, which hid a retention that
+// could never work. It now stops, unless the person says the refusal is deliberate.
+func TestBackupStorageConnect_B2RefusedHideStops(t *testing.T) {
+	for name, probe := range map[string]s3probe.Result{
+		"refused":       {Write: true, Read: true, Delete: s3probe.DeleteRefused},
+		"still-visible": {Write: true, Read: true, Delete: s3probe.DeleteRemoved, Hidden: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := &backupCLI{status: statusesFromTestdata(t)}
+			s := newBackupsServer(t, c)
+			s.backups.probe = func(context.Context, s3probe.Config) s3probe.Result { return probe }
+			rec := postJSON(t, s, "/api/backups/storage", storageBody())
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
+			}
+			if n := c.countOf("backup-target", "set"); n != 0 {
+				t.Fatalf("a key that cannot hide must push nothing: %d", n)
+			}
+		})
+	}
+	c := &backupCLI{status: statusesFromTestdata(t)}
+	s := newBackupsServer(t, c)
+	s.backups.probe = func(context.Context, s3probe.Config) s3probe.Result {
+		return s3probe.Result{Write: true, Read: true, Delete: s3probe.DeleteRefused}
+	}
+	body := storageBody()
+	body["delete_refusal_ok"] = true
+	if rec := postJSON(t, s, "/api/backups/storage", body); rec.Code != http.StatusOK {
+		t.Fatalf("a deliberate refusal is still the person's call: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -552,7 +591,7 @@ func TestBackupStorageRotation_OnlyRevokeWhenEveryServerVerified(t *testing.T) {
 	c := &backupCLI{status: statusesFromTestdata(t)}
 	s := newBackupsServer(t, c)
 	s.backups.probe = func(context.Context, s3probe.Config) s3probe.Result {
-		return s3probe.Result{Write: true, Read: true, Delete: s3probe.DeleteRemoved}
+		return s3probe.Result{Write: true, Read: true, Delete: s3probe.DeleteRemoved, Hidden: true}
 	}
 	if rec := postJSON(t, s, "/api/backups/storage", storageBody()); rec.Code != http.StatusOK {
 		t.Fatalf("connect failed: %s", rec.Body.String())
@@ -945,7 +984,7 @@ func TestB2LifecycleRuleCoversHiddenBackups(t *testing.T) {
 	rule := backupLifecycleRule(&backupStorage{Provider: backupProviderB2}, backupStatTarget{Prefix: "teploy/prod"})
 	for _, want := range []string{
 		"fileNamePrefix teploy/prod/.incoming/, daysFromUploadingToHiding 1, daysFromHidingToDeleting 1",
-		"fileNamePrefix teploy/prod/, daysFromHidingToDeleting 30, daysFromUploadingToHiding empty",
+		"fileNamePrefix teploy/prod/, daysFromHidingToDeleting 14, daysFromUploadingToHiding empty",
 		"never set daysFromUploadingToHiding on this one",
 	} {
 		if !strings.Contains(rule, want) {

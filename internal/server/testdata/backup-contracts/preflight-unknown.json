@@ -1,0 +1,44 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "observed_at": "2026-11-06T12:00:00Z",
+  "reachable": true,
+  "error": "the probe did not finish, so what it did not reach is unknown",
+  "binary": {
+    "path": "/usr/local/bin/teploy",
+    "state": "unknown",
+    "fleet_engine": null,
+    "cli_version": "0.1.55",
+    "same_as_cli": null,
+    "detail": "the binary is there and did not run"
+  },
+  "tools": {
+    "aws": {
+      "state": "unknown",
+      "detail": "could not read its version: some wrapper"
+    },
+    "age": {
+      "state": "unknown"
+    },
+    "python3": {
+      "state": "unknown"
+    }
+  },
+  "disk": {
+    "path": "/var/tmp",
+    "free_bytes": null,
+    "detail": "could not read the free space there"
+  },
+  "target": {
+    "state": "unknown",
+    "has_credentials": false,
+    "detail": "reading the backup target: unrecognized output framing"
+  },
+  "policy": {
+    "state": "unknown",
+    "encrypted": false,
+    "cron_installed": null,
+    "managed_elsewhere": "unknown",
+    "detail": "the backup policy cannot be read: exit status 3: cannot tell whether this server's backups must be encrypted"
+  }
+}

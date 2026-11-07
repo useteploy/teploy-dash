@@ -1,0 +1,9 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "requested_at": "2026-11-06T12:00:00Z",
+  "status": "failed",
+  "pid": 4245,
+  "log": "/root/.config/teploy/backup-runs/run.MnOp3456.log",
+  "error": "the run ended without a result: Error: docker: permission denied"
+}

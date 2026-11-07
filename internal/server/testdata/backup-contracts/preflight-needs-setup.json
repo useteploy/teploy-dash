@@ -1,0 +1,41 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "observed_at": "2026-11-06T12:00:00Z",
+  "reachable": true,
+  "binary": {
+    "path": "/usr/local/bin/teploy",
+    "state": "no_fleet_engine",
+    "version": "0.1.20",
+    "fleet_engine": false,
+    "cli_version": "0.1.55",
+    "same_as_cli": false
+  },
+  "tools": {
+    "aws": {
+      "state": "outdated",
+      "version": "2.15.0",
+      "detail": "aws CLI 2.15.0 is older than 2.23.0 (or 1.37.0), the first to send a checksum on every upload, which a bucket with Object Lock requires"
+    },
+    "age": {
+      "state": "missing"
+    },
+    "python3": {
+      "state": "missing"
+    }
+  },
+  "disk": {
+    "path": "/var/tmp",
+    "free_bytes": 2147483648
+  },
+  "target": {
+    "state": "absent",
+    "has_credentials": false
+  },
+  "policy": {
+    "state": "absent",
+    "encrypted": false,
+    "cron_installed": null,
+    "managed_elsewhere": "no"
+  }
+}
