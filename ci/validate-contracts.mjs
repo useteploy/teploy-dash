@@ -87,6 +87,11 @@ const artifacts = {
   "backup-status-envelope": { schema: "backup-status-envelope.schema.json", classes: { valid: "validate" } },
   "backup-run-envelope": { schema: "backup-run-envelope.schema.json", classes: { valid: "validate" } },
   "backup-policy-envelope": { schema: "backup-policy-envelope.schema.json", classes: { valid: "validate" } },
+  // Simple backup setup (corpus rev 21): preflight, the ranged read the browser
+  // proves a recovery key against, and the detached run.
+  "backup-preflight-envelope": { schema: "backup-preflight-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-head-envelope": { schema: "backup-head-envelope.schema.json", classes: { valid: "validate" } },
+  "backup-detach-envelope": { schema: "backup-detach-envelope.schema.json", classes: { valid: "validate" } },
   // Git-source artifacts (corpus rev 16, plan D4): the connected-source
   // show envelope, credential provisioning receipts and the poll results.
   // Dash adopts these surfaces separately (D4); classified here so the
