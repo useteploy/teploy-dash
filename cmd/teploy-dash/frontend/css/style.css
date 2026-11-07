@@ -395,6 +395,36 @@ code { overflow-wrap: anywhere; }
   .toast { min-width: 0; overflow-wrap: anywhere; }
 }
 
+/* Protect my data */
+.setup-card { cursor: default; margin-bottom: 1rem; padding: 16px; }
+.setup-card-todo { border-color: var(--yellow); }
+.setup-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.setup-head h2 { margin: 0 0 4px; }
+.setup-card .header-actions { flex-wrap: wrap; }
+.setup-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.setup-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 4px 0; overflow-wrap: anywhere; }
+.setup-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 8px 0 0; }
+.setup-flow { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.setup-steps { display: flex; flex-wrap: wrap; gap: 4px 14px; list-style: none; margin: 0 0 12px; padding: 0; }
+.setup-steps .linklike { background: none; border: 0; padding: 4px 0; color: var(--text-muted); cursor: pointer; font: inherit; min-height: 0; }
+.setup-steps li.current .linklike { color: var(--accent); font-weight: 600; }
+.setup-step { margin-top: 12px; }
+.setup-step > h3, .setup-step h3 { margin: 0 0 8px; font-size: 15px; }
+.setup-step label { display: block; margin: 8px 0; }
+.setup-step label.checkbox-label { display: flex; align-items: baseline; gap: 8px; }
+.setup-step input:not([type="checkbox"]):not([type="radio"]), .setup-step select { width: 100%; max-width: 100%; }
+.setup-step .form-row label { flex: 1 1 0; min-width: 0; }
+.setup-step p { margin: 6px 0; overflow-wrap: anywhere; }
+.setup-server { padding: 8px 0; border-top: 1px solid var(--border); }
+.setup-result { margin-top: 10px; }
+.setup-error { color: var(--red); }
+.setup-warn { color: var(--yellow); }
+.setup-help { margin: 8px 0; }
+.setup-help summary, .setup-advanced > summary { cursor: pointer; color: var(--text-muted); }
+.setup-code { white-space: pre-wrap; word-break: break-all; }
+.setup-advanced { margin-bottom: 1rem; }
+.setup-advanced > summary { padding: 8px 0; font-weight: 600; }
+
 /* Touch screens and phones: 16px form text stops iOS zooming on focus, and
    controls grow to a 44px hit area. */
 @media (max-width: 640px), (pointer: coarse) {

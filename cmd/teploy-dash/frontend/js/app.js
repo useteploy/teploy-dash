@@ -3660,11 +3660,500 @@ document.addEventListener('alpine:init', () => {
     },
   }));
 
+  // ── Protect my data ──
+  // The steps of the simple setup. The Backblaze key and the recovery key are held in
+  // memory here and nowhere else: closing the flow forgets them, and the recovery key
+  // never leaves the browser. No getters in here: this object is spread into the page.
+  function backupSetupComponent() {
+    return {
+      setupOpen: false,
+      setupStep: 'check',
+      setupBusy: false,
+      setupError: '',
+      setupScope: null,
+      setupStepNames: [
+        { id: 'check', label: 'Servers' },
+        { id: 'storage', label: 'Storage' },
+        { id: 'recovery', label: 'Recovery key' },
+        { id: 'alerts', label: 'Alerts' },
+        { id: 'turnon', label: 'Turn on' },
+        { id: 'prove', label: 'Prove it' },
+      ],
+      setupServers: [],
+      setupTicked: {},
+      setupInstall: {},
+      setupUpgrade: {},
+      setupKey: { id: '', secret: '' },
+      setupPassword: '',
+      setupCheck: null,
+      setupBucket: '',
+      setupAccept: false,
+      setupAdv: { hide_days: '', empty_base: false, s3_managed: false, rotate: false },
+      setupStorage: null,
+      ownerForce: {},
+      recoveryGen: null,
+      recoveryProven: false,
+      recoveryError: '',
+      alertForm: { type: 'ntfy', url: '', smtp_host: '', smtp_port: 587, smtp_user: '', smtp_pass: '', email_to: '', email_from: '' },
+      alertChannelId: '',
+      alertTest: null,
+      setupCoverage: null,
+      setupAdopt: false,
+      setupPolicy: { interval: '', preset: '', skip_volumes: false },
+      turnOnResult: null,
+      proofState: null,
+      retireFor: null,
+      retireData: '',
+      retireConfirm: '',
+
+      setupSupported() { return !!(this.view && this.view.setup && this.view.setup.supported); },
+      hasHandwritten() { return !!(this.view && this.view.handwritten && this.view.handwritten.length); },
+
+      setupStateLabel(state) {
+        return ({
+          not_protected: 'not backed up', unknown: 'could not be read', capped: 'daily cap reached',
+          unreachable: 'cannot reach storage', empty: 'nothing to back up yet',
+          waiting_first_backup: 'waiting for the first backup', late: 'backups are late', failing: 'backups are failing',
+          waiting_restore_test: 'waiting for a restore test', guard_skipped: 'restore test put off',
+          restore_test_failed: 'restore test failed', protected: 'protected',
+        })[state] || state;
+      },
+      setupStateClass(state) {
+        if (state === 'protected') return 'green';
+        if (state === 'failing' || state === 'restore_test_failed' || state === 'unreachable' || state === 'not_protected') return 'red';
+        if (state === 'empty' || state === 'unknown') return 'gray';
+        return 'yellow';
+      },
+      canBackUpNow(sv) {
+        return ['waiting_first_backup', 'late', 'failing'].includes(sv.state);
+      },
+
+      clearSetupSecrets() {
+        this.setupKey = { id: '', secret: '' };
+        this.setupPassword = '';
+        this.recoveryGen = null;
+        this.recoveryProven = false;
+      },
+
+      async openSetup(server) {
+        this.setupOpen = true;
+        this.setupError = '';
+        this.setupScope = server || null;
+        this.retireFor = null;
+        const setup = this.view && this.view.setup;
+        if (!server && setup && setup.turned_on && !this.recovery.drill_passed_at) {
+          this.setupStep = 'prove';
+          return;
+        }
+        this.setupStep = 'check';
+        await this.runPreflight();
+      },
+      openSetupAt(step) {
+        this.setupOpen = true;
+        this.setupError = '';
+        this.setupStep = step;
+      },
+      closeSetup() {
+        this.setupOpen = false;
+        this.setupError = '';
+        this.setupCheck = null;
+        this.setupStorage = null;
+        this.clearSetupSecrets();
+      },
+
+      selectedServers() {
+        return Object.keys(this.setupTicked).filter(name => this.setupTicked[name]).sort();
+      },
+
+      async runPreflight(extra = {}) {
+        this.setupBusy = true;
+        this.setupError = '';
+        try {
+          const body = { ...extra };
+          if (this.setupScope) body.servers = [this.setupScope];
+          const data = await api.post('/api/backups/setup/preflight', body);
+          this.setupServers = data.servers || [];
+          const ticked = {};
+          for (const sv of this.setupServers) {
+            const earlier = this.setupTicked[sv.server];
+            ticked[sv.server] = !sv.blocked && (earlier !== undefined ? earlier : (sv.selected || sv.server === this.setupScope));
+          }
+          this.setupTicked = ticked;
+        } catch (e) { this.setupError = e.message; }
+        this.setupBusy = false;
+      },
+      anyPrepareTicked() {
+        return Object.values(this.setupInstall).some(Boolean) || Object.values(this.setupUpgrade).some(Boolean);
+      },
+      async prepareServers() {
+        const names = o => Object.keys(o).filter(k => o[k]);
+        const body = { install_tools: names(this.setupInstall), upgrade_binary: names(this.setupUpgrade) };
+        this.setupInstall = {};
+        this.setupUpgrade = {};
+        await this.runPreflight(body);
+      },
+      // A ticked server still missing what a backup needs would only fail later.
+      blockingNeeds() {
+        const out = [];
+        for (const sv of this.setupServers) {
+          if (!this.setupTicked[sv.server]) continue;
+          if ((sv.needs_tools || []).length) out.push(`${sv.server} needs ${sv.needs_tools.join(', ')}.`);
+          if (sv.needs_upgrade) out.push(`${sv.server} needs a newer teploy.`);
+        }
+        return out;
+      },
+      serverFacts(sv) {
+        const facts = [];
+        if (sv.binary_version) facts.push(`teploy ${sv.binary_version}`);
+        if (sv.free_bytes !== null && sv.free_bytes !== undefined) facts.push(`${this.bytesLabel(sv.free_bytes)} free`);
+        if (sv.target_state === 'configured') facts.push(`backs up to ${sv.target_bucket || 'a bucket'}`);
+        return facts.join(', ');
+      },
+
+      // Plain HTTP outside localhost and a tailnet: anyone on the path can read a key.
+      insecurePage() {
+        if (typeof location === 'undefined' || location.protocol !== 'http:') return false;
+        const host = location.hostname || '';
+        if (host === 'localhost' || host === '[::1]' || host.startsWith('127.') || host.endsWith('.ts.net')) return false;
+        const m = /^100\.(\d+)\./.exec(host);
+        return !(m && Number(m[1]) >= 64 && Number(m[1]) <= 127);
+      },
+
+      storageExtras() {
+        const out = {};
+        if (this.setupAdv.empty_base) out.empty_base = true;
+        const days = Number(this.setupAdv.hide_days);
+        if (days > 0) out.hide_days = days;
+        return out;
+      },
+      async checkKey() {
+        this.setupBusy = true;
+        this.setupError = '';
+        try {
+          this.setupCheck = await api.post('/api/backups/setup/storage/check', {
+            key_id: this.setupKey.id.trim(), application_key: this.setupKey.secret.trim(), bucket: this.setupBucket, ...this.storageExtras(),
+          });
+          this.setupAccept = false;
+          // A key limited to certain buckets cannot create one.
+          const buckets = this.setupCheck.buckets || [];
+          if (!this.setupCheck.can_create_bucket && !this.setupBucket && buckets.length) this.setupBucket = buckets[0].name;
+        } catch (e) {
+          this.setupCheck = null;
+          this.setupError = e.message;
+        }
+        this.setupBusy = false;
+      },
+      chosenBucket() {
+        if (!this.setupCheck || !this.setupBucket) return null;
+        return (this.setupCheck.buckets || []).find(b => b.name === this.setupBucket) || null;
+      },
+      canApplyStorage() {
+        if (!this.setupCheck || (this.setupCheck.missing || []).length) return false;
+        if (this.setupCheck.listing_error) return false;
+        const b = this.chosenBucket();
+        if (b && (b.refusals || []).length) return false;
+        if (b && (b.warnings || []).length && !this.setupAccept) return false;
+        return true;
+      },
+      async applyStorage() {
+        if (!this.canApplyStorage()) return;
+        this.setupBusy = true;
+        this.setupError = '';
+        try {
+          this.setupStorage = await api.post('/api/backups/setup/storage/apply', {
+            password: this.setupPassword, key_id: this.setupKey.id.trim(), application_key: this.setupKey.secret.trim(),
+            bucket: this.setupBucket, servers: this.selectedServers(), accept_warnings: this.setupAccept,
+            s3_managed: this.setupAdv.s3_managed, rotate: this.setupAdv.rotate, ...this.storageExtras(),
+          });
+          this.setupPassword = '';
+          if (this.setupStorage.all_ok) this.setupKey = { id: '', secret: '' };
+          await this.load();
+        } catch (e) { this.setupError = e.message; }
+        this.setupBusy = false;
+      },
+      storageResultLine(r) {
+        if (r.verified) return r.skipped ? 'is ready, as before.' : 'is ready.';
+        if (r.skipped) return `was not set up: ${r.skipped}.`;
+        if (r.key_kept) return `may have its key but did not answer on it. Dash kept the key. ${r.error || ''}`;
+        return `did not get a key. ${r.error || ''}`;
+      },
+      async clearOwner(server, fingerprint) {
+        this.setupError = '';
+        try {
+          await api.post('/api/backups/setup/owners', { server, fingerprint, force: !!this.ownerForce[fingerprint] });
+          showToast('Cleared the older machine\'s mark', 'success');
+          for (const r of (this.setupStorage && this.setupStorage.servers) || []) {
+            if (r.server === server) r.old_owners = (r.old_owners || []).filter(o => o.fingerprint !== fingerprint);
+          }
+        } catch (e) { this.setupError = e.message; }
+      },
+      afterStorage() {
+        this.setupError = '';
+        if (!this.recovery.public_key) { this.setupStep = 'recovery'; return; }
+        this.afterRecovery();
+      },
+      afterRecovery() {
+        this.setupError = '';
+        if (this.view && this.view.setup && (this.view.setup.alerts_configured || this.view.setup.alerts_skipped)) {
+          this.afterAlerts();
+          return;
+        }
+        this.setupStep = 'alerts';
+      },
+      afterAlerts() {
+        this.setupError = '';
+        this.setupStep = 'turnon';
+        this.loadCoverage();
+      },
+
+      // ── recovery key ──
+      async ageLib() {
+        if (globalThis.TeployAge) return globalThis.TeployAge;
+        await new Promise((resolve, reject) => {
+          const tag = document.createElement('script');
+          tag.src = '/js/age.vendor.js';
+          tag.onload = resolve;
+          tag.onerror = () => reject(new Error('Could not load the key tools.'));
+          document.head.appendChild(tag);
+        });
+        return globalThis.TeployAge;
+      },
+      recoveryFileText(identity, publicKey) {
+        const s = (this.view && this.view.setup) || {};
+        const st = this.setupStorage || {};
+        return [
+          '# Teploy backup recovery key. Keep this file away from your servers.',
+          '# Without it, nobody can open your backups if a server is lost. Dash has no copy.',
+          `# created: ${new Date().toISOString()}`,
+          `# public key: ${publicKey}`,
+          `# bucket: ${st.bucket || s.bucket || ''}`,
+          `# endpoint: ${st.endpoint || s.endpoint || ''}`,
+          `# base: ${st.base !== undefined ? st.base : (s.base || '')}`,
+          identity,
+          '',
+        ].join('\n');
+      },
+      async generateRecovery() {
+        this.setupBusy = true;
+        this.recoveryError = '';
+        try {
+          const age = await this.ageLib();
+          const { identity, publicKey } = await age.generate();
+          this.recoveryGen = { publicKey, fileText: this.recoveryFileText(identity, publicKey), fileName: 'teploy-recovery-key.txt' };
+          this.recoveryProven = false;
+        } catch (e) { this.recoveryError = e.message; }
+        this.setupBusy = false;
+      },
+      downloadRecovery() {
+        if (!this.recoveryGen) return;
+        const url = URL.createObjectURL(new Blob([this.recoveryGen.fileText], { type: 'text/plain' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = this.recoveryGen.fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      },
+      // navigator.clipboard does not exist on plain HTTP, so the download is the main path.
+      canCopy() {
+        return typeof navigator !== 'undefined' && !!navigator.clipboard;
+      },
+      async copyRecovery() {
+        try {
+          await navigator.clipboard.writeText(this.recoveryGen.fileText);
+          showToast('Copied. Save it somewhere safe.', 'success');
+        } catch (e) { showToast('Could not copy. Use the download.', 'error'); }
+      },
+      async recoveryFilePicked(event) {
+        const file = event.target.files && event.target.files[0];
+        if (!file || !this.recoveryGen) return;
+        await this.checkRecoveryFile(await file.text());
+        event.target.value = '';
+      },
+      async checkRecoveryFile(text) {
+        this.recoveryError = '';
+        this.recoveryProven = false;
+        try {
+          const age = await this.ageLib();
+          const { identity } = age.parseIdentityFile(text);
+          const publicKey = await age.derivePublic(identity);
+          if (publicKey !== this.recoveryGen.publicKey) {
+            this.recoveryError = 'This is a different key. Pick the file you just downloaded.';
+            return;
+          }
+          this.recoveryProven = true;
+        } catch (e) { this.recoveryError = e.message; }
+      },
+      async saveRecovery() {
+        if (!this.recoveryGen || !this.recoveryProven) return;
+        this.setupBusy = true;
+        this.setupError = '';
+        try {
+          await api.post('/api/backups/setup/recovery', { password: this.setupPassword, public_key: this.recoveryGen.publicKey });
+          this.setupPassword = '';
+          this.recoveryGen = null;
+          this.recoveryProven = false;
+          await this.load();
+          this.afterRecovery();
+        } catch (e) { this.setupError = e.message; }
+        this.setupBusy = false;
+      },
+
+      // ── alerts: the channel API the Settings page uses ──
+      alertBody() {
+        const f = this.alertForm;
+        if (f.type === 'email') {
+          const body = { type: 'email', name: 'Backups', kinds: [], smtp_host: f.smtp_host, smtp_port: Number(f.smtp_port) || 0,
+            smtp_user: f.smtp_user, email_to: f.email_to, email_from: f.email_from, smtp_allow_insecure: false };
+          if (f.smtp_pass) body.smtp_pass = f.smtp_pass;
+          return body;
+        }
+        return { type: 'ntfy', name: 'Backups', kinds: [], url: f.url.trim(), allow_internal: false };
+      },
+      async saveAlert() {
+        this.setupBusy = true;
+        this.setupError = '';
+        this.alertTest = null;
+        try {
+          if (!this.alertChannelId) this.alertChannelId = `${this.alertForm.type}-${Math.random().toString(16).slice(2, 8)}`;
+          const body = this.alertBody();
+          await api.put(`/api/notifications/channels/${encodeURIComponent(this.alertChannelId)}`, body);
+          this.alertTest = await api.post(`/api/notifications/channels/${encodeURIComponent(this.alertChannelId)}/test`, {});
+        } catch (e) { this.setupError = e.message; }
+        this.setupBusy = false;
+      },
+      async skipAlerts() {
+        try {
+          await api.post('/api/backups/setup/alerts/skip', {});
+          await this.load();
+          this.afterAlerts();
+        } catch (e) { this.setupError = e.message; }
+      },
+
+      // ── turn on ──
+      async loadCoverage() {
+        this.setupCoverage = null;
+        this.turnOnResult = null;
+        this.setupError = '';
+        const servers = this.selectedServers();
+        if (servers.length === 0) {
+          this.setupError = 'Tick at least one server first.';
+          this.setupStep = 'check';
+          if (this.setupServers.length === 0) await this.runPreflight();
+          return;
+        }
+        try {
+          this.setupCoverage = await api.post('/api/backups/setup/coverage', { servers });
+          this.setupPolicy.interval = this.setupPolicy.interval || this.setupCoverage.interval;
+          this.setupPolicy.preset = this.setupPolicy.preset || this.setupCoverage.preset;
+        } catch (e) { this.setupError = e.message; }
+      },
+      hasUnmanaged() {
+        return ((this.setupCoverage && this.setupCoverage.servers) || []).some(sv => (sv.unmanaged || []).length > 0);
+      },
+      coverageLine(item) {
+        const what = item.kind === 'volumes' ? `${item.app || item.name} files` : `${item.name}${item.engine ? ' (' + item.engine + ')' : ''}`;
+        return item.size_bytes ? `${what}, ${this.bytesLabel(item.size_bytes)}` : what;
+      },
+      async turnOn(start) {
+        this.setupBusy = true;
+        this.setupError = '';
+        try {
+          this.turnOnResult = await api.post('/api/backups/setup/turn-on', {
+            servers: this.selectedServers(), start, adopt: this.setupAdopt, interval: this.setupPolicy.interval,
+            preset: this.setupPolicy.preset, skip_volumes: this.setupPolicy.skip_volumes,
+          });
+          await this.load();
+        } catch (e) { this.setupError = e.message; }
+        this.setupBusy = false;
+      },
+      turnOnLine(r) {
+        if (!r.ok) return r.error || 'could not be turned on.';
+        if (!r.run) return 'starts with its next scheduled run.';
+        return ({
+          started: 'is backing up now.', already_running: 'was already backing up.', finished: 'finished its backup.',
+          failed: `could not start a backup: ${r.run.error || 'no reason given'}`,
+        })[r.run.status] || r.run.status;
+      },
+      async backUpNow(server) {
+        try {
+          const data = await api.post('/api/backups/setup/run', { servers: [server] });
+          const run = data.runs && data.runs[server];
+          if (run && run.status === 'failed') showToast(run.error || 'The backup did not start', 'error');
+          else showToast(`Backing up ${server}. This page refreshes as it goes.`, 'info');
+          await this.load();
+        } catch (e) { showToast(e.message, 'error'); }
+      },
+
+      // ── prove recovery ──
+      async proofFilePicked(event) {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        await this.proveWith(await file.text());
+        event.target.value = '';
+      },
+      async proveWith(text) {
+        this.setupBusy = true;
+        this.setupError = '';
+        this.proofState = null;
+        let key = '';
+        try {
+          const age = await this.ageLib();
+          const { identity } = age.parseIdentityFile(text);
+          const start = await api.post('/api/backups/setup/proof/start', {});
+          key = start.key;
+          const raw = atob(start.data_base64);
+          const bytes = new Uint8Array(raw.length);
+          for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+          await age.decryptStart(identity, bytes);
+          await api.post('/api/backups/setup/proof/result', { key, passed: true });
+          this.proofState = { passed: true, key };
+          await this.load();
+        } catch (e) {
+          if (key) {
+            await api.post('/api/backups/setup/proof/result', { key, passed: false, detail: e.message }).catch(() => {});
+            this.setupError = 'This key did not open your backup. Check you picked the right file. If you have lost the file, you cannot read these backups.';
+          } else {
+            this.setupError = e.message;
+          }
+        }
+        this.setupBusy = false;
+      },
+
+      // ── retire a server ──
+      beginRetire(server) {
+        this.retireFor = server;
+        this.retireData = '';
+        this.retireConfirm = '';
+        this.setupError = '';
+      },
+      async submitRetire() {
+        if (!this.retireData) { this.setupError = 'Choose whether to keep or remove its backups.'; return; }
+        this.setupBusy = true;
+        this.setupError = '';
+        try {
+          const data = await api.post('/api/backups/setup/retire', {
+            password: this.setupPassword, key_id: this.setupKey.id.trim(), application_key: this.setupKey.secret.trim(),
+            server: this.retireFor, data: this.retireData, confirm: this.retireConfirm,
+          });
+          const notes = data.notes || [];
+          showToast(notes.length ? notes.join(' ') : `${this.retireFor} is retired`, notes.length ? 'info' : 'success');
+          this.retireFor = null;
+          this.clearSetupSecrets();
+          await this.load();
+        } catch (e) { this.setupError = e.message; }
+        this.setupBusy = false;
+      },
+    };
+  }
+
   // ── Backups Page (plan P2) ──
   // Every database and volume across the fleet: coverage, encryption, restore
   // tests, and the configuration surfaces (storage once, recovery key, one
   // policy). Reads the slow sweep's cached view; Refresh asks for a new one.
   Alpine.data('backupsPage', () => withAsyncLoad({
+    ...backupSetupComponent(),
     view: null,
     loading: true,
     refreshInterval: null,
@@ -3887,6 +4376,19 @@ document.addEventListener('alpine:init', () => {
         await this.load();
       } catch (e) { showToast(e.message, 'error'); }
     },
+  }));
+
+  // The home page's one line about backups. Viewers see it too; the page it links to
+  // says what they can do. A failed read shows nothing rather than a false alarm.
+  Alpine.data('protectBanner', () => ({
+    setup: null,
+    async init() {
+      try {
+        const view = await api.get('/api/backups');
+        this.setup = (view && view.setup) || null;
+      } catch (e) { this.setup = null; }
+    },
+    visible() { return !!(this.setup && this.setup.supported && this.setup.state !== 'protected'); },
   }));
 
   // ── Cleanup Page (Slice 6) ──

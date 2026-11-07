@@ -148,6 +148,15 @@
         </div>
       </div>
 
+      <div x-data="protectBanner">
+        <template x-if="visible()">
+          <div class="stale-banner" role="status">
+            <strong x-text="setup.headline"></strong>
+            <a href="/backups" @click.prevent="$store.router.navigate('backups')" x-text="setup.state === 'none' ? 'Protect my data' : 'See backups'"></a>
+          </div>
+        </template>
+      </div>
+
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
       </template>
@@ -1784,7 +1793,7 @@
         <div>
           <h1 class="page-title">Backups</h1>
           <p class="subtitle" x-text="rows.length
-            ? rows.length + ' target' + (rows.length !== 1 ? 's' : '') + ': ' + countBy('covered') + countBy('adopted') + ' covered, ' + countBy('failing') + ' failing, ' + countBy('stale') + ' stale, ' + countBy('uncovered') + ' uncovered'
+            ? rows.length + ' target' + (rows.length !== 1 ? 's' : '') + ': ' + (countBy('covered') + countBy('adopted')) + ' covered, ' + countBy('failing') + ' failing, ' + countBy('stale') + ' stale, ' + countBy('uncovered') + ' uncovered'
             : 'Every database and volume across the fleet — storage, encryption, restore tests'"></p>
         </div>
         <div class="header-actions">
@@ -1812,9 +1821,353 @@
         <div role="status" class="stale-banner" x-text="'The last fleet read did not finish: ' + view.sweep_error"></div>
       </template>
 
+      <!-- Protect my data: where things stand, then the flow. Never forced, and the
+           manual controls stay under Advanced below. -->
+      <template x-if="!loading && setupSupported()">
+        <div class="card setup-card" :class="view.setup.state === 'protected' ? '' : 'setup-card-todo'">
+          <div class="setup-head">
+            <div>
+              <h2 x-text="view.setup.headline"></h2>
+              <p class="text-muted" x-show="view.setup.state === 'protected'">Every server has a checked backup, and every database has passed a restore test.</p>
+              <p class="text-muted" x-show="view.setup.state === 'none'">Set up encrypted backups kept away from your servers. It takes a few minutes.</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-primary" x-show="!setupOpen && view.setup.state !== 'protected'" @click="openSetup()" x-text="view.setup.turned_on ? 'Continue' : 'Protect my data'"></button>
+              <button class="btn btn-sm" x-show="!setupOpen && view.setup.state === 'protected'" @click="openSetup()">Open setup</button>
+              <button class="btn btn-sm" x-show="setupOpen" @click="closeSetup()">Close</button>
+            </div>
+          </div>
+
+          <template x-if="(view.setup.servers || []).length > 0">
+            <ul class="setup-list">
+              <template x-for="sv in view.setup.servers" :key="sv.server">
+                <li>
+                  <span class="dot" :class="setupStateClass(sv.state)"></span>
+                  <span class="mono" x-text="sv.server"></span>
+                  <span x-show="!sv.detail" x-text="setupStateLabel(sv.state)"></span>
+                  <span class="text-muted" x-show="sv.detail" x-text="sv.detail"></span>
+                  <span class="text-muted" x-show="sv.uncovered && sv.uncovered.length" x-text="'Not backed up: ' + (sv.uncovered || []).join(', ') + '.'"></span>
+                  <span class="text-muted" x-show="sv.run && sv.run.error" x-text="sv.run ? sv.run.error : ''"></span>
+                  <span class="text-muted" x-show="sv.lifecycle === 'unknown'">Dash cannot recheck the bucket's cleanup rules with this server's key.</span>
+                  <span class="setup-warn" x-show="sv.lifecycle === 'absent'">The bucket has no cleanup rule for this server, so what retention removes stays billed.</span>
+                  <button class="btn btn-sm" x-show="sv.state === 'not_protected'" @click="openSetup(sv.server)">Back up this server</button>
+                  <button class="btn btn-sm" x-show="sv.state !== 'not_protected' && sv.key_name" @click="beginRetire(sv.server)">Retire…</button>
+                  <button class="btn btn-sm" x-show="canBackUpNow(sv)" @click="backUpNow(sv.server)">Back up now</button>
+                </li>
+              </template>
+            </ul>
+          </template>
+
+          <p class="setup-note" x-show="view.setup.configured && !view.setup.alerts_configured">
+            Nothing will tell you if a backup fails until you add an alert.
+            <button class="btn btn-sm" @click="openSetupAt('alerts')">Add an alert</button>
+          </p>
+          <p class="setup-note" x-show="view.setup.turned_on && !view.setup.proof && !recovery.drill_passed_at">
+            You have not yet proved your recovery key opens your backups.
+            <button class="btn btn-sm" @click="openSetupAt('prove')">Prove it</button>
+          </p>
+          <template x-for="name in view.setup.retired_keys || []" :key="name">
+            <p class="setup-note">
+              <span class="mono" x-text="name"></span> is no longer one of your servers, and its key still exists.
+              <button class="btn btn-sm" @click="beginRetire(name)">Retire it</button>
+            </p>
+          </template>
+          <template x-for="left in view.setup.leftovers || []" :key="left.key_id">
+            <p class="setup-note">Dash could not delete the key <span class="mono" x-text="left.key_name"></span> (<span x-text="left.reason"></span>). Delete it in the Backblaze console.</p>
+          </template>
+          <p class="text-muted" x-show="view.setup.stored_bytes" x-text="'One backup of everything is ' + bytesLabel(view.setup.stored_bytes) + '. Expect the bucket to hold about ' + bytesLabel(view.setup.projected_bytes) + ' once it settles.'"></p>
+          <p class="text-muted"><a :href="view.setup.recovery_doc" target="_blank" rel="noopener">How to get your data back</a></p>
+
+          <!-- Retire a server -->
+          <template x-if="retireFor">
+            <form class="setup-step" @submit.prevent="submitRetire()">
+              <h3 x-text="'Retire ' + retireFor"></h3>
+              <p>Dash deletes this server's key and stops its backups. Paste a Backblaze key that has deleteKeys.</p>
+              <div class="form-row">
+                <label>Key ID<input x-model="setupKey.id" autocomplete="off"></label>
+                <label>Application key<input type="password" x-model="setupKey.secret" autocomplete="off"></label>
+              </div>
+              <label class="checkbox-label"><input type="radio" value="keep" x-model="retireData"> Keep its backups in the bucket</label>
+              <label class="checkbox-label"><input type="radio" value="remove" x-model="retireData"> Remove its backups for good (the key also needs listFiles and deleteFiles)</label>
+              <label x-show="retireData === 'remove'">Type the server's name to confirm<input x-model="retireConfirm" autocomplete="off"></label>
+              <label>Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+              <p class="setup-error" role="alert" x-show="setupError" x-text="setupError"></p>
+              <div class="header-actions">
+                <button class="btn btn-danger" type="submit" :disabled="setupBusy" x-text="setupBusy ? 'Working…' : 'Retire'"></button>
+                <button class="btn btn-sm" type="button" @click="retireFor = null; clearSetupSecrets()">Cancel</button>
+              </div>
+            </form>
+          </template>
+
+          <!-- The flow -->
+          <template x-if="setupOpen">
+            <div class="setup-flow">
+              <ol class="setup-steps">
+                <template x-for="(s, i) in setupStepNames" :key="s.id">
+                  <li :class="{ current: setupStep === s.id }"><button type="button" class="linklike" @click="setupStep = s.id; setupError = ''; if (s.id === 'turnon') loadCoverage()" x-text="(i + 1) + '. ' + s.label"></button></li>
+                </template>
+              </ol>
+
+              <p class="setup-error" role="alert" x-show="setupError" x-text="setupError"></p>
+
+              <!-- 1. Servers -->
+              <template x-if="setupStep === 'check'">
+                <div class="setup-step">
+                  <h3>Check your servers</h3>
+                  <p x-show="setupBusy">Checking…</p>
+                  <template x-for="sv in setupServers" :key="sv.server">
+                    <div class="setup-server">
+                      <label class="checkbox-label">
+                        <input type="checkbox" x-model="setupTicked[sv.server]" :disabled="!!sv.blocked">
+                        <span class="mono" x-text="sv.server"></span>
+                      </label>
+                      <p class="setup-error" x-show="sv.blocked" x-text="sv.blocked"></p>
+                      <p class="text-muted" x-show="sv.reachable" x-text="serverFacts(sv)"></p>
+                      <template x-for="w in sv.warnings || []" :key="w"><p class="text-muted" x-text="w"></p></template>
+                      <template x-for="a in sv.actions || []" :key="a"><p class="text-muted" x-text="a"></p></template>
+                      <label class="checkbox-label" x-show="(sv.needs_tools || []).length"><input type="checkbox" x-model="setupInstall[sv.server]"> <span x-text="'Install ' + (sv.needs_tools || []).join(', ') + ' on this server'"></span></label>
+                      <label class="checkbox-label" x-show="sv.needs_upgrade"><input type="checkbox" x-model="setupUpgrade[sv.server]"> <span x-text="'Update teploy on this server to ' + (sv.cli_version || 'the latest')"></span></label>
+                    </div>
+                  </template>
+                  <div class="header-actions">
+                    <button class="btn" x-show="anyPrepareTicked()" :disabled="setupBusy" @click="prepareServers()">Make these changes</button>
+                    <button class="btn btn-sm" :disabled="setupBusy" @click="runPreflight()">Check again</button>
+                    <button class="btn btn-primary" :disabled="setupBusy || selectedServers().length === 0 || blockingNeeds().length > 0" @click="setupStep = 'storage'; setupError = ''">Next</button>
+                  </div>
+                  <p class="text-muted" x-show="blockingNeeds().length" x-text="'Before going on, ' + blockingNeeds().join(' ')"></p>
+                </div>
+              </template>
+
+              <!-- 2. Storage -->
+              <template x-if="setupStep === 'storage'">
+                <form class="setup-step" @submit.prevent="setupCheck ? applyStorage() : checkKey()">
+                  <h3>Storage with Backblaze</h3>
+                  <p class="setup-warn" x-show="insecurePage()">This page is not encrypted on its way to you. Connect over HTTPS, localhost or your tailnet before pasting a key.</p>
+                  <p>Paste a temporary Backblaze key. Dash uses it once and never saves it, then makes each server its own limited key.</p>
+                  <details class="setup-help">
+                    <summary>How to make the key</summary>
+                    <p>It needs listBuckets, writeBuckets and writeKeys, plus deleteKeys so Dash can clean up afterwards. Give it a short expiry. With the Backblaze command line:</p>
+                    <p class="mono setup-code">b2 key create --duration 3600 teploy-setup listBuckets,writeBuckets,writeKeys,deleteKeys,listFiles</p>
+                  </details>
+                  <div class="form-row">
+                    <label>Key ID<input x-model="setupKey.id" autocomplete="off" @input="setupCheck = null"></label>
+                    <label>Application key<input type="password" x-model="setupKey.secret" autocomplete="off" @input="setupCheck = null"></label>
+                  </div>
+                  <template x-if="setupCheck">
+                    <div>
+                      <template x-if="(setupCheck.missing || []).length">
+                        <p class="setup-error" x-text="'This key is missing: ' + setupCheck.missing.join(', ') + '.'"></p>
+                      </template>
+                      <template x-for="w in setupCheck.warnings || []" :key="w"><p class="setup-warn" x-text="w"></p></template>
+                      <p class="setup-warn" x-show="setupCheck.listing_error" x-text="setupCheck.listing_error"></p>
+                      <template x-if="!(setupCheck.missing || []).length">
+                        <div>
+                          <label>Bucket
+                            <select x-model="setupBucket" @change="checkKey()">
+                              <option value="" :disabled="!setupCheck.can_create_bucket && !setupCheck.suggested_bucket" x-text="setupCheck.suggested_bucket ? 'Use ' + setupCheck.suggested_bucket : 'Create a new private bucket'"></option>
+                              <template x-for="b in setupCheck.buckets || []" :key="b.name"><option :value="b.name" x-text="b.name" :selected="b.name === setupBucket"></option></template>
+                            </select>
+                          </label>
+                          <template x-if="chosenBucket()">
+                            <div>
+                              <template x-for="r in chosenBucket().refusals" :key="r"><p class="setup-error" x-text="r"></p></template>
+                              <template x-for="w in chosenBucket().warnings" :key="w"><p class="setup-warn" x-text="w"></p></template>
+                              <p class="setup-warn" x-show="chosenBucket().s3_managed">This bucket's rules look like they are managed through the S3 API, so Dash will not change them.</p>
+                              <label class="checkbox-label" x-show="(chosenBucket().warnings || []).length"><input type="checkbox" x-model="setupAccept"> I have read this and want to use this bucket</label>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <details class="setup-help">
+                        <summary>Advanced</summary>
+                        <label>Keep hidden copies for (days)<input type="number" min="1" max="365" x-model="setupAdv.hide_days" placeholder="14"></label>
+                        <label class="checkbox-label"><input type="checkbox" x-model="setupAdv.empty_base"> Use the bucket root instead of a teploy folder</label>
+                        <label class="checkbox-label"><input type="checkbox" x-model="setupAdv.s3_managed"> I manage this bucket's rules through the S3 API. Dash shows the rules to add instead.</label>
+                        <label class="checkbox-label"><input type="checkbox" x-model="setupAdv.rotate"> Replace the keys of servers already set up</label>
+                      </details>
+                      <label>Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                    </div>
+                  </template>
+                  <div class="header-actions">
+                    <button class="btn" type="button" x-show="!setupCheck" :disabled="setupBusy" @click="checkKey()" x-text="setupBusy ? 'Checking…' : 'Check this key'"></button>
+                    <button class="btn btn-primary" type="submit" x-show="setupCheck" :disabled="setupBusy || !canApplyStorage()" x-text="setupBusy ? 'Setting up…' : 'Set up storage'"></button>
+                  </div>
+                  <template x-if="setupStorage">
+                    <div class="setup-result">
+                      <p x-text="'Bucket ' + setupStorage.bucket + (setupStorage.bucket_created ? ' was created.' : '.')"></p>
+                      <template x-for="w in setupStorage.warnings || []" :key="w"><p class="setup-warn" x-text="w"></p></template>
+                      <template x-if="(setupStorage.rules_text || []).length">
+                        <div><p>Add these rules to your bucket:</p><ul><template x-for="t in setupStorage.rules_text" :key="t"><li x-text="t"></li></template></ul></div>
+                      </template>
+                      <p class="setup-error" x-show="setupStorage.stopped" x-text="setupStorage.stopped"></p>
+                      <template x-for="r in setupStorage.servers || []" :key="r.server">
+                        <div>
+                          <p><span class="dot" :class="r.verified ? 'green' : 'red'"></span> <span class="mono" x-text="r.server"></span> <span x-text="storageResultLine(r)"></span></p>
+                          <p class="text-muted" x-show="r.note" x-text="r.note"></p>
+                          <template x-for="o in r.old_owners || []" :key="o.fingerprint">
+                            <div class="setup-server">
+                              <p>An older machine with this name left its mark here. Until it is cleared, old backups of this server will not be removed.</p>
+                              <label class="checkbox-label"><input type="checkbox" x-model="ownerForce[o.fingerprint]"> That machine is gone and will not write here again</label>
+                              <button class="btn btn-sm" type="button" :disabled="!ownerForce[o.fingerprint]" @click="clearOwner(r.server, o.fingerprint)">Clear it</button>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <p class="text-muted" x-text="setupStorage.key_note"></p>
+                      <button class="btn btn-primary" type="button" x-show="setupStorage.all_ok" @click="afterStorage()">Next</button>
+                    </div>
+                  </template>
+                </form>
+              </template>
+
+              <!-- 3. Recovery key -->
+              <template x-if="setupStep === 'recovery'">
+                <div class="setup-step">
+                  <h3>Your recovery key</h3>
+                  <template x-if="recovery.public_key">
+                    <div>
+                      <p>You already have a recovery key.</p>
+                      <button class="btn btn-primary" @click="afterRecovery()">Next</button>
+                    </div>
+                  </template>
+                  <template x-if="!recovery.public_key">
+                    <div>
+                      <p>This key opens your backups if a server is lost. Your browser makes it, and Dash never sees it. If you lose the file, nobody can read those backups.</p>
+                      <button class="btn" x-show="!recoveryGen" :disabled="setupBusy" @click="generateRecovery()">Make my key</button>
+                      <template x-if="recoveryGen">
+                        <div>
+                          <div class="header-actions">
+                            <button class="btn btn-primary" @click="downloadRecovery()">Download the key file</button>
+                            <button class="btn btn-sm" x-show="canCopy()" @click="copyRecovery()">Copy</button>
+                          </div>
+                          <p>Keep it somewhere away from your servers: a password manager, or a USB stick in a drawer.</p>
+                          <label>Now pick the file you saved, so your browser can check it<input type="file" accept=".txt,text/plain" @change="recoveryFilePicked($event)"></label>
+                          <p class="setup-error" x-show="recoveryError" x-text="recoveryError"></p>
+                          <p x-show="recoveryProven"><span class="dot green"></span> The file matches.</p>
+                          <label x-show="recoveryProven">Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                          <button class="btn btn-primary" x-show="recoveryProven" :disabled="setupBusy" @click="saveRecovery()">Next</button>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- 4. Alerts -->
+              <template x-if="setupStep === 'alerts'">
+                <form class="setup-step" @submit.prevent="saveAlert()">
+                  <h3>Tell me if something goes wrong</h3>
+                  <template x-if="view.setup.alerts_configured">
+                    <div><p>You already have an alert set up.</p><button class="btn btn-primary" type="button" @click="afterAlerts()">Next</button></div>
+                  </template>
+                  <template x-if="!view.setup.alerts_configured">
+                    <div>
+                      <label>Send alerts by
+                        <select x-model="alertForm.type"><option value="ntfy">ntfy (a phone notification)</option><option value="email">Email</option></select>
+                      </label>
+                      <label x-show="alertForm.type === 'ntfy'">Topic URL<input x-model="alertForm.url" placeholder="https://ntfy.sh/your-private-topic"></label>
+                      <template x-if="alertForm.type === 'email'">
+                        <div>
+                          <div class="form-row">
+                            <label>Send to<input type="email" x-model="alertForm.email_to"></label>
+                            <label>Send from<input type="email" x-model="alertForm.email_from"></label>
+                          </div>
+                          <div class="form-row">
+                            <label>Mail server<input x-model="alertForm.smtp_host"></label>
+                            <label>Port<input type="number" x-model.number="alertForm.smtp_port"></label>
+                          </div>
+                          <div class="form-row">
+                            <label>Username<input x-model="alertForm.smtp_user" autocomplete="off"></label>
+                            <label>Password<input type="password" x-model="alertForm.smtp_pass" autocomplete="new-password"></label>
+                          </div>
+                        </div>
+                      </template>
+                      <p x-show="alertTest"><span class="dot" :class="alertTest && alertTest.ok ? 'green' : 'red'"></span> <span x-text="alertTest && alertTest.ok ? 'Test sent. Did it arrive?' : 'The test did not send: ' + (alertTest ? alertTest.error : '')"></span></p>
+                      <div class="header-actions">
+                        <button class="btn" type="submit" :disabled="setupBusy" x-text="setupBusy ? 'Sending…' : 'Save and send a test'"></button>
+                        <button class="btn btn-primary" type="button" x-show="alertTest && alertTest.ok" @click="afterAlerts()">It arrived. Next</button>
+                        <button class="btn btn-sm" type="button" @click="skipAlerts()">Skip for now</button>
+                      </div>
+                    </div>
+                  </template>
+                </form>
+              </template>
+
+              <!-- 5. Turn on -->
+              <template x-if="setupStep === 'turnon'">
+                <div class="setup-step">
+                  <h3>Turn on backups</h3>
+                  <p x-show="!setupCoverage">Reading what is on your servers…</p>
+                  <template x-if="setupCoverage">
+                    <div>
+                      <template x-for="sv in setupCoverage.servers" :key="sv.server">
+                        <div class="setup-server">
+                          <p class="mono" x-text="sv.server"></p>
+                          <p class="setup-error" x-show="sv.error" x-text="sv.error"></p>
+                          <p class="text-muted" x-show="!sv.error && sv.items.length === 0 && sv.unmanaged.length === 0">Nothing to back up yet. Dash will pick things up when you deploy them.</p>
+                          <ul x-show="sv.items.length"><template x-for="item in sv.items" :key="item.name"><li x-text="coverageLine(item)"></li></template></ul>
+                          <template x-if="sv.unmanaged.length">
+                            <p x-text="'Not managed by teploy: ' + sv.unmanaged.map(u => u.name).join(', ') + '.'"></p>
+                          </template>
+                        </div>
+                      </template>
+                      <label class="checkbox-label" x-show="hasUnmanaged()"><input type="checkbox" x-model="setupAdopt"> Also back up the databases not managed by teploy</label>
+                      <p x-text="'Your bucket will hold about ' + setupCoverage.multiplier + ' times the size of one backup. Dash shows the real size after the first run.'"></p>
+                      <details class="setup-help">
+                        <summary>Advanced</summary>
+                        <div class="form-row">
+                          <label>How often
+                            <select x-model="setupPolicy.interval"><template x-for="i in view.intervals || []" :key="i"><option :value="i" x-text="i" :selected="i === setupPolicy.interval"></option></template></select>
+                          </label>
+                          <label>Keep
+                            <select x-model="setupPolicy.preset"><option value="standard">7 daily, 4 weekly, 12 monthly</option><option value="simple">14 days</option></select>
+                          </label>
+                        </div>
+                        <label class="checkbox-label"><input type="checkbox" x-model="setupPolicy.skip_volumes"> Leave out app volumes</label>
+                      </details>
+                      <div class="header-actions">
+                        <button class="btn btn-primary" :disabled="setupBusy" @click="turnOn('now')">Back up now</button>
+                        <button class="btn" :disabled="setupBusy" @click="turnOn('next')">Start with the next scheduled run</button>
+                      </div>
+                      <template x-if="turnOnResult">
+                        <div class="setup-result">
+                          <template x-for="r in turnOnResult.servers" :key="r.server">
+                            <p><span class="dot" :class="r.ok ? 'green' : 'red'"></span> <span class="mono" x-text="r.server"></span> <span x-text="turnOnLine(r)"></span></p>
+                          </template>
+                          <button class="btn btn-primary" @click="setupStep = 'prove'; setupError = ''">Next</button>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- 6. Prove -->
+              <template x-if="setupStep === 'prove'">
+                <div class="setup-step">
+                  <h3>Prove you can get your data back</h3>
+                  <template x-if="recovery.drill_passed_at">
+                    <p><span class="dot green"></span> Your key opened a real backup. You are done here.</p>
+                  </template>
+                  <template x-if="!recovery.drill_passed_at">
+                    <div>
+                      <p>Pick your key file. Dash reads the start of a real backup from the server, and your browser opens it. The key stays in your browser.</p>
+                      <p class="text-muted" x-show="!recovery.drill_key">Waiting for the first backup to finish. This page refreshes by itself.</p>
+                      <label>Your key file<input type="file" accept=".txt,text/plain" :disabled="setupBusy" @change="proofFilePicked($event)"></label>
+                      <p x-show="setupBusy">Opening a backup…</p>
+                      <p x-show="proofState && proofState.passed"><span class="dot green"></span> <span x-text="proofState ? 'It worked. Your key opened ' + proofState.key : ''"></span></p>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+
       <!-- First-run checklist: storage → alert channel → recovery drill →
-           first verified backup. Shown until complete. -->
-      <template x-if="!loading && checklist.length > 0">
+           first verified backup. Shown until complete, on a CLI too old for the flow. -->
+      <template x-if="!loading && checklist.length > 0 && !setupSupported()">
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Get protected</h2><span class="card-meta">Four steps, once</span></div>
           <ul style="list-style:none;padding:0;margin:0">
@@ -1831,7 +2184,7 @@
 
       <!-- The decrypt drill banner: a key (or storage) without a passed
            drill keeps this up. Deliberately not an alert. -->
-      <template x-if="!loading && recovery.banner">
+      <template x-if="!loading && recovery.banner && !setupSupported()">
         <div role="status" class="stale-banner">
           <strong>Recovery is unproven.</strong>
           <span x-text="recovery.public_key
@@ -1842,8 +2195,10 @@
 
       <template x-if="!loading && view && view.cli_supported">
         <div>
-          <!-- Storage + recovery + policy -->
-          <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));margin-bottom:1rem">
+          <!-- Storage + recovery + policy: every manual control, as it always was. -->
+          <details class="setup-advanced" :open="!setupSupported()">
+          <summary>Advanced</summary>
+          <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));margin-bottom:1rem">
             <div class="card">
               <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
                 <h2>Storage</h2>
@@ -1895,7 +2250,7 @@
                   </div>
                   <label class="checkbox-label" x-show="storage.provider === 'custom'"><input type="checkbox" x-model="storage.allow_internal"> This endpoint is on a private network (admin choice)</label>
                   <label class="checkbox-label"><input type="checkbox" x-model="storage.delete_refusal_ok"> The store refuses deletes on purpose (a bucket lock)</label>
-                  <p class="text-muted">Dash probes write/read/delete first. On B2, a key that cannot delete is the recommended setup: a compromised server cannot destroy history.</p>
+                  <p class="text-muted">Dash probes write/read/delete first. On B2, a key without deleteFiles is the recommended setup, because it can only hide files: a compromised server cannot destroy history. Dash checks that the hide really works, and stops if it does not, because retention needs it.</p>
                   <p class="text-muted" x-show="storage.provider === 'b2'">Create a B2 application key limited to this bucket with listFiles, readFiles, writeFiles and readBucketLifecycleRules, and without deleteFiles. If you limit it to a file name prefix, use the same value as the prefix here, because every server stores under it.</p>
                   <button class="btn" type="submit" :disabled="storageBusy" x-text="storageBusy ? 'Working…' : (rotateMode ? 'Push new keys to every server' : 'Probe and connect every server')"></button>
                   <button class="btn btn-sm" type="button" x-show="rotateMode" @click="rotateMode = false">Cancel</button>
@@ -2011,6 +2366,7 @@
               </div>
             </template>
           </div>
+          </details>
 
           <!-- Fleet rows -->
           <template x-for="s in servers" :key="s.server">
@@ -2039,7 +2395,7 @@
                       <th>Newest copy</th>
                       <th>Encrypted</th>
                       <th>Restore test</th>
-                      <th>Old job</th>
+                      <th x-show="hasHandwritten()">Old job</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -2049,7 +2405,7 @@
                         <td>
                           <span class="mono" x-text="row.name"></span>
                           <div class="text-muted" x-text="[row.app, row.server].filter(Boolean).join(' on ')"></div>
-                          <div class="text-muted" x-show="row.uncovered_databases && row.uncovered_databases.length" x-text="'uncovered databases: ' + row.uncovered_databases.join(', ')"></div>
+                          <div class="text-muted" x-show="row.uncovered_databases && row.uncovered_databases.length" x-text="'uncovered databases: ' + (row.uncovered_databases || []).join(', ')"></div>
                           <div class="text-muted" x-show="row.reason" x-text="row.reason"></div>
                         </td>
                         <td x-text="row.engine || '—'"></td>
@@ -2069,10 +2425,10 @@
                           <span x-text="row.encrypted ? 'yes' : 'no'"></span>
                         </td>
                         <td>
-                          <span x-show="row.last_restore_test" x-text="row.last_restore_test.ok ? 'passed ' + ageLabel(Math.round((Date.now() - Date.parse(row.last_restore_test.at)) / 1000)) : 'FAILED ' + ageLabel(Math.round((Date.now() - Date.parse(row.last_restore_test.at)) / 1000))"></span>
+                          <span x-show="row.last_restore_test" x-text="!row.last_restore_test ? '' : (row.last_restore_test.ok ? 'passed ' : 'FAILED ') + ageLabel(Math.round((Date.now() - Date.parse(row.last_restore_test.at)) / 1000))"></span>
                           <span class="text-muted" x-show="!row.last_restore_test">never</span>
                         </td>
-                        <td>
+                        <td x-show="hasHandwritten()">
                           <template x-if="row.migration">
                             <span>
                               <span class="dot" :class="row.migration.ready ? 'green' : 'gray'"></span>
@@ -2162,8 +2518,8 @@
             </template>
           </div>
 
-          <!-- Migration off hand-written jobs (report-only) -->
-          <div class="card">
+          <!-- Migration off hand-written jobs (report-only): only when some are found. -->
+          <div class="card" x-show="hasHandwritten()">
             <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Retiring hand-written backup jobs</h2></div>
             <p class="text-muted" x-text="view.handwritten_rule"></p>
             <p class="text-muted">Dash cannot read a server's systemd timers and cron scripts (no CLI read for them yet), so the known job names are a checklist to confirm by hand:</p>
@@ -2177,9 +2533,10 @@
 
           <!-- Dash itself -->
           <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Dash itself</h2><span class="card-meta" x-text="view.self_backup.available ? 'covered' : 'not covered yet'"></span></div>
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Dash itself</h2><span class="card-meta" x-text="view.self_backup.available ? 'backed up' : 'not backed up yet'"></span></div>
             <p x-text="view.self_backup.reason"></p>
-            <p class="text-muted">Rebuild runbook: <span class="mono" x-text="view.self_backup.runbook"></span> in the repository.</p>
+            <p class="setup-warn" x-show="view.self_backup.warning" x-text="view.self_backup.warning"></p>
+            <p class="text-muted">Getting it back: <span class="mono" x-text="view.self_backup.runbook"></span> in the repository.</p>
           </div>
         </div>
       </template>
