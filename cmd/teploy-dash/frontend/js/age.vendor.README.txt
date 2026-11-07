@@ -1,0 +1,7 @@
+age.vendor.js is a bundle of age-encryption@0.3.1 (MIT, see age.vendor.LICENSE), built
+with esbuild@0.25.12 from scripts/vendor-age/entry.mjs:
+
+  sh scripts/vendor-age/build.sh
+
+It exposes window.TeployAge: generate, derivePublic, decryptStart, parseIdentityFile.
+Dash loads it only on the setup flow. Do not edit the bundle by hand.
