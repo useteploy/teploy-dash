@@ -4,10 +4,28 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.25] - 2026-11-07
+
 ### Added
 
+- **Protect my data**: one setup flow for off-site backups on the Backups and
+  home pages. It runs server preflight first (tool installs and binary upgrades
+  only with consent), takes a temporary Backblaze key that creates the bucket,
+  lifecycle rules and one limited key per server and is then forgotten,
+  generates the recovery key in the browser so Dash only holds the public half,
+  and shows Protected only after a verified backup and a passing restore test
+  per covered database (expires when a test is over 21 days old). Manual
+  controls stay under Advanced. Tested against a fake B2 only; the Backblaze key
+  instructions are marked as a draft until a real-account run.
+- `docs/recovery.md`: one recovery page (not yet rehearsed, and it says so).
 - Connecting Observe links straight to its token form, filled in.
 - Disk alerts: Dash checks each server's filesystems every 10 minutes and alerts at 90% full, critical at 95%, clearing below 85%.
+
+### Changed
+
+- Bundles teploy CLI v0.1.55; contracts corpus rev 21.
+- A server with every backup unticked is skipped, not reported as failing.
+- B2 lifecycle guidance completed and the key's permissions named.
 
 ## [0.1.24] - 2026-11-05
 
