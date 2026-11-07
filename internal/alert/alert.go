@@ -41,6 +41,7 @@ const (
 	SourceRestoreTest = "restore-test"
 	SourceBackup      = "backup"
 	SourceDomain      = "domain"
+	SourceDisk        = "disk"
 	SourceOperation   = "operation"
 	SourceAudit       = "audit"
 	// SourceHeartbeat labels push/heartbeat monitors (a server backup job or

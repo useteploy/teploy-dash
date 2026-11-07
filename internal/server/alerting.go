@@ -35,6 +35,7 @@ import (
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
 	"github.com/useteploy/teploy-dash/internal/outbox"
+	"github.com/useteploy/teploy-dash/internal/remote"
 )
 
 // alertHoldGrace is how long a hold outlives the condition that caused it
@@ -60,6 +61,7 @@ type alertingState struct {
 	audit     *audit.Log
 	heartbeat *heartbeat.Runner
 	pushLimit *rateLimiter
+	diskRead  func(context.Context, remote.ServerConn) (string, error) // a seam for tests; nil reads over SSH
 
 	holdMu     sync.Mutex
 	lockFirst  map[string]time.Time // first time a deploy lock was observed

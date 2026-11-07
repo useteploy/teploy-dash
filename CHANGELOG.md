@@ -4,6 +4,10 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- Disk alerts: Dash checks each server's filesystems every 10 minutes and alerts at 90% full, critical at 95%, clearing below 85%.
+
 ## [0.1.24] - 2026-11-05
 
 ## [0.1.23] - 2026-11-05
