@@ -3016,7 +3016,7 @@
             <form @submit.prevent="previewDoc ? connectObserve() : previewObserve()">
               <h2 class="section-title" style="margin-bottom: 8px;">Connect Observe</h2>
               <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
-                Mint a service token in Observe (Settings → Service Tokens; scopes <span class="mono">sites:create</span> and <span class="mono">keys:mint</span>).
+                Create a service token in Observe, then paste it here. <a x-show="observeTokenURL()" :href="observeTokenURL()" target="_blank" rel="noopener">Open the filled-in form in Observe</a><span x-show="!observeTokenURL()">Enter the address below for a link to the filled-in form, or use Settings → Service Tokens with scopes <span class="mono">sites:create</span> and <span class="mono">keys:mint</span>.</span>
                 Dash never sees an Observe admin login, and nothing is written until you confirm this instance's identity.
                 <span x-show="observeHintData && observeHintData.available">A confirmed Observe was found on the fleet — its address is prefilled.</span>
               </p>
