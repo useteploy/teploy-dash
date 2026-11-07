@@ -62,11 +62,30 @@ func backupObservations(rec *backupServerRecord, now time.Time) (obs []backupObs
 		obs = append(obs, o)
 	}
 
+	// A server the person left out raises nothing, except a database nobody has decided
+	// about yet. Rules from before the choice retire with the next complete read.
+	if len(rec.SkippedByChoice) > 0 {
+		chosen := map[string]bool{}
+		for _, name := range rec.SkippedByChoice {
+			chosen[name] = true
+		}
+		for i := range st.Entries {
+			e := &st.Entries[i]
+			if e.Coverage == "uncovered" && !chosen[e.Name] {
+				add(backupObservation{backupRule(rec.Server, "uncovered", e.Name, e.Name+" on "+rec.Server+" is not covered", alert.SeverityWarning), false, "a new database appeared on a server you chose not to back up"})
+			}
+		}
+		return obs, keys
+	}
+
 	if st.Target.Configured {
 		rule := backupRule(rec.Server, "target", "", "backup target on "+rec.Server, alert.SeverityCritical)
 		switch {
 		case !st.Target.HasCredentials:
 			add(backupObservation{rule, false, "the target has no stored credentials — connect storage again"})
+		case !st.Target.Reachable && backupTargetCapped(st.Target.Error):
+			// Not an outage, and the server is fine: say what it is.
+			add(backupObservation{rule, false, backupCappedMessage})
 		case !st.Target.Reachable:
 			msg := "the server cannot reach its backup target"
 			if st.Target.Error != "" {

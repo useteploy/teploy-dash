@@ -38,8 +38,10 @@ type fakeStore struct {
 	readStatus   int
 	readCorrupt  bool
 	deleteStatus int
-	methods      []string
-	auth         []string
+	// keepAfterDelete: an accepted delete leaves the object readable.
+	keepAfterDelete bool
+	methods         []string
+	auth            []string
 }
 
 func (f *fakeStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +66,11 @@ func (f *fakeStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(f.readStatus)
 			return
 		}
-		body := f.objects[r.URL.Path]
+		body, ok := f.objects[r.URL.Path]
+		if !ok && !f.keepAfterDelete {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if f.readCorrupt {
 			body = []byte("different")
 		}
@@ -74,7 +80,9 @@ func (f *fakeStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(f.deleteStatus)
 			return
 		}
-		delete(f.objects, r.URL.Path)
+		if !f.keepAfterDelete {
+			delete(f.objects, r.URL.Path)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -93,8 +101,11 @@ func TestRunWritesReadsDeletes(t *testing.T) {
 	if !res.Write || !res.Read || res.Delete != DeleteRemoved || res.Error != "" {
 		t.Fatalf("res = %+v", res)
 	}
-	if strings.Join(f.methods, ",") != "PUT,GET,DELETE" {
+	if strings.Join(f.methods, ",") != "PUT,GET,DELETE,GET" {
 		t.Fatalf("methods = %v", f.methods)
+	}
+	if !res.Hidden {
+		t.Fatalf("the object is gone, so it reads as hidden: %+v", res)
 	}
 	if len(f.objects) != 0 {
 		t.Fatalf("object left behind: %v", f.objects)
@@ -108,7 +119,15 @@ func TestRunWritesReadsDeletes(t *testing.T) {
 
 func TestRunReportsARefusedDelete(t *testing.T) {
 	res := runAgainst(t, &fakeStore{deleteStatus: http.StatusForbidden})
-	if !res.Write || !res.Read || res.Delete != DeleteRefused {
+	if !res.Write || !res.Read || res.Delete != DeleteRefused || res.Hidden {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+// An accepted delete that leaves the object readable did not hide anything.
+func TestRunSeesAnObjectStillReadable(t *testing.T) {
+	res := runAgainst(t, &fakeStore{keepAfterDelete: true})
+	if res.Delete != DeleteRemoved || res.Hidden {
 		t.Fatalf("res = %+v", res)
 	}
 }

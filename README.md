@@ -276,6 +276,38 @@ CLI's fleet engine (v0.1.52 on the dashboard host, capability `backup-fleet-v1`;
 an older CLI is a note and the page stays empty — mixed fleets keep working
 because the engine runs on each server, not here).
 
+**Protect my data** (teploy v0.1.55, capability `backup-setup-v1`) takes a new user to
+verified, encrypted, off-site backups from this page, in six steps. The manual controls
+stay under **Advanced**; both drive the same engine.
+
+1. **Check your servers**, before any key is asked for: reachable, teploy version, aws,
+   age, python3, free disk. Tools and old server binaries are only changed with consent.
+2. **Storage.** Paste an expiring Backblaze key with listBuckets, writeBuckets and
+   writeKeys. Dash reads the capabilities and S3 endpoint from it, reuses a bucket or
+   creates a private `teploy-backups-<random>`, merges its lifecycle rules, and mints
+   one key per server limited to the bucket and `teploy/<server>/`, without deleteFiles.
+   Each key must really hide a test object before it reaches a server, or setup stops:
+   retention cannot work without that. The pasted key lives only in that request.
+3. **Recovery key.** Made in your browser and saved as a file, which you then pick again
+   so the browser can check it. Only the public key reaches Dash.
+4. **Alerts**, ntfy or email with a test send. Skippable, and it keeps reminding you.
+5. **Turn on.** Shows what each server will cover, including databases teploy does not
+   manage, which are backed up too unless you untick them, and storage as a multiple of
+   one backup. "Back up now" or "Start with the next scheduled run".
+6. **Prove recovery.** Pick the key file again: Dash reads the first 128 KiB of a real
+   backup from the server, your browser decrypts it, and Dash records the result.
+
+**Protected** means a verified backup on each covered target, a restore test passed
+within 21 days for each covered database, and no database left out of a backup. Volume-only
+servers need no restore test. If you chose to skip a database, the page says "Protected,
+except" and names it. If you untick everything on a server, Dash writes no policy or cron
+line there, leaves any existing policy alone, keeps the server out of failures and alerts,
+and shows it as skipped until you tick it again. A server that has a target is left alone unless you tick it, because a
+push replaces its target and Dash cannot put the old key back. New,
+rebuilt and retired servers each have their own short action on the page.
+[docs/recovery.md](docs/recovery.md) covers getting data back; it has not been rehearsed
+yet.
+
 - **First-run checklist** — storage → alert channel → recovery-key drill → first
   verified backup — shown until complete, then never again.
 - **Connect storage once.** Presets for Backblaze B2 (recommended: application
@@ -284,9 +316,10 @@ because the engine runs on each server, not here).
   probes write/read/delete first, then pushes `server backup-target set` to every
   server with the credentials on stdin, then forgets them: the record keeps the
   bucket name and per-server prefixes only. A B2 key that cannot delete is the
-  documented good setup (a compromised server cannot destroy history; the bucket's
-  lifecycle rules remove hidden versions after 30 days). Rotation re-prompts, pushes, verifies
-  each server and tells you when to revoke the old key.
+  documented good setup, so long as it can still hide: the probe confirms the test object
+  is hidden, and stops if the store refuses (a compromised server cannot destroy history;
+  the bucket's lifecycle rules remove hidden versions after 14 days). Rotation re-prompts,
+  pushes, verifies each server and tells you when to revoke the old key.
 - **Recovery key.** `teploy backup keygen` output shown exactly once (re-auth
   required; the private key is stored nowhere); the public half is pushed to
   every server and every object is age-encrypted to it *and* the server's own
@@ -321,18 +354,22 @@ because the engine runs on each server, not here).
   remove* once Dash has watched two consecutive good policy backups arrive AND a
   restore test of the same engine kind passed. The known hand-written job names
   (akiroo-backup, teploy-backup.sh, teploy-wp-dbbackup, omni-backup,
-  teploy-nucleus-backup, dash-state-backup) are listed as the owner's checklist;
-  removal itself stays a human action on the server, and old dumps stay until
-  they age out. Dash cannot list a server's systemd/cron jobs — no CLI read for
-  that exists yet (recorded as a gap).
-- **Dash itself** is not yet covered by the policy engine: the CLI cannot encrypt
-  to the owner key alone or target arbitrary paths. Until it can, the page says
-  so and points at [`docs/rebuild-dash.md`](docs/rebuild-dash.md) — the rebuild
-  runbook and the interim dash-state job (age to the owner key only).
+  teploy-nucleus-backup, dash-state-backup) are listed as the owner's checklist,
+  shown only when Dash finds signs of such jobs: legacy cron lines, or a policy
+  something else manages. Removal itself stays a human action on the server, and
+  old dumps stay until they age out. Dash cannot list a server's systemd/cron jobs
+  (no CLI read for that exists yet, recorded as a gap).
+- **Dash itself** is backed up as the `dash/volumes` entry when it runs from the
+  deployment template. Objects encrypted to the owner key and the server open with
+  the owner key alone. Dash's volumes hold its SSH key, so a policy with no recovery
+  key excludes them on the server proved to host this Dash (`TEPLOY_APP` and the
+  `dev.teploy.product=dash` label, through `server siblings`). If that cannot be proved,
+  the page warns rather than excluding by name. Paths outside the template's volumes are
+  reported as uncovered. See [`docs/recovery.md`](docs/recovery.md).
 
-Every action is audited; connecting storage and the recovery key need
-`administer.credentials`, the policy and excludes `execute.mutate`, and nothing
-here is exposed over MCP.
+Every action is audited; connecting storage, the recovery key and every step of
+"Protect my data" need `administer.credentials`, the policy and excludes
+`execute.mutate`, and nothing here is exposed over MCP.
 ### Cleanup
 
 **Cleanup** answers "what is left over on each server?" with the CLI's read-only
@@ -739,7 +776,20 @@ so the direct role claim is available here and takes precedence over groups.
 | GET | `/api/domains` | Domain health: one row per domain (DNS, route, certificate, HTTP, first failing layer, evidence age), per-server check state, CLI gate. `view.metadata`. |
 | GET | `/api/backups` | The fleet backups view: cached per-server status (coverage rows, targets, tooling, last run), storage record (never credentials), recovery-key state + drill, the applied policy, dash-owned restore tests with history, migration readiness, projected storage. `view.metadata`. |
 | POST | `/api/backups/refresh` | Ask for a new fleet status read now (the page follows the cache). `execute.mutate`. |
-| POST | `/api/backups/storage` | Probe write/read/delete, then push `server backup-target set` to every server with the credentials on stdin and forget them. `{provider: b2\|r2\|custom, bucket, region/account_id/endpoint, base_prefix, access_key, secret_key, rotate?}`; B2 delete-refusal is accepted, others need `delete_refusal_ok`. `administer.credentials`. |
+| POST | `/api/backups/storage` | Probe write/read/delete, then push `server backup-target set` to every server with the credentials on stdin and forget them. `{provider: b2\|r2\|custom, bucket, region/account_id/endpoint, base_prefix, access_key, secret_key, rotate?}`; a refused delete needs `delete_refusal_ok`, except on B2, where it connects with a warning, as does an accepted delete that leaves the object readable. `administer.credentials`. |
+| POST | `/api/backups/setup/preflight` | Check servers: `{servers?, install_tools?, upgrade_binary?}`; the last two name servers whose tools or binary may be changed. `administer.credentials`, as is everything under `/api/backups/setup/`. |
+| POST | `/api/backups/setup/storage/check` | Read a Backblaze key: `{key_id, application_key, bucket?}` returns its missing capabilities, expiry and buckets with their warnings. The key is forgotten with the request. |
+| POST | `/api/backups/setup/storage/apply` | Set up a bucket and a key per named server: `{password, key_id, application_key, servers, bucket?, accept_warnings?, replace_configured?, rotate?, empty_base?, hide_days?, s3_managed?}`. Rerunning skips servers verified in the operation that pushed their key, and pushes a new key to the rest. Older keys go only after a push that succeeded and verified. |
+| POST | `/api/backups/setup/owners` | Clear a rebuilt server's old marker: `{server, fingerprint, force?, password?}`. Forcing needs the password. |
+| POST | `/api/backups/setup/leftovers/dismiss` | Dismiss a notice about a key Dash could not delete: `{key_id}`. |
+| POST | `/api/backups/setup/recovery` | Record the public key the browser made: `{password, public_key}`. |
+| POST | `/api/backups/setup/alerts/skip` | Skip alerts for now; the page keeps reminding. |
+| POST | `/api/backups/setup/coverage` | What named servers would cover, with the storage multiplier: `{servers}`. |
+| POST | `/api/backups/setup/turn-on` | Write the policy to named servers: `{password, servers, start: now\|next, skip?, interval?, preset?, skip_volumes?, volume_max_gb?}`. Unmanaged databases are adopted unless named in `skip` by server. What is left out keeps its existing value. |
+| POST | `/api/backups/setup/run` | Back up now: `{servers}`, through a detached run. |
+| POST | `/api/backups/setup/proof/start` | Read the first 128 KiB of the newest encrypted backup, as stored, for the browser to decrypt. |
+| POST | `/api/backups/setup/proof/result` | Record the outcome: `{key, passed, detail?}`. |
+| POST | `/api/backups/setup/retire` | Retire a server: `{password, key_id, application_key, server, data: keep\|remove, confirm?}`. |
 | POST | `/api/backups/recovery-key/generate` | `teploy backup keygen` — the private key is returned exactly once and stored nowhere. Re-auth (account password) required. `administer.credentials`. |
 | POST | `/api/backups/recovery-key/confirm` | "I saved it": pushes the public key as `--recipient` to every server. `administer.credentials`. |
 | POST | `/api/backups/recovery-key/drill` | Record the decrypt drill: `{output}` is the JSON `teploy backup fetch --identity` printed; checked against the assigned object and its plausible plaintext size. `administer.credentials`. |

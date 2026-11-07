@@ -473,3 +473,14 @@ func TestBackupsPage_HandwrittenSurface(t *testing.T) {
 		t.Error("the rule must say removal stays a human action")
 	}
 }
+
+// A new user with no such jobs never sees the list.
+func TestBackupsPage_HandwrittenHiddenWithoutEvidence(t *testing.T) {
+	c := &backupCLI{}
+	s := newBackupsServer(t, c)
+	s.recordBackupStatus("prod", mustDecodeStatus(t, "status-unconfigured.json"), nil, backupsNow)
+	view := s.backupsView(context.Background(), backupsNow)
+	if len(view.Handwritten) != 0 || view.HandwrittenRule != "" {
+		t.Fatalf("no evidence of hand-written jobs, yet listed: %+v", view.Handwritten)
+	}
+}

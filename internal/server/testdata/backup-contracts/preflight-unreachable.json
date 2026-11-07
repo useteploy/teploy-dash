@@ -1,0 +1,39 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "observed_at": "2026-11-06T12:00:00Z",
+  "reachable": false,
+  "error": "dial tcp 192.0.2.10:22: i/o timeout",
+  "binary": {
+    "path": "/usr/local/bin/teploy",
+    "state": "unknown",
+    "fleet_engine": null,
+    "cli_version": "0.1.55",
+    "same_as_cli": null
+  },
+  "tools": {
+    "aws": {
+      "state": "unknown"
+    },
+    "age": {
+      "state": "unknown"
+    },
+    "python3": {
+      "state": "unknown"
+    }
+  },
+  "disk": {
+    "path": "/var/tmp",
+    "free_bytes": null
+  },
+  "target": {
+    "state": "unknown",
+    "has_credentials": false
+  },
+  "policy": {
+    "state": "unknown",
+    "encrypted": false,
+    "cron_installed": null,
+    "managed_elsewhere": "unknown"
+  }
+}

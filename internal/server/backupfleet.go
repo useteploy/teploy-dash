@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/b2"
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/remote"
@@ -177,6 +179,13 @@ type backupServerRecord struct {
 	// HeartbeatMonitorID is the push monitor Dash owns for this server.
 	HeartbeatMonitorID string `json:"heartbeat_monitor_id,omitempty"`
 	HeartbeatNote      string `json:"heartbeat_note,omitempty"`
+	// SkippedByChoice names what a person unticked when they left this whole server out.
+	// Non-empty means the server is skipped: no policy was written, and it stays out of
+	// the failure and alert paths, apart from a database that appears later.
+	SkippedByChoice []string `json:"skipped_by_choice,omitempty"`
+	// SelfExcluded is what Dash added to this server's excludes because the policy had
+	// no recovery key, so a key arriving later can take it back out.
+	SelfExcluded []string `json:"self_excluded,omitempty"`
 	// Migration is the per-entry evidence for retiring hand-written backup
 	// jobs (plan P2.9): distinct good policy backups seen and their keys.
 	Migration map[string]*backupMigrateEntry `json:"migration,omitempty"`
@@ -197,6 +206,7 @@ type backupRecord struct {
 	Storage         *backupStorage                 `json:"storage,omitempty"`
 	Policy          *backupPolicySpec              `json:"policy,omitempty"`
 	Recovery        *backupRecovery                `json:"recovery,omitempty"`
+	Setup           *backupSetupRecord             `json:"setup,omitempty"`
 	Window          backupWindow                   `json:"window"`
 	ChecklistDoneAt *time.Time                     `json:"checklist_done_at,omitempty"`
 	Servers         map[string]*backupServerRecord `json:"servers"`
@@ -224,6 +234,13 @@ type backupState struct {
 	probe func(context.Context, s3probe.Config) s3probe.Result
 	// resources is the pre-launch free RAM/disk read (a seam for tests).
 	resources func(context.Context, remote.ServerConn) (backupResources, error)
+	// setupMu keeps the steps of "Protect my data" that change servers single-flight.
+	setupMu sync.Mutex
+	// b2Client makes the Backblaze client (a seam for tests).
+	b2Client func() *b2.Client
+	// dataDir is where this Dash keeps its state; selfApp is its own app name.
+	dataDir string
+	selfApp string
 }
 
 // serverName aliases the fleet's server connection type: the backup files
@@ -246,6 +263,7 @@ func (s *Server) initBackups(dataDir string) {
 	b.running = map[string]bool{}
 	b.probe = s3probe.Run
 	b.resources = s.readBackupResources
+	b.dataDir, b.selfApp = dataDir, backupSelfApp()
 	if dataDir == "" {
 		return
 	}
@@ -675,6 +693,7 @@ type backupsPageView struct {
 	Rows            []backupRowView        `json:"rows"`
 	Tests           []backupAutoTestView   `json:"tests"`
 	ProjectedBytes  int64                  `json:"projected_bytes"`
+	Setup           *backupSetupView       `json:"setup,omitempty"`
 	SelfBackup      backupSelfView         `json:"self_backup"`
 	Handwritten     []backupHandwrittenJob `json:"handwritten,omitempty"`
 	HandwrittenRule string                 `json:"handwritten_rule,omitempty"`
@@ -686,7 +705,24 @@ func (s *Server) handleBackupsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeData(w, s.backupsView(r.Context(), time.Now().UTC()))
+	view := s.backupsView(r.Context(), time.Now().UTC())
+	if view.Setup != nil {
+		// Key ids and names are for those who can act on them.
+		if !s.callerHolds(r, caps.AdministerCredentials) {
+			view.Setup.Leftovers = nil
+			for i := range view.Setup.Servers {
+				view.Setup.Servers[i].Key = ""
+			}
+		}
+		view.Setup.Reauth = "none"
+		if s.gate != nil {
+			view.Setup.Reauth = "local_account"
+			if session, ok := currentUser(r); ok && session.local {
+				view.Setup.Reauth = "password"
+			}
+		}
+	}
+	writeData(w, view)
 }
 
 func (s *Server) handleBackupsRefresh(w http.ResponseWriter, r *http.Request) {
@@ -704,8 +740,8 @@ func (s *Server) handleBackupsRefresh(w http.ResponseWriter, r *http.Request) {
 	writeData(w, map[string]bool{"ok": true})
 }
 
-// handleBackupsAction serves POST /api/backups/{refresh,storage,policy,exclude,override}
-// and /api/backups/recovery-key/{generate,confirm,drill}.
+// handleBackupsAction serves POST /api/backups/{refresh,storage,policy,exclude,override},
+// /api/backups/recovery-key/{generate,confirm,drill} and /api/backups/setup/*.
 func (s *Server) handleBackupsAction(w http.ResponseWriter, r *http.Request) {
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/backups/"), "/")
 	action, sub, _ := strings.Cut(rest, "/")
@@ -720,6 +756,8 @@ func (s *Server) handleBackupsAction(w http.ResponseWriter, r *http.Request) {
 		s.handleBackupExclude(w, r)
 	case "override":
 		s.handleBackupOverride(w, r)
+	case "setup":
+		s.handleBackupSetup(w, r, sub)
 	case "recovery-key":
 		switch sub {
 		case "generate":
@@ -741,10 +779,12 @@ func (s *Server) requireBackupFleet(w http.ResponseWriter, r *http.Request) bool
 }
 
 func (s *Server) backupsView(ctx context.Context, now time.Time) backupsPageView {
-	supported := s.cliInstalled() && s.capabilities(ctx).Features.BackupFleet
+	features := s.capabilities(ctx).Features
+	supported := s.cliInstalled() && features.BackupFleet
 	channels := s.alertChannelsConfigured()
 	publicURL := s.alertPublicURL()
 	manual := s.manualRestoreTests()
+	selfHosts := s.selfHostsFromSiblings()
 	b := &s.backups
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -754,7 +794,6 @@ func (s *Server) backupsView(ctx context.Context, now time.Time) backupsPageView
 		Storage: b.rec.storageViewLocked(), Policy: b.rec.Policy, Window: b.rec.Window,
 		Presets: backupPresetNames(), Intervals: backupIntervals, PublicURLSet: publicURL != "",
 		Servers: []backupServerView{}, Rows: []backupRowView{}, Tests: []backupAutoTestView{},
-		SelfBackup: backupSelfGap(), Handwritten: backupHandwrittenJobs, HandwrittenRule: HandwrittenRule,
 	}
 	if !supported {
 		view.Note = "Backups needs teploy " + backupFleetMinCLI + " or later on the dashboard host."
@@ -780,6 +819,12 @@ func (s *Server) backupsView(ctx context.Context, now time.Time) backupsPageView
 	}
 	view.Tests = b.testViewsLocked(now)
 	view.Recovery = b.rec.recoveryViewLocked(now)
+	view.SelfBackup = backupSelfStatus(b.selfApp, b.dataDir, backupSelfRows(view.Rows, selfHosts), b.rec.Recovery != nil)
+	view.Setup = b.setupViewLocked(s.cliInstalled() && features.BackupSetup, channels, &view, now)
+	// The hand-written-jobs list is for those who have some: new users never see it.
+	if b.backupHandwrittenFound(view.Rows) {
+		view.Handwritten, view.HandwrittenRule = backupHandwrittenJobs, HandwrittenRule
+	}
 	view.Checklist = b.checklistLocked(view.Servers, view.Rows, channels)
 	view.ChecklistDone = b.rec.ChecklistDoneAt != nil
 	if !view.ChecklistDone {
@@ -996,25 +1041,4 @@ func (b *backupState) checklistLocked(servers []backupServerView, rows []backupR
 		}
 	}
 	return []backupChecklistItem{storage, alert, drill, verified}
-}
-
-// backupSelfView says where Dash's own backup stands. See docs/rebuild-dash.md.
-type backupSelfView struct {
-	Available bool   `json:"available"`
-	Reason    string `json:"reason"`
-	Runbook   string `json:"runbook"`
-}
-
-// backupSelfGap: plan P2.7 needs dash-state, teploy-config, ssh-key and the secrets
-// file stored through the policy, encrypted to the owner key ALONE. CLI v0.1.52
-// encrypts every object to the owner key and the server's identity, and backs up
-// accessories, app volumes and adopted containers, with no way to name a recipient
-// set per target. That is the CLI's to add; Dash does not build a second backup
-// path around it (plan principle 1).
-func backupSelfGap() backupSelfView {
-	return backupSelfView{
-		Reason: "Dash does not back itself up yet. The teploy CLI cannot yet encrypt a backup to the recovery key alone, " +
-			"and Dash's SSH key must not be readable by a server's own key. Copy Dash's state by hand until it can.",
-		Runbook: "docs/rebuild-dash.md",
-	}
 }

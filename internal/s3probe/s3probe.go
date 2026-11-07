@@ -59,6 +59,9 @@ type Result struct {
 	Write  bool   `json:"write"`
 	Read   bool   `json:"read"`
 	Delete string `json:"delete"`
+	// Hidden: after an accepted delete, reading the object again found nothing. On a
+	// store that keeps versions, that is what a real hide looks like.
+	Hidden bool `json:"hidden"`
 	// Error names the first failed step in words, with the store's code.
 	Error string `json:"error,omitempty"`
 }
@@ -114,6 +117,9 @@ func Run(ctx context.Context, cfg Config) Result {
 		}
 	case status/100 == 2:
 		res.Delete = DeleteRemoved
+		if status, _, _, err := do(ctx, cfg, http.MethodGet, nil); err == nil && status == http.StatusNotFound {
+			res.Hidden = true
+		}
 	case status == http.StatusForbidden:
 		res.Delete = DeleteRefused
 		if res.Error == "" {

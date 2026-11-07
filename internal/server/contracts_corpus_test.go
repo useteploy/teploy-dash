@@ -77,6 +77,23 @@ func TestContractsCorpusVersionHandshakeDecodes(t *testing.T) {
 	}
 }
 
+// Corpus rev 21: the setup flow's three envelopes go through its real decoders.
+func TestContractsCorpusBackupSetupDecodes(t *testing.T) {
+	for _, name := range []string{"ready", "needs-setup", "unknown", "unreachable", "after-actions"} {
+		if _, err := decodeBackupPreflight(readCorpusFixture(t, "backup-preflight-envelope/valid/"+name+".json")); err != nil {
+			t.Errorf("preflight %s: %v", name, err)
+		}
+	}
+	if _, err := decodeBackupHead(readCorpusFixture(t, "backup-head-envelope/valid/encrypted.json")); err != nil {
+		t.Errorf("head: %v", err)
+	}
+	for _, name := range []string{"started", "already-running", "finished", "failed"} {
+		if _, err := decodeBackupDetach(readCorpusFixture(t, "backup-detach-envelope/valid/"+name+".json")); err != nil {
+			t.Errorf("detach %s: %v", name, err)
+		}
+	}
+}
+
 func TestContractsCorpusAppListEnvelopeDecodes(t *testing.T) {
 	raw := readCorpusFixture(t, "app-list-envelope/valid/mi2.json")
 	if _, err := cli.ParseJSON(raw); err != nil {

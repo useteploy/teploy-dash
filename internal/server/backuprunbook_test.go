@@ -10,9 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-const runbookPath = "../../docs/rebuild-dash.md"
+const runbookPath = "../../docs/recovery.md"
 
 // runbookNamedPaths are the file and directory names the runbook's table
 // names, each paired with the package tree whose non-test source must contain
@@ -85,12 +86,17 @@ func TestRebuildRunbook_KeyOnlyRecovery(t *testing.T) {
 	}
 	doc := string(raw)
 	essentials := []string{
-		"backup fetch",   // the drill command, for real
-		"--identity",     // the recovery key is the way back
-		"AGE-SECRET-KEY", // what the owner must have kept
-		"age -r",         // the interim job encrypts to the owner key alone
-		"CLI gap",        // why the job is not a policy entry yet
-		"test-send",      // the alert path is checked after a rebuild
+		"backup fetch",           // the proof, for real
+		"--identity",             // the recovery key is the way back
+		"AGE-SECRET-KEY",         // what the owner must have kept
+		"age -r",                 // a non-template Dash encrypts to the owner key alone
+		"test-send",              // the alert path is checked after a rebuild
+		"has not been rehearsed", // says so until someone has
+		"Read Only",              // the read-only console key setup never showed
+		"Everything is lost",     // the four cases the page covers
+		"server A's data onto server B",
+		"Dash itself",
+		"Hidden copies",
 	}
 	for _, want := range essentials {
 		if !strings.Contains(doc, want) {
@@ -99,19 +105,34 @@ func TestRebuildRunbook_KeyOnlyRecovery(t *testing.T) {
 	}
 }
 
-// The page surfaces the gap and points at the runbook instead of pretending.
-func TestBackupSelfView_GapAndRunbook(t *testing.T) {
-	v := backupSelfGap()
-	if v.Available {
-		t.Fatal("the self-backup must not claim to exist yet")
+// The page reports the real dash/volumes entry and points at the recovery page, and
+// the old claim that Dash cannot be backed up is gone.
+func TestBackupSelfStatus_ReportsTheRealEntry(t *testing.T) {
+	good := time.Now()
+	covered := []backupRowView{{Server: "infra", Name: "dash/volumes", Kind: "volumes", App: "dash", State: "covered", LastGood: &good, Encrypted: true}}
+	v := backupSelfStatus("dash", "/var/teploy-dash", covered, true)
+	if !v.Available || v.Entry != "dash/volumes" || !strings.Contains(v.Reason, "recovery key opens them on its own") {
+		t.Fatalf("covered: %+v", v)
 	}
-	if !strings.Contains(v.Reason, "cannot yet") || !strings.Contains(v.Reason, "recovery key alone") {
-		t.Fatalf("reason = %q", v.Reason)
+	if strings.Contains(v.Reason, "cannot yet") {
+		t.Fatalf("the old claim survives: %q", v.Reason)
 	}
-	if v.Runbook != "docs/rebuild-dash.md" {
+	if v.Runbook != "docs/recovery.md" {
 		t.Fatalf("runbook = %q", v.Runbook)
 	}
 	if _, err := os.Stat(runbookPath); err != nil {
-		t.Fatalf("the named runbook must exist: %v", err)
+		t.Fatalf("the named recovery page must exist: %v", err)
+	}
+
+	plain := []backupRowView{{Server: "infra", Name: "dash/volumes", Kind: "volumes", App: "dash", State: "covered", LastGood: &good}}
+	if v := backupSelfStatus("dash", "/var/teploy-dash", plain, false); v.Available || !strings.Contains(v.Warning, "SSH key") {
+		t.Fatalf("unencrypted volumes must warn: %+v", v)
+	}
+	excluded := []backupRowView{{Server: "infra", Name: "dash/volumes", Kind: "volumes", App: "dash", State: "excluded"}}
+	if v := backupSelfStatus("dash", "/var/teploy-dash", excluded, false); v.Available || !strings.Contains(v.Reason, "no recovery key") {
+		t.Fatalf("excluded for want of a key: %+v", v)
+	}
+	if v := backupSelfStatus("", "/srv/dash", nil, false); v.Available || !strings.Contains(v.Reason, "not deployed from the teploy template") || !strings.Contains(strings.Join(v.Uncovered, " "), "/srv/dash") {
+		t.Fatalf("a non-template Dash reports its paths as uncovered: %+v", v)
 	}
 }

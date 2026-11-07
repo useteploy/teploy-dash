@@ -1,0 +1,16 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "requested_at": "2026-11-06T12:00:00Z",
+  "status": "finished",
+  "pid": 4244,
+  "log": "/root/.config/teploy/backup-runs/run.IjKl9012.log",
+  "result": {
+    "status": "failed",
+    "started_at": "2026-11-06T12:00:00Z",
+    "duration_ms": 0,
+    "encrypted": false,
+    "targets": [],
+    "error": "no backup policy on this server: set one with `teploy server backup-policy set`"
+  }
+}

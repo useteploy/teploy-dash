@@ -1,0 +1,8 @@
+{
+  "machine_interface": 2,
+  "host": "192.0.2.10",
+  "requested_at": "2026-11-06T12:00:00Z",
+  "status": "started",
+  "pid": 4242,
+  "log": "/root/.config/teploy/backup-runs/run.AbCd1234.log"
+}

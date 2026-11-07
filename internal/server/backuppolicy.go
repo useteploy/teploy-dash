@@ -160,7 +160,7 @@ func (s *Server) requireReauth(w http.ResponseWriter, r *http.Request, password 
 		return false
 	}
 	if !session.local {
-		jsonError(w, "Recovery key actions need a local account's password. Sign in with a local admin account.", http.StatusForbidden)
+		jsonError(w, "This step needs a password, and single sign-on accounts do not have one here. Sign out, then sign in with a local admin account to finish it. An admin can create one under Settings, Users.", http.StatusForbidden)
 		return false
 	}
 	if _, ok := s.gate.authenticate(session.user, password); !ok {
@@ -260,12 +260,23 @@ func (s *Server) handleBackupKeyConfirm(w http.ResponseWriter, r *http.Request) 
 	ctx := context.WithoutCancel(r.Context())
 	results := s.forEachBackupServer(ctx, servers, func(ctx context.Context, name string) error {
 		args := []string{"server", "backup-policy", "set", "--host", name, "--recipient", body.PublicKey, "--json"}
+		// With a key, Dash's own volumes no longer have to stay out.
+		restored := false
+		if b.selfExcludedOn(name) {
+			if current, err := s.readBackupPolicyShow(ctx, name); err == nil {
+				args = append(args, "--exclude="+strings.Join(b.withoutSelfExcludes(name, current.Excludes), ","))
+				restored = true
+			}
+		}
 		result, err := s.runCLI(ctx, args...)
 		if err != nil {
 			return err
 		}
 		if result.ExitCode != 0 {
 			return commandFailure(args, result)
+		}
+		if restored {
+			b.setSelfExcluded(name, nil)
 		}
 		return nil
 	})
@@ -550,7 +561,7 @@ func (s *Server) handleBackupPolicy(w http.ResponseWriter, r *http.Request) {
 	notes := make(map[string]string, len(servers))
 	var notesMu sync.Mutex
 	results := s.forEachBackupServer(ctx, servers, func(ctx context.Context, name string) error {
-		note, err := s.applyBackupPolicy(ctx, name, body.Interval, retention, body.Volumes, body.VolumeMaxGB, recipient)
+		note, err := s.applyBackupPolicy(ctx, name, backupPolicyApply{Interval: body.Interval, Retention: retention, Volumes: body.Volumes, VolumeMaxGB: body.VolumeMaxGB, Recipient: recipient})
 		notesMu.Lock()
 		notes[name] = note
 		notesMu.Unlock()
@@ -593,9 +604,22 @@ func (s *Server) backupWindowFrom(start, end *int) *backupWindow {
 	return &window
 }
 
+// backupPolicyApply is one write of the policy. AllowEmpty and Adopt are only for the
+// setup flow: the manual form leaves them as they are.
+type backupPolicyApply struct {
+	Interval    string
+	Retention   backupRetention
+	Volumes     bool
+	VolumeMaxGB float64
+	Recipient   string
+	AllowEmpty  *bool
+	Adopt       []string
+}
+
 // applyBackupPolicy writes the policy to one server. The returned note is what the
 // owner should know about its heartbeat.
-func (s *Server) applyBackupPolicy(ctx context.Context, name, interval string, ret backupRetention, volumes bool, volumeMaxGB float64, recipient string) (string, error) {
+func (s *Server) applyBackupPolicy(ctx context.Context, name string, p backupPolicyApply) (string, error) {
+	interval, ret, volumes, volumeMaxGB, recipient := p.Interval, p.Retention, p.Volumes, p.VolumeMaxGB, p.Recipient
 	current, err := s.readBackupPolicyShow(ctx, name)
 	if err != nil {
 		return "", err
@@ -608,7 +632,41 @@ func (s *Server) applyBackupPolicy(ctx context.Context, name, interval string, r
 	if recipient != "" {
 		args = append(args, "--recipient", recipient)
 	}
+	if p.AllowEmpty != nil {
+		args = append(args, "--allow-empty="+strconv.FormatBool(*p.AllowEmpty))
+	}
+	for _, a := range p.Adopt {
+		args = append(args, "--adopt", a)
+	}
+	// Without any recovery key, a volume backup of Dash would upload its SSH key in
+	// plaintext, so its own volumes stay out until a key arrives. Only on the server
+	// proved to host this Dash: excluding by name could hit a user's own app.
+	var selfExcluded []string
+	selfChanged := false
+	selfWarning := ""
+	if recipient == "" && current.Recipient == "" && volumes {
+		env, serr := s.readBackupStatus(ctx, name)
+		if serr != nil {
+			env = nil
+		}
+		switch s.selfHostOn(ctx, name, env) {
+		case selfHostYes:
+			merged, added := s.backups.withSelfExcludes(current.Excludes)
+			if len(added) > 0 {
+				args = append(args, "--exclude="+strings.Join(merged, ","))
+				selfExcluded, selfChanged = append(s.backups.selfExcludedList(name), added...), true
+			}
+		case selfHostUnknown:
+			selfWarning = "Dash could not tell whether this server hosts Dash itself. If it does, its SSH key would be uploaded unencrypted. Set a recovery key, or exclude Dash's volumes here."
+		}
+	} else if s.backups.selfExcludedOn(name) {
+		args = append(args, "--exclude="+strings.Join(s.backups.withoutSelfExcludes(name, current.Excludes), ","))
+		selfChanged = true
+	}
 	heartbeat, note := s.backupHeartbeatFor(name, interval, current)
+	if selfWarning != "" {
+		note = strings.TrimSpace(note + " " + selfWarning)
+	}
 	var result *cli.Result
 	if heartbeat != "" {
 		// The URL carries a token, so it only ever travels on stdin.
@@ -625,10 +683,55 @@ func (s *Server) applyBackupPolicy(ctx context.Context, name, interval string, r
 			return note, err
 		}
 	}
+	if selfChanged {
+		s.backups.setSelfExcluded(name, selfExcluded)
+	}
 	if _, err := cli.ParseJSON(result.Stdout); err != nil {
 		return note, fmt.Errorf("the policy may be stored, but the reply could not be read: %w", err)
 	}
 	return note, nil
+}
+
+// withSelfExcludes adds Dash's own volumes to an exclude list, returning what it added.
+func (b *backupState) withSelfExcludes(excludes []string) (merged, added []string) {
+	merged = append(merged, excludes...)
+	self := b.selfApp + "/volumes"
+	for _, e := range excludes {
+		if e == self {
+			return merged, nil
+		}
+	}
+	return append(merged, self), []string{self}
+}
+
+func (b *backupState) selfExcludedList(name string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.serverLocked(name).SelfExcluded...)
+}
+
+func (b *backupState) selfExcludedOn(name string) bool { return len(b.selfExcludedList(name)) > 0 }
+
+// withoutSelfExcludes takes back out only what Dash itself added.
+func (b *backupState) withoutSelfExcludes(name string, excludes []string) []string {
+	added := map[string]bool{}
+	for _, e := range b.selfExcludedList(name) {
+		added[e] = true
+	}
+	out := make([]string, 0, len(excludes))
+	for _, e := range excludes {
+		if !added[e] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (b *backupState) setSelfExcluded(name string, list []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.serverLocked(name).SelfExcluded = list
+	b.saveLocked()
 }
 
 type backupPolicyShow struct {
@@ -636,6 +739,7 @@ type backupPolicyShow struct {
 	Excludes       []string `json:"excludes"`
 	HeartbeatCount int      `json:"heartbeat_count"`
 	HeartbeatHosts []string `json:"heartbeat_hosts"`
+	Recipient      string   `json:"recipient"`
 }
 
 func (s *Server) readBackupPolicyShow(ctx context.Context, name string) (*backupPolicyShow, error) {
@@ -810,6 +914,15 @@ func (s *Server) handleBackupExclude(w http.ResponseWriter, r *http.Request) {
 	if body.Excluded && strings.TrimSpace(body.Reason) == "" {
 		writeError(w, "say why this is excluded: it goes in the audit log")
 		return
+	}
+	if !body.Excluded && s.backups.selfApp != "" && body.Name == s.backups.selfApp+"/volumes" {
+		s.backups.mu.Lock()
+		hasKey := s.backups.rec.Recovery != nil
+		s.backups.mu.Unlock()
+		if !hasKey && s.selfHostOn(r.Context(), body.Server, nil) == selfHostYes {
+			writeError(w, "These volumes hold Dash's SSH key, so they stay out until a recovery key encrypts them.")
+			return
+		}
 	}
 	if _, err := s.lookupServerStrict(r.Context(), body.Server); err != nil {
 		writeError(w, sanitizeDomainError(err.Error()))
