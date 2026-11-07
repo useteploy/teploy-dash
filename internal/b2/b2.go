@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,7 +25,12 @@ import (
 // DefaultBaseURL is where every account is authorized.
 const DefaultBaseURL = "https://api.backblazeb2.com"
 
-const maxReply = 8 << 20
+const (
+	maxReply              = 8 << 20
+	maxUnavailableRetries = 2
+	// codeWrongKey stands in for "unauthorized" on the authorize call itself.
+	codeWrongKey = "wrong_key"
+)
 
 // Capabilities a setup key needs, and those it can make use of.
 const (
@@ -50,12 +56,17 @@ type Client struct {
 	HTTP    *http.Client
 	// AnyHost allows API hosts other than *.backblazeb2.com over any scheme (tests).
 	AnyHost bool
+	// RetryWait is the first wait after a 503, doubling each time. Zero means a second.
+	RetryWait time.Duration
 }
 
-// APIError is a refusal from Backblaze.
+// APIError is a refusal from Backblaze. The store's message is read only to classify
+// it, and never leaves this package.
 type APIError struct {
 	Status int
 	Code   string
+	// noSuchKey: the message says the key being acted on does not exist.
+	noSuchKey bool
 }
 
 // Error is the plain wording, safe for a response.
@@ -69,8 +80,10 @@ func plainMessage(status int, code string) string {
 		return "Backblaze needs this account's email address verified first. Verify it in the Backblaze console, then try again."
 	case "no_payment_history":
 		return "Backblaze needs a payment method on this account for this. Add one in the Backblaze console, then try again."
+	case codeWrongKey:
+		return "Backblaze did not accept that key. Check both parts were pasted whole, and that the key has not expired or been deleted."
 	case "bad_auth_token", "expired_auth_token":
-		return "The Backblaze key was rejected or has expired. Paste a new one."
+		return "Backblaze ended this session. Try again. If it happens again, paste a new key."
 	case "unauthorized":
 		return "This Backblaze key is not allowed to do that. Check its permissions in the Backblaze console."
 	case "too_many_buckets":
@@ -94,6 +107,13 @@ func plainMessage(status int, code string) string {
 func IsCode(err error, code string) bool {
 	var e *APIError
 	return errors.As(err, &e) && e.Code == code
+}
+
+// IsMissingKey reports whether a delete failed because the key is already gone. Any
+// other bad_request leaves the key alive, and it must not be counted as deleted.
+func IsMissingKey(err error) bool {
+	var e *APIError
+	return errors.As(err, &e) && e.noSuchKey
 }
 
 // IsCapped reports whether err is the daily transaction cap: not an outage, and never
@@ -186,7 +206,13 @@ func (c *Client) Authorize(ctx context.Context, keyID, appKey string) (*Session,
 			} `json:"storageApi"`
 		} `json:"apiInfo"`
 	}
-	if err := c.send(req, &reply); err != nil {
+	if err := c.send(func() (*http.Request, error) { return req.Clone(ctx), nil }, &reply); err != nil {
+		// Here "unauthorized" means the key itself was refused, not that it lacks a
+		// permission.
+		var e *APIError
+		if errors.As(err, &e) && e.Code == "unauthorized" {
+			return nil, &APIError{Status: e.Status, Code: codeWrongKey}
+		}
 		return nil, err
 	}
 	st := reply.APIInfo.Storage
@@ -233,26 +259,51 @@ func (c *Client) httpClient() *http.Client {
 	return &client
 }
 
-func (c *Client) send(req *http.Request, out any) error {
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return fmt.Errorf("could not reach Backblaze: %v", err)
+// send retries a 503, which Backblaze's docs call a temporary state to wait out. Nothing
+// else is retried: a create that may have landed must not run twice.
+func (c *Client) send(build func() (*http.Request, error), out any) error {
+	wait := c.RetryWait
+	if wait == 0 {
+		wait = time.Second
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReply))
-	if err != nil {
-		return errors.New("Backblaze's reply did not arrive whole")
-	}
-	if resp.StatusCode/100 != 2 {
-		var e struct {
-			Code string `json:"code"`
+	var data []byte
+	for attempt := 0; ; attempt++ {
+		req, err := build()
+		if err != nil {
+			return errors.New("could not build the request to Backblaze")
 		}
-		_ = json.Unmarshal(data, &e)
-		return &APIError{Status: resp.StatusCode, Code: e.Code}
+		resp, err := c.httpClient().Do(req)
+		if err != nil {
+			var ue *url.Error
+			if errors.As(err, &ue) {
+				err = ue.Err
+			}
+			return fmt.Errorf("could not reach Backblaze: %v", err)
+		}
+		data, err = io.ReadAll(io.LimitReader(resp.Body, maxReply))
+		resp.Body.Close()
+		if err != nil {
+			return errors.New("Backblaze's reply did not arrive whole")
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable && attempt < maxUnavailableRetries {
+			select {
+			case <-req.Context().Done():
+				return errors.New("could not reach Backblaze: the request was cancelled")
+			case <-time.After(wait << attempt):
+			}
+			continue
+		}
+		if resp.StatusCode/100 != 2 {
+			var e struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			_ = json.Unmarshal(data, &e)
+			msg := strings.ToLower(e.Message)
+			return &APIError{Status: resp.StatusCode, Code: e.Code,
+				noSuchKey: e.Code == "bad_request" && strings.Contains(msg, "key") && (strings.Contains(msg, "not exist") || strings.Contains(msg, "not found") || strings.Contains(msg, "no such"))}
+		}
+		break
 	}
 	if out == nil {
 		return nil
@@ -268,28 +319,56 @@ func (s *Session) call(ctx context.Context, name string, body, out any) error {
 	if err != nil {
 		return errors.New("could not build the request to Backblaze")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.APIURL+"/b2api/v4/"+name, bytes.NewReader(raw))
-	if err != nil {
-		return errors.New("could not build the request to Backblaze")
-	}
-	req.Header.Set("Authorization", s.token)
-	req.Header.Set("Content-Type", "application/json")
-	return s.client.send(req, out)
+	return s.client.send(func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.APIURL+"/b2api/v4/"+name, bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", s.token)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, out)
 }
+
+// Revision is a bucket's revision. Backblaze's docs show it as an integer and its
+// examples have used a string, so both read.
+type Revision int64
+
+// UnmarshalJSON accepts a number or a quoted number.
+func (r *Revision) UnmarshalJSON(data []byte) error {
+	text := strings.Trim(string(bytes.TrimSpace(data)), `"`)
+	if text == "" || text == "null" {
+		*r = 0
+		return nil
+	}
+	v, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return errors.New("a bucket revision that is not a number")
+	}
+	*r = Revision(v)
+	return nil
+}
+
+// Bucket types.
+const (
+	BucketPrivate  = "allPrivate"
+	BucketPublic   = "allPublic"
+	BucketSnapshot = "snapshot"
+)
 
 // Bucket is one bucket as listed.
 type Bucket struct {
-	ID       string `json:"bucketId"`
-	Name     string `json:"bucketName"`
-	Type     string `json:"bucketType"`
-	Revision int64  `json:"revision"`
-	Rules    Rules  `json:"lifecycleRules"`
+	ID       string   `json:"bucketId"`
+	Name     string   `json:"bucketName"`
+	Type     string   `json:"bucketType"`
+	Revision Revision `json:"revision"`
+	Rules    Rules    `json:"lifecycleRules"`
 }
 
 // ListBuckets lists what the key can see: a key limited to buckets must name them.
 func (s *Session) ListBuckets(ctx context.Context) ([]Bucket, error) {
 	if len(s.Buckets) == 0 {
-		return s.listBuckets(ctx, map[string]any{"accountId": s.AccountID, "bucketTypes": []string{"allPrivate", "allPublic"}})
+		return s.listBuckets(ctx, map[string]any{"accountId": s.AccountID, "bucketTypes": []string{BucketPrivate, BucketPublic, BucketSnapshot}})
 	}
 	out := []Bucket{}
 	for _, ref := range s.Buckets {
@@ -349,7 +428,7 @@ func (s *Session) listBuckets(ctx context.Context, body map[string]any) ([]Bucke
 // CreatePrivateBucket creates a private bucket.
 func (s *Session) CreatePrivateBucket(ctx context.Context, name string) (*Bucket, error) {
 	var b Bucket
-	if err := s.call(ctx, "b2_create_bucket", map[string]any{"accountId": s.AccountID, "bucketName": name, "bucketType": "allPrivate"}, &b); err != nil {
+	if err := s.call(ctx, "b2_create_bucket", map[string]any{"accountId": s.AccountID, "bucketName": name, "bucketType": BucketPrivate}, &b); err != nil {
 		return nil, err
 	}
 	if b.ID == "" || b.Name != name {
@@ -359,7 +438,7 @@ func (s *Session) CreatePrivateBucket(ctx context.Context, name string) (*Bucket
 }
 
 // UpdateRules replaces the bucket's rules if its revision has not moved.
-func (s *Session) UpdateRules(ctx context.Context, bucketID string, rules Rules, revision int64) error {
+func (s *Session) UpdateRules(ctx context.Context, bucketID string, rules Rules, revision Revision) error {
 	if rules == nil {
 		rules = Rules{}
 	}

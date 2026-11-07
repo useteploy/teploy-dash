@@ -116,7 +116,8 @@ type Analysis struct {
 	S3Managed bool `json:"s3_managed"`
 }
 
-// Analyze checks a bucket's rules against a base and the recovery window wanted.
+// Analyze checks a bucket's rules against a base and the recovery window wanted. An
+// empty base means the bucket root, where every rule counts.
 func Analyze(rules Rules, base string, windowDays int) Analysis {
 	out := Analysis{Refusals: []string{}, Warnings: []string{}}
 	basePrefix := BasePrefix(base)
@@ -162,29 +163,39 @@ func Merge(existing Rules, base string, serverPrefixes []string, windowDays int,
 		}
 		return -1
 	}
-	basePrefix := BasePrefix(base)
-	if i := find(basePrefix); i < 0 {
-		out = append(out, Rule{FileNamePrefix: basePrefix, HideToDelete: intp(windowDays), CancelUnfinishedLarge: intp(7)})
-		changed = true
-	} else {
-		r := out[i]
-		update := false
-		if !set(r.HideToDelete) || (windowExplicit && *r.HideToDelete != windowDays) {
-			r.HideToDelete = intp(windowDays)
-			update = true
-		}
-		if !set(r.CancelUnfinishedLarge) {
-			r.CancelUnfinishedLarge = intp(7)
-			update = true
-		}
-		if update {
-			r.raw = nil
-			out[i] = r
-			changed = true
-		}
-	}
 	sorted := append([]string(nil), serverPrefixes...)
 	sort.Strings(sorted)
+	// With no base, each server gets its own window rule. A rule with an empty prefix
+	// would act on the whole bucket, and Dash never sends one.
+	windowPrefixes := []string{BasePrefix(base)}
+	if base == "" {
+		windowPrefixes = windowPrefixes[:0]
+		for _, sp := range sorted {
+			windowPrefixes = append(windowPrefixes, sp+"/")
+		}
+	}
+	for _, prefix := range windowPrefixes {
+		if i := find(prefix); i < 0 {
+			out = append(out, Rule{FileNamePrefix: prefix, HideToDelete: intp(windowDays), CancelUnfinishedLarge: intp(7)})
+			changed = true
+		} else {
+			r := out[i]
+			update := false
+			if !set(r.HideToDelete) || (windowExplicit && *r.HideToDelete != windowDays) {
+				r.HideToDelete = intp(windowDays)
+				update = true
+			}
+			if !set(r.CancelUnfinishedLarge) {
+				r.CancelUnfinishedLarge = intp(7)
+				update = true
+			}
+			if update {
+				r.raw = nil
+				out[i] = r
+				changed = true
+			}
+		}
+	}
 	for _, sp := range sorted {
 		prefix := IncomingPrefix(sp)
 		if i := find(prefix); i < 0 {
@@ -203,12 +214,16 @@ func Merge(existing Rules, base string, serverPrefixes []string, windowDays int,
 	return out, changed, nil
 }
 
-// WithoutPrefix drops the rule with this exact prefix.
-func WithoutPrefix(rules Rules, prefix string) (Rules, bool) {
+// WithoutPrefixes drops the rules with these exact prefixes.
+func WithoutPrefixes(rules Rules, prefixes ...string) (Rules, bool) {
 	out := make(Rules, 0, len(rules))
 	removed := false
 	for _, r := range rules {
-		if r.FileNamePrefix == prefix {
+		drop := false
+		for _, p := range prefixes {
+			drop = drop || r.FileNamePrefix == p
+		}
+		if drop {
 			removed = true
 			continue
 		}
@@ -217,16 +232,46 @@ func WithoutPrefix(rules Rules, prefix string) (Rules, bool) {
 	return out, removed
 }
 
+// EffectiveWindow is how long hidden copies really last for this base: an existing rule
+// that Merge kept wins over the window asked for. With no base it is the shortest of
+// the servers' rules.
+func EffectiveWindow(rules Rules, base string, serverPrefixes []string, asked int) int {
+	wanted := []string{BasePrefix(base)}
+	if base == "" {
+		wanted = wanted[:0]
+		for _, sp := range serverPrefixes {
+			wanted = append(wanted, sp+"/")
+		}
+	}
+	found := 0
+	for _, r := range rules {
+		for _, w := range wanted {
+			if r.FileNamePrefix == w && set(r.HideToDelete) && (found == 0 || *r.HideToDelete < found) {
+				found = *r.HideToDelete
+			}
+		}
+	}
+	if found == 0 {
+		return asked
+	}
+	return found
+}
+
 // RulesText is the rules in words, for a bucket whose rules a person keeps themselves.
 func RulesText(base string, serverPrefixes []string, windowDays int) []string {
-	basePrefix := BasePrefix(base)
-	name := basePrefix
-	if name == "" {
-		name = "the whole bucket"
-	}
-	out := []string{fmt.Sprintf("On %s: delete hidden files after %d days, cancel unfinished large files after 7 days, and do not hide on upload.", name, windowDays)}
 	sorted := append([]string(nil), serverPrefixes...)
 	sort.Strings(sorted)
+	names := []string{BasePrefix(base)}
+	if base == "" {
+		names = names[:0]
+		for _, sp := range sorted {
+			names = append(names, sp+"/")
+		}
+	}
+	out := []string{}
+	for _, name := range names {
+		out = append(out, fmt.Sprintf("On %s: delete hidden files after %d days, cancel unfinished large files after 7 days, and do not hide on upload.", name, windowDays))
+	}
 	for _, sp := range sorted {
 		out = append(out, fmt.Sprintf("On %s: hide files 1 day after upload and delete hidden files 1 day later.", IncomingPrefix(sp)))
 	}

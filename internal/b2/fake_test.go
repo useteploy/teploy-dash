@@ -23,12 +23,16 @@ type fakeB2 struct {
 	deleted []string
 	bodies  map[string][]map[string]any
 	echo    string
+	// message overrides the error message; failOnce counts failures before success.
+	message  string
+	failOnce map[string]int
+	attempts map[string]int
 }
 
 func newFake(t *testing.T) (*fakeB2, *Client) {
 	t.Helper()
 	f := &fakeB2{caps: []string{CapListBuckets, CapWriteBuckets, CapWriteKeys}, fail: map[string][2]any{},
-		s3: "https://s3.us-west-004.backblazeb2.com", bodies: map[string][]map[string]any{}}
+		s3: "https://s3.us-west-004.backblazeb2.com", bodies: map[string][]map[string]any{}, failOnce: map[string]int{}, attempts: map[string]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve(t)))
 	t.Cleanup(srv.Close)
 	f.auth = srv.URL
@@ -47,8 +51,19 @@ func (f *fakeB2) serve(t *testing.T) func(http.ResponseWriter, *http.Request) {
 			w.WriteHeader(status)
 			json.NewEncoder(w).Encode(v)
 		}
+		f.attempts[name]++
 		if failure, ok := f.fail[name]; ok {
-			writeJSON(failure[0].(int), map[string]any{"status": failure[0], "code": failure[1], "message": "the key " + f.echo + " was refused"})
+			if n, counted := f.failOnce[name]; counted {
+				if n <= 1 {
+					delete(f.fail, name)
+				}
+				f.failOnce[name] = n - 1
+			}
+			msg := "the key " + f.echo + " was refused"
+			if f.message != "" {
+				msg = f.message
+			}
+			writeJSON(failure[0].(int), map[string]any{"status": failure[0], "code": failure[1], "message": msg})
 			return
 		}
 		var body map[string]any
