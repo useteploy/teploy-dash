@@ -4773,6 +4773,16 @@ document.addEventListener('alpine:init', () => {
 
     // Step 1 of connect: read the discovery doc so the owner confirms the
     // instance identity BEFORE any token is sent.
+    // Observe's create form, filled in. The admin still presses Create there.
+    observeTokenURL() {
+      const base = (this.previewDoc && this.previewDoc.dashboard_url) || this.connectForm.base_url;
+      try {
+        const u = new URL(base);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+        return u.origin + '/settings?tab=service-tokens&name=teploy-dash&scopes=sites:create,keys:mint';
+      } catch { return ''; }
+    },
+
     async previewObserve() {
       this.previewDoc = null;
       this.previewError = '';
