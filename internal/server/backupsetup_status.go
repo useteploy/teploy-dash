@@ -43,6 +43,8 @@ const (
 	setupProtected  = "protected"
 )
 
+const backupSkippedServerMessage = "Skipped: you chose not to back up this server."
+
 // backupRestoreTestMaxAge: an older pass no longer says a backup restores.
 const backupRestoreTestMaxAge = 21 * 24 * time.Hour
 
@@ -138,6 +140,26 @@ func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupR
 	}
 	if !flowBucket {
 		out.Lifecycle = ""
+	}
+	// Left out on purpose, so nothing below applies: not failing, not waiting. A database
+	// nobody has decided about yet still has to be named.
+	if rec := b.rec.Servers[sv.Server]; rec != nil && len(rec.SkippedByChoice) > 0 {
+		chosen := map[string]bool{}
+		for _, name := range rec.SkippedByChoice {
+			chosen[name] = true
+		}
+		out.Skipped = append(out.Skipped, rec.SkippedByChoice...)
+		for i := range rows {
+			if rows[i].State == "uncovered" && !chosen[rows[i].Name] {
+				out.Uncovered = append(out.Uncovered, rows[i].Name)
+			}
+		}
+		if len(out.Uncovered) > 0 {
+			out.State, out.Detail = setupNotCovered, "Not backed up: "+strings.Join(out.Uncovered, ", ")+"."
+			return out
+		}
+		out.State, out.Detail = setupAllSkipped, backupSkippedServerMessage
+		return out
 	}
 	if backupTargetCapped(sv.Target.Error) {
 		out.State, out.Detail = setupCapped, backupCappedMessage
@@ -279,7 +301,7 @@ func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupR
 	case len(waitingTest) > 0:
 		out.State, out.Detail = setupWaitingTest, "Waiting for a restore test of "+join(waitingTest)+". These run in the off-hours window."
 	case covered == 0 && len(out.Skipped) > 0:
-		out.State, out.Detail = setupAllSkipped, "Nothing here is backed up: you chose to skip "+names(out.Skipped)+"."
+		out.State, out.Detail = setupAllSkipped, backupSkippedServerMessage
 	case covered == 0:
 		out.State, out.Detail = setupEmpty, "There is nothing to back up on this server yet."
 	case len(out.Skipped) > 0:
@@ -313,7 +335,7 @@ func (b *backupState) setupViewLocked(supported, channels bool, view *backupsPag
 			active++
 			except = append(except, state.Skipped...)
 		case setupAllSkipped:
-			except = append(except, state.Skipped...)
+			except = append(except, sv.Server)
 		case setupEmpty:
 		case setupNotProtected:
 			if view.Storage != nil {

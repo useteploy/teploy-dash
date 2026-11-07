@@ -434,6 +434,8 @@ test('states read in plain words', () => {
   assert.equal(p.setupStateLabel('capped'), 'daily cap reached');
   assert.equal(p.setupStateLabel('restore_test_overdue'), 'restore test overdue');
   assert.equal(p.setupStateClass('not_covered'), 'red');
+  assert.equal(p.setupStateClass('all_skipped'), 'gray');
+  assert.match(p.turnOnLine({ server: 'a', skipped: true }), /skipped, as you chose/);
   assert.equal(p.canBackUpNow({ state: 'late' }), true);
   assert.equal(p.canBackUpNow({ state: 'protected' }), false);
 });

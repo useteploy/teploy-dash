@@ -1508,22 +1508,138 @@ func TestSetupTurnOn_NextRunStartsNothingAndAnEmptyServerAllowsEmpty(t *testing.
 	}
 }
 
-// B2: a server with only a skipped Postgres is not empty, so a run there must not report ok.
-func TestSetupTurnOn_ASkippedDatabaseIsNotAnEmptyServer(t *testing.T) {
+func statusWithEntries(entries string) string {
+	return strings.Replace(emptyStatusJSON(), `"entries":[]`, `"entries":[`+entries+`]`, 1)
+}
+
+const pgEntryJSON = `{"name":"customer-pg","kind":"unmanaged","engine":"postgres","unmanaged":true,"coverage":"uncovered","schedule":"none","adopted":false,"encrypted":false}`
+
+// A server where everything was unticked is a decision: no policy or cron line, no run, no
+// failure and no alert. Ticking it again later is an ordinary turn-on.
+func TestSetupTurnOn_EverythingUntickedWritesNothingAndRaisesNothing(t *testing.T) {
 	s, c, _ := newSetupServer(t)
 	setRecipient(s)
-	withDB := strings.Replace(emptyStatusJSON(), `"entries":[]`, `"entries":[{"name":"customer-pg","kind":"unmanaged","engine":"postgres","unmanaged":true,"coverage":"uncovered","schedule":"none","adopted":false,"encrypted":false}]`, 1)
-	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: withDB}, nil }
+	pg := statusWithEntries(pgEntryJSON)
+	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: pg}, nil }
+	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "now", "skip": map[string][]string{"prod": {"customer-pg"}}})
+	var out struct {
+		Servers []setupTurnOnResult `json:"servers"`
+		AllOK   bool                `json:"all_ok"`
+		AnyOK   bool                `json:"any_ok"`
+	}
+	decodeData(t, rec, &out)
+	r := out.Servers[0]
+	if !r.Skipped || r.OK || !out.AllOK || out.AnyOK || !strings.Contains(r.Note, "you chose not to back up this server") {
+		t.Fatalf("%+v", out)
+	}
+	if strings.Contains(rec.Body.String(), "report a failure") {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	if c.countOf("backup-policy", "set") != 0 || c.countOf("--detach") != 0 {
+		t.Fatal("no policy, cron line or run")
+	}
+	got := setupStateOf(t, s, "prod")
+	if got.State != setupAllSkipped || got.Detail != "Skipped: you chose not to back up this server." {
+		t.Fatalf("%+v", got)
+	}
+	view := s.backupsView(context.Background(), backupsNow)
+	if view.Setup.TurnedOn || len(view.Setup.NewServers) != 0 {
+		t.Fatalf("%+v", view.Setup)
+	}
+	s.backups.mu.Lock()
+	obs, _ := backupObservations(s.backups.rec.Servers["prod"], backupsNow)
+	s.backups.mu.Unlock()
+	if len(obs) != 0 {
+		t.Fatalf("a skipped server raises nothing: %+v", obs)
+	}
+
+	// A database that appears later has not been decided about.
+	both := statusWithEntries(pgEntryJSON + `,` + strings.ReplaceAll(pgEntryJSON, "customer-pg", "new-pg"))
+	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: both}, nil }
+	env, err := decodeBackupStatus(both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.recordBackupStatus("prod", env, nil, backupsNow)
+	if got := setupStateOf(t, s, "prod"); got.State != setupNotCovered || !strings.Contains(got.Detail, "new-pg") {
+		t.Fatalf("%+v", got)
+	}
+	s.backups.mu.Lock()
+	obs, _ = backupObservations(s.backups.rec.Servers["prod"], backupsNow)
+	s.backups.mu.Unlock()
+	if len(obs) != 1 || !strings.Contains(obs[0].rule.Key, "new-pg") {
+		t.Fatalf("%+v", obs)
+	}
+
+	// Re-opening setup and leaving it ticked turns the server on as usual.
+	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: pg}, nil }
+	if rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "next"}); rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if args := strings.Join(policySetArgs(c, "prod"), " "); !strings.Contains(args, "--adopt customer-pg:postgres:all") {
+		t.Fatalf("%s", args)
+	}
+	if got := setupStateOf(t, s, "prod"); got.State == setupAllSkipped {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestSetupTurnOn_AnExistingPolicyIsLeftAloneAndSaysSo(t *testing.T) {
+	s, c, _ := newSetupServer(t)
+	setRecipient(s)
+	existing := strings.Replace(statusWithEntries(pgEntryJSON), `"policy":{"configured":false`, `"policy":{"configured":true`, 1)
+	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: existing}, nil }
 	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "next", "skip": map[string][]string{"prod": {"customer-pg"}}})
 	var out struct {
 		Servers []setupTurnOnResult `json:"servers"`
 	}
 	decodeData(t, rec, &out)
-	if out.Servers[0].AllowEmpty || !strings.Contains(strings.Join(policySetArgs(c, "prod"), " "), "--allow-empty=false") {
-		t.Fatalf("%+v %v", out.Servers[0], policySetArgs(c, "prod"))
+	if !out.Servers[0].Skipped || !strings.Contains(out.Servers[0].Note, "left as it was") || c.countOf("backup-policy") != 0 {
+		t.Fatalf("%+v calls=%d", out.Servers[0], c.countOf("backup-policy"))
 	}
-	if !strings.Contains(out.Servers[0].Note, "Nothing on this server will be backed up") {
-		t.Fatalf("it says so: %+v", out.Servers[0])
+}
+
+func TestSetupStatus_ASkippedServerIsNamedInTheHeadlineNeverTheBareClaim(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	s.recordBackupStatus("prod", statusWith([]backupEntry{goodEntry("blog/volumes", "volumes")}, true), nil, backupsNow)
+	s.recordBackupStatus("stage", statusWith([]backupEntry{{Name: "customer-pg", Kind: "unmanaged", Engine: "postgres", Coverage: "uncovered", Unmanaged: true}}, false), nil, backupsNow)
+	s.backups.mu.Lock()
+	s.backups.serverLocked("stage").SkippedByChoice = []string{"customer-pg"}
+	s.backups.mu.Unlock()
+	view := s.backupsView(context.Background(), backupsNow)
+	if view.Setup.State != setupExcept || view.Setup.Headline != "Protected, except stage (you chose to skip)." {
+		t.Fatalf("%+v", view.Setup)
+	}
+}
+
+// A database nobody unticked keeps the server off allow_empty, as a failure worth seeing.
+func TestSetupTurnOn_ADatabaseNotDeliberatelyUntickedIsNoEmptyServer(t *testing.T) {
+	s, c, _ := newSetupServer(t)
+	setRecipient(s)
+	noMethod := `{"name":"analytics-ch","kind":"unmanaged","engine":"clickhouse","unmanaged":true,"coverage":"uncovered","reason":"teploy has no backup method for clickhouse","schedule":"none","adopted":false,"encrypted":false}`
+	for name, skip := range map[string]map[string][]string{
+		"not coverable, nothing unticked": {},
+		"one unticked, one not coverable": {"prod": {"customer-pg"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c.mu.Lock()
+			c.calls = nil
+			c.mu.Unlock()
+			entries := noMethod
+			if len(skip) > 0 {
+				entries += "," + pgEntryJSON
+			}
+			body := statusWithEntries(entries)
+			c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: body}, nil }
+			rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "next", "skip": skip})
+			var out struct {
+				Servers []setupTurnOnResult `json:"servers"`
+			}
+			decodeData(t, rec, &out)
+			if out.Servers[0].Skipped || out.Servers[0].AllowEmpty || !strings.Contains(strings.Join(policySetArgs(c, "prod"), " "), "--allow-empty=false") {
+				t.Fatalf("%+v %v", out.Servers[0], policySetArgs(c, "prod"))
+			}
+		})
 	}
 }
 
@@ -2032,7 +2148,7 @@ func TestSetupStatus_ADeliberateSkipIsNeverTheBareClaim(t *testing.T) {
 	// All skipped, nothing else: never protected at all.
 	s.recordBackupStatus("prod", statusWith([]backupEntry{db}, true), nil, backupsNow)
 	view = s.backupsView(context.Background(), backupsNow)
-	if got := setupStateOf(t, s, "prod"); got.State != setupAllSkipped || !strings.Contains(got.Detail, "Nothing here is backed up") {
+	if got := setupStateOf(t, s, "prod"); got.State != setupAllSkipped || !strings.Contains(got.Detail, "Skipped: you chose not to back up this server") {
 		t.Fatalf("%+v", got)
 	}
 	if strings.HasPrefix(view.Setup.Headline, "Protected") || view.Setup.State == "protected" {

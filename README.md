@@ -300,7 +300,9 @@ stay under **Advanced**; both drive the same engine.
 **Protected** means a verified backup on each covered target, a restore test passed
 within 21 days for each covered database, and no database left out of a backup. Volume-only
 servers need no restore test. If you chose to skip a database, the page says "Protected,
-except" and names it. A server that has a target is left alone unless you tick it, because a
+except" and names it. If you untick everything on a server, Dash writes no policy or cron
+line there, leaves any existing policy alone, keeps the server out of failures and alerts,
+and shows it as skipped until you tick it again. A server that has a target is left alone unless you tick it, because a
 push replaces its target and Dash cannot put the old key back. New,
 rebuilt and retired servers each have their own short action on the page.
 [docs/recovery.md](docs/recovery.md) covers getting data back; it has not been rehearsed

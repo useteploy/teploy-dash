@@ -1674,6 +1674,8 @@ type setupTurnOnResult struct {
 	AllowEmpty bool            `json:"allow_empty"`
 	Adopted    []string        `json:"adopted,omitempty"`
 	Run        *backupSetupRun `json:"run,omitempty"`
+	// Skipped: everything here was unticked, so no policy or cron line was written.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
@@ -1776,7 +1778,7 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 			skip[n] = true
 		}
 		var adopt, skipped []string
-		targets, databases := 0, 0
+		targets, databases, notChosen := 0, 0, 0
 		for j := range env.Entries {
 			e := &env.Entries[j]
 			if e.Kind != "volumes" {
@@ -1791,11 +1793,33 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 					res.Adopted = append(res.Adopted, e.Name)
 					targets++
 				}
-			case e.Coverage == "excluded" || e.Coverage == "uncovered":
+			case e.Coverage == "uncovered":
+				notChosen++
+			case e.Coverage == "excluded":
 			case e.Kind == "volumes" && !volumes:
 			default:
 				targets++
 			}
+		}
+		// Everything unticked is a decision, not a failure: nothing is written, so no run
+		// reports one. An existing policy is not this flow's to remove.
+		if targets == 0 && len(skipped) > 0 && notChosen == 0 {
+			res.Skipped = true
+			res.Note = "Skipped: you chose not to back up this server."
+			if env.Policy.Configured {
+				res.Note += " It already has a backup policy, which Dash left as it was."
+			}
+			b.mu.Lock()
+			b.serverLocked(name).SkippedByChoice = skipped
+			setup := b.setupLocked()
+			if setup.Skipped == nil {
+				setup.Skipped = map[string][]string{}
+			}
+			setup.Skipped[name] = skipped
+			delete(setup.Runs, name)
+			b.saveLocked()
+			b.mu.Unlock()
+			return
 		}
 		// Only a server with really nothing on it gets allow_empty. One holding a database
 		// is not empty, whatever was chosen for that database, and losing every target on
@@ -1809,9 +1833,6 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 		note, err := s.applyBackupPolicy(ctx, name, backupPolicyApply{Interval: interval, Retention: retention, Volumes: volumes,
 			VolumeMaxGB: maxGB, Recipient: recipient, AllowEmpty: &res.AllowEmpty, Adopt: adopt})
 		res.Note = note
-		if targets == 0 && databases > 0 {
-			res.Note = strings.TrimSpace(res.Note + " Nothing on this server will be backed up, so each run will report a failure until you include something.")
-		}
 		if err != nil {
 			res.Error = sanitizeDomainError(err.Error())
 			return
@@ -1822,6 +1843,7 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 		rec := b.serverLocked(name)
 		rec.HeartbeatNote = note
 		rec.PolicyAppliedAt = now
+		rec.SkippedByChoice = nil
 		setup := b.setupLocked()
 		if setup.Skipped == nil {
 			setup.Skipped = map[string][]string{}
@@ -1840,7 +1862,7 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	allOK, anyOK := true, false
 	for _, res := range results {
-		allOK = allOK && res.OK
+		allOK = allOK && (res.OK || res.Skipped)
 		anyOK = anyOK || res.OK
 	}
 	// Turned on means at least one server really is.
@@ -2185,6 +2207,9 @@ func (s *Server) handleSetupRetire(w http.ResponseWriter, r *http.Request) {
 	delete(setup.Preflight, body.Server)
 	delete(setup.Runs, body.Server)
 	delete(setup.Skipped, body.Server)
+	if rec := b.rec.Servers[body.Server]; rec != nil {
+		rec.SkippedByChoice = nil
+	}
 	if body.Data == "remove" && b.rec.Storage != nil {
 		delete(b.rec.Storage.Prefixes, body.Server)
 	}

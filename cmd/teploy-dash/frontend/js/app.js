@@ -3718,14 +3718,14 @@ document.addEventListener('alpine:init', () => {
           waiting_first_backup: 'waiting for the first backup', late: 'backups are late', failing: 'backups are failing',
           waiting_restore_test: 'waiting for a restore test', guard_skipped: 'restore test put off',
           restore_test_failed: 'restore test failed', restore_test_overdue: 'restore test overdue',
-          not_covered: 'not fully backed up', protected_except: 'protected, with exceptions', all_skipped: 'nothing backed up',
+          not_covered: 'not fully backed up', protected_except: 'protected, with exceptions', all_skipped: 'skipped',
           protected: 'protected',
         })[state] || state;
       },
       setupStateClass(state) {
         if (state === 'protected' || state === 'protected_except') return 'green';
         if (state === 'failing' || state === 'restore_test_failed' || state === 'unreachable' || state === 'not_protected' || state === 'not_covered') return 'red';
-        if (state === 'empty' || state === 'unknown') return 'gray';
+        if (state === 'empty' || state === 'unknown' || state === 'all_skipped') return 'gray';
         return 'yellow';
       },
       canBackUpNow(sv) {
@@ -4108,6 +4108,7 @@ document.addEventListener('alpine:init', () => {
         this.setupBusy = false;
       },
       turnOnLine(r) {
+        if (r.skipped) return 'was skipped, as you chose.';
         if (!r.ok) return r.error || 'could not be turned on.';
         if (!r.run) return 'starts with its next scheduled run.';
         return ({

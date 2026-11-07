@@ -1850,7 +1850,7 @@
                   <span class="text-muted" x-show="sv.run && sv.run.error" x-text="sv.run ? sv.run.error : ''"></span>
                   <span class="text-muted" x-show="sv.lifecycle === 'unknown'">Dash cannot recheck the bucket's cleanup rules with this server's key.</span>
                   <span class="text-muted" x-show="sv.lifecycle === 'absent'">Reading this bucket through S3 shows no cleanup rule for this server. Check it under Lifecycle Settings in the Backblaze console, because Dash set one up and this read may not show it.</span>
-                  <button class="btn btn-sm" x-show="sv.state === 'not_protected'" @click="openSetup(sv.server)">Back up this server</button>
+                  <button class="btn btn-sm" x-show="sv.state === 'not_protected' || sv.state === 'all_skipped'" @click="openSetup(sv.server)">Back up this server</button>
                   <button class="btn btn-sm" x-show="sv.state !== 'not_protected' && sv.key_name" @click="beginRetire(sv.server)">Retire…</button>
                   <button class="btn btn-sm" x-show="canBackUpNow(sv)" @click="backUpNow(sv.server)">Back up now</button>
                 </li>
@@ -2172,7 +2172,7 @@
                               <p class="text-muted" x-show="r.note" x-text="r.note"></p>
                             </div>
                           </template>
-                          <p class="setup-error" x-show="!turnOnResult.any_ok">No server was turned on. Fix what is listed, then try again.</p>
+                          <p class="setup-error" x-show="!turnOnResult.any_ok && !turnOnResult.all_ok">No server was turned on. Fix what is listed, then try again.</p>
                           <button class="btn btn-primary" x-show="turnOnResult.any_ok" @click="setupStep = 'prove'; setupError = ''">Next</button>
                         </div>
                       </template>

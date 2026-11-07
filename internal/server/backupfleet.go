@@ -179,6 +179,10 @@ type backupServerRecord struct {
 	// HeartbeatMonitorID is the push monitor Dash owns for this server.
 	HeartbeatMonitorID string `json:"heartbeat_monitor_id,omitempty"`
 	HeartbeatNote      string `json:"heartbeat_note,omitempty"`
+	// SkippedByChoice names what a person unticked when they left this whole server out.
+	// Non-empty means the server is skipped: no policy was written, and it stays out of
+	// the failure and alert paths, apart from a database that appears later.
+	SkippedByChoice []string `json:"skipped_by_choice,omitempty"`
 	// SelfExcluded is what Dash added to this server's excludes because the policy had
 	// no recovery key, so a key arriving later can take it back out.
 	SelfExcluded []string `json:"self_excluded,omitempty"`
