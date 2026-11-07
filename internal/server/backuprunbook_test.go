@@ -136,15 +136,3 @@ func TestBackupSelfStatus_ReportsTheRealEntry(t *testing.T) {
 		t.Fatalf("a non-template Dash reports its paths as uncovered: %+v", v)
 	}
 }
-
-func TestBackupSelfExcludes(t *testing.T) {
-	if got := backupSelfExcludes("dash"); len(got) != 1 || got[0] != "dash/volumes" {
-		t.Fatalf("template name: %v", got)
-	}
-	if got := backupSelfExcludes(""); len(got) != 1 || got[0] != "dash/volumes" {
-		t.Fatalf("an older deploy has no TEPLOY_APP: %v", got)
-	}
-	if got := strings.Join(backupSelfExcludes("control"), ","); got != "control/volumes,dash/volumes" {
-		t.Fatalf("named app: %v", got)
-	}
-}

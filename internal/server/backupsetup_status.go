@@ -7,11 +7,13 @@ package server
 // not be read proves nothing, so it never reads as protected.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // backupGuardSkipsShown: this many skips in a row and the page says why, rather than
@@ -31,15 +33,27 @@ const (
 	setupWaitingTest   = "waiting_restore_test"
 	setupGuardSkipped  = "guard_skipped"
 	setupTestFailed    = "restore_test_failed"
-	setupProtected     = "protected"
+	setupTestOverdue   = "restore_test_overdue"
+	// setupNotCovered: a database is not in any backup, and nobody chose that.
+	setupNotCovered = "not_covered"
+	// setupExcept: protected, apart from what the person chose to leave out.
+	setupExcept = "protected_except"
+	// setupAllSkipped: everything here was left out on purpose.
+	setupAllSkipped = "all_skipped"
+	setupProtected  = "protected"
 )
+
+// backupRestoreTestMaxAge: an older pass no longer says a backup restores.
+const backupRestoreTestMaxAge = 21 * 24 * time.Hour
 
 type backupSetupServerView struct {
 	Server string `json:"server"`
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
-	// Uncovered names what is not in any backup here.
+	// Uncovered names what is not in any backup here and nobody chose that; Skipped is
+	// what a person chose to leave out.
 	Uncovered []string        `json:"uncovered,omitempty"`
+	Skipped   []string        `json:"skipped,omitempty"`
 	Run       *backupSetupRun `json:"run,omitempty"`
 	Key       string          `json:"key_name,omitempty"`
 	Lifecycle string          `json:"lifecycle,omitempty"`
@@ -48,7 +62,7 @@ type backupSetupServerView struct {
 type backupSetupView struct {
 	Supported bool   `json:"supported"`
 	MinCLI    string `json:"min_cli"`
-	// State: none | partial | attention | protected.
+	// State: none | partial | attention | protected_except | protected.
 	State    string `json:"state"`
 	Headline string `json:"headline"`
 	// Configured: storage exists, whichever way it was set up.
@@ -70,6 +84,9 @@ type backupSetupView struct {
 	StoredBytes      int64                   `json:"stored_bytes,omitempty"`
 	ProjectedBytes   int64                   `json:"projected_bytes,omitempty"`
 	RecoveryDoc      string                  `json:"recovery_doc"`
+	// Reauth says how this viewer confirms a sensitive step: password, none, or
+	// local_account when a single sign-on session has no password to give.
+	Reauth string `json:"reauth,omitempty"`
 }
 
 // backupTargetCapped: the store's daily cap, as the CLI or aws report it. It is not an
@@ -98,16 +115,29 @@ func (t *backupAutoTest) lastRealRun() (*backupTestRun, int, string) {
 	return nil, skips, reason
 }
 
-func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupRowView) backupSetupServerView {
+func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupRowView, now time.Time) backupSetupServerView {
 	out := backupSetupServerView{Server: sv.Server}
+	flowBucket := false
 	if setup := b.rec.Setup; setup != nil {
-		out.Run = setup.Runs[sv.Server]
+		// An old failure stops mattering once a later run has succeeded.
+		if run := setup.Runs[sv.Server]; run != nil && !(sv.LastRun != nil && sv.LastRun.Status == "ok" && sv.LastRun.At.After(run.RequestedAt)) {
+			out.Run = run
+		}
 		if k := setup.Keys[sv.Server]; k != nil {
-			out.Key, out.Lifecycle = k.KeyName, k.Lifecycle
+			out.Key = k.KeyName
+			// The lifecycle note is for buckets this flow set up. The live read wins; what
+			// verification recorded only fills in when the live read cannot say.
+			flowBucket = true
+			out.Lifecycle = sv.Target.IncomingLifecycle
+			if out.Lifecycle == "" || out.Lifecycle == "unknown" {
+				if k.Lifecycle != "" {
+					out.Lifecycle = k.Lifecycle
+				}
+			}
 		}
 	}
-	if out.Lifecycle == "" {
-		out.Lifecycle = sv.Target.IncomingLifecycle
+	if !flowBucket {
+		out.Lifecycle = ""
 	}
 	if backupTargetCapped(sv.Target.Error) {
 		out.State, out.Detail = setupCapped, backupCappedMessage
@@ -132,18 +162,38 @@ func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupR
 		return out
 	}
 
+	chosen := map[string]bool{}
+	if setup := b.rec.Setup; setup != nil {
+		for _, name := range setup.Skipped[sv.Server] {
+			chosen[name] = true
+		}
+	}
 	covered := 0
 	var firstBackup, late, failing []string
-	var waitingTest, failedTest []string
-	guardReason := ""
+	var waitingTest, failedTest, overdue []string
+	guardReason, overdueReason := "", ""
 	for i := range rows {
 		row := &rows[i]
+		isDatabase := row.Kind != "volumes"
 		switch row.State {
 		case "excluded":
+			if isDatabase {
+				out.Skipped = append(out.Skipped, row.Name)
+			}
 			continue
 		case "uncovered":
-			out.Uncovered = append(out.Uncovered, row.Name)
+			switch {
+			case chosen[row.Name]:
+				out.Skipped = append(out.Skipped, row.Name)
+			case !isDatabase && !sv.Policy.Volumes:
+				out.Skipped = append(out.Skipped, row.Name)
+			default:
+				out.Uncovered = append(out.Uncovered, row.Name)
+			}
 			continue
+		}
+		for _, db := range row.UncoveredDatabases {
+			out.Uncovered = append(out.Uncovered, row.Name+"/"+db)
 		}
 		covered++
 		switch {
@@ -164,7 +214,7 @@ func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupR
 			firstBackup = append(firstBackup, row.Name)
 			continue
 		}
-		if row.Kind != "accessory" && row.Kind != "adopted" {
+		if !isDatabase {
 			continue // volumes need no restore test
 		}
 		seen := 0
@@ -177,8 +227,16 @@ func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupR
 			switch {
 			case run != nil && !run.OK:
 				failedTest = append(failedTest, row.Name)
+			case run != nil && skips >= backupGuardSkipsShown:
+				overdue = append(overdue, row.Name)
+				overdueReason = reason
+			case run != nil && now.Sub(run.At) > backupRestoreTestMaxAge:
+				overdue = append(overdue, row.Name)
+				if overdueReason == "" {
+					overdueReason = fmt.Sprintf("The last one passed %d days ago.", int(now.Sub(run.At).Hours()/24))
+				}
 			case run != nil:
-				// passed; a later guard skip does not undo it
+				// passed recently; one skip since does not undo it
 			case skips >= backupGuardSkipsShown:
 				guardReason = reason
 				waitingTest = append(waitingTest, row.Name)
@@ -186,33 +244,53 @@ func (b *backupState) setupServerStateLocked(sv backupServerView, rows []backupR
 				waitingTest = append(waitingTest, row.Name)
 			}
 		}
-		if seen == 0 && (row.LastRestoreTest == nil || !row.LastRestoreTest.OK) {
-			waitingTest = append(waitingTest, row.Name)
+		if seen == 0 {
+			manual := row.LastRestoreTest
+			switch {
+			case manual == nil:
+				waitingTest = append(waitingTest, row.Name)
+			case !manual.OK:
+				failedTest = append(failedTest, row.Name)
+			case now.Sub(manual.At) > backupRestoreTestMaxAge:
+				overdue = append(overdue, row.Name)
+				if overdueReason == "" {
+					overdueReason = fmt.Sprintf("The last one passed %d days ago.", int(now.Sub(manual.At).Hours()/24))
+				}
+			}
 		}
 	}
 	join := func(list []string) string { return strings.Join(list, "; ") }
+	names := func(list []string) string { return strings.Join(list, ", ") }
 	switch {
-	case covered == 0:
-		out.State, out.Detail = setupEmpty, "There is nothing to back up on this server yet."
 	case len(failing) > 0:
 		out.State, out.Detail = setupFailing, "Backups are failing: "+join(failing)
 	case len(failedTest) > 0:
 		out.State, out.Detail = setupTestFailed, "A restore test failed: "+join(failedTest)
+	case len(out.Uncovered) > 0:
+		out.State, out.Detail = setupNotCovered, "Not backed up: "+names(out.Uncovered)+"."
 	case len(late) > 0:
 		out.State, out.Detail = setupLate, "Backups are late: "+join(late)
+	case len(overdue) > 0:
+		out.State, out.Detail = setupTestOverdue, "Restore test overdue for "+names(overdue)+". "+overdueReason
 	case len(firstBackup) > 0:
 		out.State, out.Detail = setupWaitingBackup, "Waiting for the first backup of "+join(firstBackup)+"."
 	case guardReason != "":
 		out.State, out.Detail = setupGuardSkipped, "The restore test keeps being put off. "+guardReason
 	case len(waitingTest) > 0:
 		out.State, out.Detail = setupWaitingTest, "Waiting for a restore test of "+join(waitingTest)+". These run in the off-hours window."
+	case covered == 0 && len(out.Skipped) > 0:
+		out.State, out.Detail = setupAllSkipped, "Nothing here is backed up: you chose to skip "+names(out.Skipped)+"."
+	case covered == 0:
+		out.State, out.Detail = setupEmpty, "There is nothing to back up on this server yet."
+	case len(out.Skipped) > 0:
+		out.State, out.Detail = setupExcept, "Protected, except "+names(out.Skipped)+" (you chose to skip)."
 	default:
 		out.State = setupProtected
 	}
 	return out
 }
 
-func (b *backupState) setupViewLocked(supported, channels bool, view *backupsPageView) *backupSetupView {
+func (b *backupState) setupViewLocked(supported, channels bool, view *backupsPageView, now time.Time) *backupSetupView {
 	out := &backupSetupView{Supported: supported, MinCLI: backupSetupMinCLI, Servers: []backupSetupServerView{},
 		AlertsConfigured: channels, RecoveryDoc: backupRecoveryDoc, Base: backupSetupBase}
 	rowsByServer := map[string][]backupRowView{}
@@ -221,21 +299,28 @@ func (b *backupState) setupViewLocked(supported, channels bool, view *backupsPag
 	}
 	inFleet := map[string]bool{}
 	protected, attention, active := 0, 0, 0
+	var except []string
 	for _, sv := range view.Servers {
 		inFleet[sv.Server] = true
-		state := b.setupServerStateLocked(sv, rowsByServer[sv.Server])
+		state := b.setupServerStateLocked(sv, rowsByServer[sv.Server], now)
 		out.Servers = append(out.Servers, state)
 		switch state.State {
 		case setupProtected:
 			protected++
 			active++
+		case setupExcept:
+			protected++
+			active++
+			except = append(except, state.Skipped...)
+		case setupAllSkipped:
+			except = append(except, state.Skipped...)
 		case setupEmpty:
 		case setupNotProtected:
 			if view.Storage != nil {
 				out.NewServers = append(out.NewServers, sv.Server)
 			}
 			active++
-		case setupFailing, setupTestFailed, setupLate, setupUnreachable, setupGuardSkipped, setupCapped, setupUnknown:
+		case setupFailing, setupTestFailed, setupTestOverdue, setupNotCovered, setupLate, setupUnreachable, setupGuardSkipped, setupCapped, setupUnknown:
 			attention++
 			active++
 		default:
@@ -280,6 +365,8 @@ func (b *backupState) setupViewLocked(supported, channels bool, view *backupsPag
 	out.ProjectedBytes = out.StoredBytes * out.Multiplier
 
 	switch {
+	case active > 0 && protected == active && len(except) > 0:
+		out.State, out.Headline = setupExcept, "Protected, except "+strings.Join(except, ", ")+" (you chose to skip)."
 	case active > 0 && protected == active:
 		out.State, out.Headline = "protected", "Your data is protected."
 	case attention > 0:
@@ -312,21 +399,83 @@ type backupSelfView struct {
 
 const (
 	backupRecoveryRunbook = "docs/recovery.md"
-	backupSelfTemplateApp = "dash"
+	backupSelfProduct     = "dash"
 )
 
 // backupSelfApp names Dash's own app: TEPLOY_APP where teploy deployed it (v0.1.49 and
 // later), and "" otherwise.
 func backupSelfApp() string { return strings.TrimSpace(os.Getenv("TEPLOY_APP")) }
 
-// backupSelfExcludes is what a policy without a recipient must leave out. A Dash
-// deployed by an older CLI has no TEPLOY_APP, so the template's name is excluded too:
-// a wrong guess skips an app's volumes and says so, a missed one uploads an SSH key.
-func backupSelfExcludes(app string) []string {
-	if app != "" && app != backupSelfTemplateApp {
-		return []string{app + "/volumes", backupSelfTemplateApp + "/volumes"}
+// What a server's relation to this Dash turned out to be.
+const (
+	selfHostYes     = "host"
+	selfHostAbsent  = "absent"
+	selfHostUnknown = "unknown"
+)
+
+// selfHostOn says whether this server hosts this Dash, without trusting a name: a user
+// may have an app called dash. Yes needs the running container's own product label and
+// the app name from TEPLOY_APP, as `server siblings` reports them. No volumes under the
+// name means there is nothing to protect there. The rest is unknown.
+func (s *Server) selfHostOn(ctx context.Context, name string, env *backupStatusEnvelope) string {
+	app := s.backups.selfApp
+	if env != nil {
+		present := false
+		for i := range env.Entries {
+			e := &env.Entries[i]
+			present = present || (e.Kind == "volumes" && (e.App == app || (app == "" && e.App == backupSelfProduct)))
+		}
+		if !present {
+			return selfHostAbsent
+		}
 	}
-	return []string{backupSelfTemplateApp + "/volumes"}
+	if app == "" || !s.capabilities(ctx).Features.Siblings {
+		return selfHostUnknown
+	}
+	report, err := s.runSiblingsCheck(ctx, name)
+	if err != nil {
+		return selfHostUnknown
+	}
+	for _, row := range report.Siblings {
+		if row.Product == backupSelfProduct && row.App == app {
+			return selfHostYes
+		}
+	}
+	return selfHostUnknown
+}
+
+// selfHostsFromSiblings names the servers the last siblings sweep saw running this Dash.
+func (s *Server) selfHostsFromSiblings() map[string]bool {
+	app := s.backups.selfApp
+	if app == "" {
+		return nil
+	}
+	hosts := map[string]bool{}
+	s.siblings.mu.Lock()
+	defer s.siblings.mu.Unlock()
+	for name, rec := range s.siblings.snap.Servers {
+		for _, row := range rec.Siblings {
+			if row.Product == backupSelfProduct && row.App == app {
+				hosts[name] = true
+			}
+		}
+	}
+	return hosts
+}
+
+// backupSelfRows narrows the rows to the proved host, when one is known, so a user's app
+// with the same name on another server is not reported as Dash.
+func backupSelfRows(rows []backupRowView, hosts map[string]bool) []backupRowView {
+	if len(hosts) == 0 {
+		return rows
+	}
+	out := make([]backupRowView, 0, len(rows))
+	for _, row := range rows {
+		if hosts[row.Server] {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // backupSelfUncovered compares where this Dash keeps its state with the template's
@@ -352,12 +501,9 @@ func backupSelfUncovered(dataDir string) []string {
 func backupSelfStatus(app, dataDir string, rows []backupRowView, recipient bool) backupSelfView {
 	view := backupSelfView{Runbook: backupRecoveryRunbook, Uncovered: backupSelfUncovered(dataDir)}
 	name := app
-	if name == "" {
-		name = backupSelfTemplateApp
-	}
 	var row *backupRowView
 	for i := range rows {
-		if rows[i].Kind == "volumes" && rows[i].App == name {
+		if app != "" && rows[i].Kind == "volumes" && rows[i].App == name {
 			row = &rows[i]
 			break
 		}

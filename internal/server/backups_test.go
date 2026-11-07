@@ -555,9 +555,10 @@ func TestBackupStorageConnect_B2HideIsFine(t *testing.T) {
 	}
 }
 
-// A refused hide used to read as the recommended setup, which hid a retention that
-// could never work. It now stops, unless the person says the refusal is deliberate.
-func TestBackupStorageConnect_B2RefusedHideStops(t *testing.T) {
+// A refused hide used to read as the recommended setup. A manual setup that was accepted
+// before still connects, and now says what happened and why it matters. The simple flow
+// stops instead.
+func TestBackupStorageConnect_B2RefusedHideWarns(t *testing.T) {
 	for name, probe := range map[string]s3probe.Result{
 		"refused":       {Write: true, Read: true, Delete: s3probe.DeleteRefused},
 		"still-visible": {Write: true, Read: true, Delete: s3probe.DeleteRemoved, Hidden: false},
@@ -567,11 +568,16 @@ func TestBackupStorageConnect_B2RefusedHideStops(t *testing.T) {
 			s := newBackupsServer(t, c)
 			s.backups.probe = func(context.Context, s3probe.Config) s3probe.Result { return probe }
 			rec := postJSON(t, s, "/api/backups/storage", storageBody())
-			if rec.Code != http.StatusUnprocessableEntity {
+			if rec.Code != http.StatusOK {
 				t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
 			}
-			if n := c.countOf("backup-target", "set"); n != 0 {
-				t.Fatalf("a key that cannot hide must push nothing: %d", n)
+			var resp backupStorageResponse
+			decodeData(t, rec, &resp)
+			if !strings.HasPrefix(resp.ProbeNote, "Warning:") || !strings.Contains(resp.ProbeNote, "growth") {
+				t.Fatalf("probe note = %q", resp.ProbeNote)
+			}
+			if name == "refused" && (!strings.Contains(resp.ProbeNote, "writeFiles") || !strings.Contains(resp.ProbeNote, "deleteFiles")) {
+				t.Fatalf("name both capabilities: %q", resp.ProbeNote)
 			}
 		})
 	}

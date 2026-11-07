@@ -294,7 +294,7 @@ func (s *Server) handleBackupStorage(w http.ResponseWriter, r *http.Request) {
 	// A push and its verification finish once started: walking away from the page
 	// must not leave a fleet half-rotated with nobody told.
 	ctx := context.WithoutCancel(r.Context())
-	probe, note, ok := s.probeBackupStorage(ctx, &body, prefixes[names[0]])
+	probe, note, ok := s.probeBackupStorage(ctx, &body, prefixes[names[0]], false)
 	resp := backupStorageResponse{Probe: probe, ProbeNote: note, Servers: []backupPushResult{}, Rotated: body.Rotate}
 	if !ok {
 		s.auditf(r, "backups.storage.probe_failed", body.Bucket, "provider=%s write=%v read=%v delete=%s", body.Provider, probe.Write, probe.Read, probe.Delete)
@@ -357,10 +357,10 @@ func (s *Server) handleBackupStorage(w http.ResponseWriter, r *http.Request) {
 
 // probeBackupStorage runs the write/read/delete probe. B2 keys deliberately lack
 // deleteFiles (plan D2), and retention's delete must still hide the object through such
-// a key, or retention cannot work: so on B2 a refused delete stops here, and an accepted
-// one must leave the object unreadable. The object sits in the first server's .incoming/
-// tree, where the lifecycle rule removes it.
-func (s *Server) probeBackupStorage(ctx context.Context, body *backupStorageRequest, firstPrefix string) (s3probe.Result, string, bool) {
+// a key, or retention cannot work. The simple flow (strict) stops on that. The manual
+// form always accepted such a key on B2, so it still connects, with a warning. The
+// object sits in the first server's .incoming/ tree, where the lifecycle rule removes it.
+func (s *Server) probeBackupStorage(ctx context.Context, body *backupStorageRequest, firstPrefix string, strict bool) (s3probe.Result, string, bool) {
 	pctx, cancel := context.WithTimeout(ctx, backupProbeTimeout)
 	defer cancel()
 	client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: monitor.PolicyDialContext(body.AllowInternal)}}
@@ -378,8 +378,12 @@ func (s *Server) probeBackupStorage(ctx context.Context, body *backupStorageRequ
 	case s3probe.DeleteRemoved:
 		if body.Provider == backupProviderB2 {
 			if !res.Hidden {
-				res.Error = "Backblaze accepted the delete, but the test object can still be read. Retention would not work with this key, so nothing was pushed."
-				return res, "", false
+				if strict {
+					res.Error = "Backblaze accepted the delete, but the test object can still be read. Retention would not work with this key, so nothing was pushed."
+					return res, "", false
+				}
+				res.Error = ""
+				return res, "Warning: Backblaze accepted the delete, but the test object can still be read. Old backups may never be removed with this key, and growth would be the only sign.", true
 			}
 			res.Error = ""
 			return res, "This key hid the test object, which is how retention works on B2. A key without deleteFiles cannot destroy history: hidden copies can still be recovered until the bucket's lifecycle rule removes them after " + strconv.Itoa(b2.DefaultHideDays) + " days.", true
@@ -387,15 +391,19 @@ func (s *Server) probeBackupStorage(ctx context.Context, body *backupStorageRequ
 		res.Error = ""
 		return res, "", true
 	case s3probe.DeleteRefused:
-		if body.Provider == backupProviderB2 && !body.DeleteRefusalOK {
-			res.Error = "Backblaze refused to hide the test object through this key, so retention cannot work: old backups would never be removed, and growth would be the only symptom. Nothing was pushed. Give the key writeFiles and try again."
+		if body.Provider == backupProviderB2 && strict {
+			res.Error = "Backblaze answered 403 when Dash tried to remove a test object with this key, so retention would not work: old backups would never be removed, and growth would be the only sign. Nothing was pushed. Hiding a file may need writeFiles or deleteFiles. Backblaze's docs do not settle which for this call, and deleteFiles would also let a compromised server destroy history."
 			return res, "", false
+		}
+		if body.Provider == backupProviderB2 && !body.DeleteRefusalOK {
+			res.Error = ""
+			return res, "Warning: Backblaze answered 403 when Dash tried to remove a test object with this key. Old backups may never be removed, and growth would be the only sign. Check the key's writeFiles and deleteFiles permissions, and the bucket's settings.", true
 		}
 		if body.DeleteRefusalOK {
 			res.Error = ""
-			return res, "The store refused the delete, which you said is deliberate. Retention will report the objects it could not remove.", true
+			return res, "The store refused the delete, which you accepted. Retention will report the objects it could not remove.", true
 		}
-		res.Error = "The store refused the delete, so retention could not remove old backups. If a bucket lock does this on purpose, tick the box and try again."
+		res.Error = "The store refused the delete, so retention could not remove old backups. If you accept that, tick the box and try again."
 		return res, "", false
 	}
 	if res.Error == "" {

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/useteploy/teploy-dash/internal/b2"
+	"github.com/useteploy/teploy-dash/internal/caps"
 	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/remote"
@@ -700,7 +701,24 @@ func (s *Server) handleBackupsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeData(w, s.backupsView(r.Context(), time.Now().UTC()))
+	view := s.backupsView(r.Context(), time.Now().UTC())
+	if view.Setup != nil {
+		// Key ids and names are for those who can act on them.
+		if !s.callerHolds(r, caps.AdministerCredentials) {
+			view.Setup.Leftovers = nil
+			for i := range view.Setup.Servers {
+				view.Setup.Servers[i].Key = ""
+			}
+		}
+		view.Setup.Reauth = "none"
+		if s.gate != nil {
+			view.Setup.Reauth = "local_account"
+			if session, ok := currentUser(r); ok && session.local {
+				view.Setup.Reauth = "password"
+			}
+		}
+	}
+	writeData(w, view)
 }
 
 func (s *Server) handleBackupsRefresh(w http.ResponseWriter, r *http.Request) {
@@ -762,6 +780,7 @@ func (s *Server) backupsView(ctx context.Context, now time.Time) backupsPageView
 	channels := s.alertChannelsConfigured()
 	publicURL := s.alertPublicURL()
 	manual := s.manualRestoreTests()
+	selfHosts := s.selfHostsFromSiblings()
 	b := &s.backups
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -796,8 +815,8 @@ func (s *Server) backupsView(ctx context.Context, now time.Time) backupsPageView
 	}
 	view.Tests = b.testViewsLocked(now)
 	view.Recovery = b.rec.recoveryViewLocked(now)
-	view.SelfBackup = backupSelfStatus(b.selfApp, b.dataDir, view.Rows, b.rec.Recovery != nil)
-	view.Setup = b.setupViewLocked(s.cliInstalled() && features.BackupSetup, channels, &view)
+	view.SelfBackup = backupSelfStatus(b.selfApp, b.dataDir, backupSelfRows(view.Rows, selfHosts), b.rec.Recovery != nil)
+	view.Setup = b.setupViewLocked(s.cliInstalled() && features.BackupSetup, channels, &view, now)
 	// The hand-written-jobs list is for those who have some: new users never see it.
 	if b.backupHandwrittenFound(view.Rows) {
 		view.Handwritten, view.HandwrittenRule = backupHandwrittenJobs, HandwrittenRule

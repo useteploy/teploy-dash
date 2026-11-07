@@ -160,7 +160,7 @@ func (s *Server) requireReauth(w http.ResponseWriter, r *http.Request, password 
 		return false
 	}
 	if !session.local {
-		jsonError(w, "Recovery key actions need a local account's password. Sign in with a local admin account.", http.StatusForbidden)
+		jsonError(w, "This step needs a password, and single sign-on accounts do not have one here. Sign out, then sign in with a local admin account to finish it. An admin can create one under Settings, Users.", http.StatusForbidden)
 		return false
 	}
 	if _, ok := s.gate.authenticate(session.user, password); !ok {
@@ -639,20 +639,34 @@ func (s *Server) applyBackupPolicy(ctx context.Context, name string, p backupPol
 		args = append(args, "--adopt", a)
 	}
 	// Without any recovery key, a volume backup of Dash would upload its SSH key in
-	// plaintext, so its own volumes stay out until a key arrives.
+	// plaintext, so its own volumes stay out until a key arrives. Only on the server
+	// proved to host this Dash: excluding by name could hit a user's own app.
 	var selfExcluded []string
 	selfChanged := false
-	if recipient == "" && current.Recipient == "" {
-		merged, added := s.backups.withSelfExcludes(current.Excludes)
-		if len(added) > 0 {
-			args = append(args, "--exclude="+strings.Join(merged, ","))
-			selfExcluded, selfChanged = append(s.backups.selfExcludedList(name), added...), true
+	selfWarning := ""
+	if recipient == "" && current.Recipient == "" && volumes {
+		env, serr := s.readBackupStatus(ctx, name)
+		if serr != nil {
+			env = nil
+		}
+		switch s.selfHostOn(ctx, name, env) {
+		case selfHostYes:
+			merged, added := s.backups.withSelfExcludes(current.Excludes)
+			if len(added) > 0 {
+				args = append(args, "--exclude="+strings.Join(merged, ","))
+				selfExcluded, selfChanged = append(s.backups.selfExcludedList(name), added...), true
+			}
+		case selfHostUnknown:
+			selfWarning = "Dash could not tell whether this server hosts Dash itself. If it does, its SSH key would be uploaded unencrypted. Set a recovery key, or exclude Dash's volumes here."
 		}
 	} else if s.backups.selfExcludedOn(name) {
 		args = append(args, "--exclude="+strings.Join(s.backups.withoutSelfExcludes(name, current.Excludes), ","))
 		selfChanged = true
 	}
 	heartbeat, note := s.backupHeartbeatFor(name, interval, current)
+	if selfWarning != "" {
+		note = strings.TrimSpace(note + " " + selfWarning)
+	}
 	var result *cli.Result
 	if heartbeat != "" {
 		// The URL carries a token, so it only ever travels on stdin.
@@ -681,17 +695,13 @@ func (s *Server) applyBackupPolicy(ctx context.Context, name string, p backupPol
 // withSelfExcludes adds Dash's own volumes to an exclude list, returning what it added.
 func (b *backupState) withSelfExcludes(excludes []string) (merged, added []string) {
 	merged = append(merged, excludes...)
-	for _, self := range backupSelfExcludes(b.selfApp) {
-		have := false
-		for _, e := range excludes {
-			have = have || e == self
-		}
-		if !have {
-			merged = append(merged, self)
-			added = append(added, self)
+	self := b.selfApp + "/volumes"
+	for _, e := range excludes {
+		if e == self {
+			return merged, nil
 		}
 	}
-	return merged, added
+	return append(merged, self), []string{self}
 }
 
 func (b *backupState) selfExcludedList(name string) []string {
@@ -905,18 +915,13 @@ func (s *Server) handleBackupExclude(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "say why this is excluded: it goes in the audit log")
 		return
 	}
-	if !body.Excluded {
-		for _, self := range backupSelfExcludes(s.backups.selfApp) {
-			if body.Name != self {
-				continue
-			}
-			s.backups.mu.Lock()
-			hasKey := s.backups.rec.Recovery != nil
-			s.backups.mu.Unlock()
-			if !hasKey {
-				writeError(w, "These volumes hold Dash's SSH key, so they stay out until a recovery key encrypts them.")
-				return
-			}
+	if !body.Excluded && s.backups.selfApp != "" && body.Name == s.backups.selfApp+"/volumes" {
+		s.backups.mu.Lock()
+		hasKey := s.backups.rec.Recovery != nil
+		s.backups.mu.Unlock()
+		if !hasKey && s.selfHostOn(r.Context(), body.Server, nil) == selfHostYes {
+			writeError(w, "These volumes hold Dash's SSH key, so they stay out until a recovery key encrypts them.")
+			return
 		}
 	}
 	if _, err := s.lookupServerStrict(r.Context(), body.Server); err != nil {

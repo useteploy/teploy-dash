@@ -36,14 +36,16 @@ const (
 	// backupProofBytes is how much of an object the browser gets for the proof.
 	backupProofBytes = 128 * 1024
 	// backupMinFreeBytes: below this a first backup is likely to run out of room.
-	backupMinFreeBytes         = int64(2) << 30
-	backupRulesRetries         = 3
-	backupStartNow             = "now"
-	backupStartNext            = "next"
-	backupKeyMinted            = "minted"
-	backupKeyPushing           = "pushing"
-	backupKeyPushed            = "pushed"
-	backupKeyVerified          = "verified"
+	backupMinFreeBytes = int64(2) << 30
+	backupRulesRetries = 3
+	backupStartNow     = "now"
+	backupStartNext    = "next"
+	backupKeyMinted    = "minted"
+	backupKeyPushing   = "pushing"
+	backupKeyPushed    = "pushed"
+	backupKeyVerified  = "verified"
+	// backupKeyAmbiguous: the push failed, and the server may or may not hold this key.
+	backupKeyAmbiguous         = "ambiguous"
 	backupDefaultSetupInterval = "24h"
 	// backupRecoveryDoc is the recovery page the UI links.
 	backupRecoveryDoc = "https://github.com/useteploy/teploy-dash/blob/main/docs/recovery.md"
@@ -71,6 +73,8 @@ type backupSetupRecord struct {
 	AlertsSkippedAt *time.Time                         `json:"alerts_skipped_at,omitempty"`
 	TurnedOnAt      *time.Time                         `json:"turned_on_at,omitempty"`
 	Proof           *backupProofRecord                 `json:"proof,omitempty"`
+	// Skipped is what a person chose to leave out at turn-on, by server.
+	Skipped map[string][]string `json:"skipped,omitempty"`
 }
 
 type backupServerKey struct {
@@ -82,7 +86,9 @@ type backupServerKey struct {
 	Lifecycle string     `json:"lifecycle,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	Verified  *time.Time `json:"verified_at,omitempty"`
-	// Replaces are older keys that stay until this one is verified.
+	// Replaces are older keys a server may still be using. They go only after a push
+	// whose own call succeeded and then verified, in that same operation: reachability
+	// cannot say which key a server holds.
 	Replaces []backupLeftoverKey `json:"replaces,omitempty"`
 }
 
@@ -297,6 +303,9 @@ type backupPreflightSummary struct {
 	Selected bool `json:"selected"`
 	// Actions reports consented installs and upgrades, in plain words.
 	Actions []string `json:"actions,omitempty"`
+	// OwnKey: the key on this server, if any, is one Dash made, so Dash can replace it
+	// safely. An unfinished one starts ticked, so a retry finds it.
+	OwnKey bool `json:"own_key,omitempty"`
 }
 
 func summarizeBackupPreflight(server string, p *backupPreflight) *backupPreflightSummary {
@@ -492,6 +501,10 @@ func (s *Server) handleSetupPreflight(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	setup := b.setupLocked()
 	for _, sum := range results {
+		if k := setup.Keys[sum.Server]; k != nil {
+			sum.OwnKey = true
+			sum.Selected = sum.Blocked == "" && k.State != backupKeyVerified
+		}
 		setup.Preflight[sum.Server] = sum
 	}
 	b.saveLocked()
@@ -533,7 +546,11 @@ type backupBucketFinding struct {
 func bucketFinding(b *b2.Bucket, base string, window int) backupBucketFinding {
 	a := b2.Analyze(b.Rules, base, window)
 	f := backupBucketFinding{Name: b.Name, Type: b.Type, Refusals: a.Refusals, Warnings: a.Warnings, S3Managed: a.S3Managed}
-	if b.Type != "allPrivate" {
+	switch b.Type {
+	case b2.BucketPrivate:
+	case b2.BucketSnapshot:
+		f.Refusals = append(f.Refusals, "This is a snapshot bucket, which Backblaze keeps for its own restores. Choose a private bucket.")
+	default:
 		f.Refusals = append(f.Refusals, "This bucket is public. Backups need a private bucket.")
 	}
 	return f
@@ -568,8 +585,8 @@ func (s *Server) oldPrefixWarnings(ctx context.Context, sess *b2.Session, bucket
 	}
 	basePrefix := b2.BasePrefix(base)
 	for _, name := range top {
-		if basePrefix == "" || name != basePrefix {
-			out = append(out, "This bucket already holds "+name+", which Dash leaves alone.")
+		if basePrefix != "" && name != basePrefix {
+			out = append(out, "This bucket already holds "+name+", which Dash's rules do not touch.")
 		}
 	}
 	if basePrefix == "" {
@@ -657,6 +674,11 @@ func (s *Server) handleSetupStorageCheck(w http.ResponseWriter, r *http.Request)
 		warnings = append(warnings, "This key is limited to files under "+sess.NamePrefix+", which may stop it from making the bucket's server keys.")
 	}
 	resp["warnings"] = warnings
+	// With nothing chosen, the bucket this flow would use is the one to warn about.
+	looked := body.Bucket
+	if looked == "" {
+		looked = recorded
+	}
 	findings := []backupBucketFinding{}
 	if len(sess.Missing()) == 0 {
 		buckets, err := sess.ListBuckets(r.Context())
@@ -670,10 +692,15 @@ func (s *Server) handleSetupStorageCheck(w http.ResponseWriter, r *http.Request)
 		default:
 			for i := range buckets {
 				f := bucketFinding(&buckets[i], base, window)
-				if buckets[i].Name == body.Bucket {
+				if buckets[i].Name == looked {
 					servers, serr := s.resolveServers(r.Context())
 					if serr == nil {
 						f.Warnings = append(f.Warnings, s.oldPrefixWarnings(r.Context(), sess, &buckets[i], base, backupServerNames(servers))...)
+					}
+					if base == "" {
+						if reason := s.rootBucketRefusal(r.Context(), sess, &buckets[i]); reason != "" {
+							f.Refusals = append(f.Refusals, reason)
+						}
 					}
 				}
 				findings = append(findings, f)
@@ -683,6 +710,34 @@ func (s *Server) handleSetupStorageCheck(w http.ResponseWriter, r *http.Request)
 	resp["buckets"] = findings
 	s.auditf(r, "backups.setup.storage_check", body.Bucket, "buckets=%d missing=%s", len(findings), strings.Join(sess.Missing(), ","))
 	writeData(w, resp)
+}
+
+// rootBucketRefusal: backups at the bucket root need the bucket to themselves, because
+// nothing separates them from whatever else is there. What this Dash already put there
+// does not count.
+func (s *Server) rootBucketRefusal(ctx context.Context, sess *b2.Session, bucket *b2.Bucket) string {
+	if !sess.Has(b2.CapListFiles) {
+		return "Using the bucket root needs an empty bucket, and this key cannot list files to check. Give it listFiles, or use the teploy folder."
+	}
+	top, err := sess.ListFolders(ctx, bucket.ID, "", 50)
+	if err != nil {
+		return "Using the bucket root needs an empty bucket, and Dash could not check: " + err.Error()
+	}
+	known := map[string]bool{}
+	b := &s.backups
+	b.mu.Lock()
+	if st := b.rec.Storage; st != nil && st.Bucket == bucket.Name {
+		for _, p := range st.Prefixes {
+			known[p+"/"] = true
+		}
+	}
+	b.mu.Unlock()
+	for _, name := range top {
+		if !known[name] {
+			return "Using the bucket root needs an empty bucket, and this one holds " + name + ". Choose an empty bucket, or use the teploy folder."
+		}
+	}
+	return ""
 }
 
 // ── storage: apply ───────────────────────────────────────────────────────────
@@ -698,6 +753,9 @@ type setupStorageBody struct {
 	HideDays       int      `json:"hide_days"`
 	S3Managed      bool     `json:"s3_managed"`
 	Rotate         bool     `json:"rotate"`
+	// ReplaceConfigured: the person read that a server's current key cannot be put back
+	// by Dash once replaced.
+	ReplaceConfigured bool `json:"replace_configured"`
 }
 
 // setupServerResult reports one server, in the terms of the failure rule: a key is
@@ -907,6 +965,28 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 		fail(fmt.Errorf("This key is missing these permissions: %s. Make a key that has them, then paste it again.", strings.Join(missing, ", ")), http.StatusUnprocessableEntity)
 		return
 	}
+	// A push replaces what a server already has. Ask before anything is created: Dash
+	// never held that server's old key, so it cannot put it back. A key Dash made itself
+	// is different, because Dash keeps it until the new one has verified.
+	configured := map[string]bool{}
+	var needConsent []string
+	for _, name := range names {
+		show, serr := s.readBackupTargetShow(ctx, name)
+		configured[name] = serr != nil || show.Configured
+		b.mu.Lock()
+		_, ours := b.setupLocked().Keys[name]
+		b.mu.Unlock()
+		if configured[name] && !ours {
+			needConsent = append(needConsent, name)
+		}
+	}
+	if len(needConsent) > 0 && !body.ReplaceConfigured {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"error": strings.Join(needConsent, ", ") + " may already have a backup key. Replacing it cannot be undone by Dash, which never had a copy of the old one. Confirm to go on.",
+			"data": map[string]any{"replace_configured": needConsent}})
+		return
+	}
 	base := backupSetupBase
 	if body.EmptyBase {
 		base = ""
@@ -936,9 +1016,15 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 		fail(err, http.StatusUnprocessableEntity)
 		return
 	}
-	if bucket.Type != "allPrivate" {
-		fail(errors.New("This bucket is public. Backups need a private bucket."), http.StatusConflict)
+	if refusals := bucketFinding(bucket, base, window).Refusals; bucket.Type != b2.BucketPrivate {
+		fail(errors.New(refusals[len(refusals)-1]), http.StatusConflict)
 		return
+	}
+	if base == "" && !created {
+		if reason := s.rootBucketRefusal(ctx, sess, bucket); reason != "" {
+			fail(errors.New(reason), http.StatusConflict)
+			return
+		}
 	}
 
 	// Prefixes stay stable across runs, unless an old one sits outside the base.
@@ -989,9 +1075,17 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 		resp.RulesText = b2.RulesText(base, selected, window)
 		resp.Warnings = append(resp.Warnings, "This bucket's lifecycle rules look like they are managed through the S3 API, so Dash did not change them. Backblaze gives no sure sign of this, so check that these rules exist.")
 	}
+	// What is really in force: Merge keeps a window a person set earlier.
+	effective := window
+	if rulesState == "set" {
+		if merged, _, merr := b2.Merge(bucket.Rules, base, selected, window, explicit); merr == nil {
+			effective = b2.EffectiveWindow(merged, base, selected, window)
+		}
+	}
+	resp.HideDays = effective
 	b.mu.Lock()
 	setup := b.setupLocked()
-	setup.Bucket, setup.BucketID, setup.HideDays, setup.S3Managed = bucket.Name, bucket.ID, window, rulesState == "s3_managed"
+	setup.Bucket, setup.BucketID, setup.HideDays, setup.S3Managed = bucket.Name, bucket.ID, effective, rulesState == "s3_managed"
 	b.saveLocked()
 	b.mu.Unlock()
 
@@ -1004,7 +1098,7 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 			return false
 		}
 		if sess.Has(b2.CapDeleteKeys) {
-			if err := sess.DeleteKey(ctx, keyID); err == nil || b2.IsCode(err, "bad_request") {
+			if err := sess.DeleteKey(ctx, keyID); err == nil || b2.IsMissingKey(err) {
 				return true
 			}
 		}
@@ -1019,9 +1113,10 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 	// Phase one, in order: mint and prove each key before anything reaches a server, so
 	// a key that cannot hide stops the run with nothing pushed.
 	type pendingPush struct {
-		i    int
-		key  *b2.Key
-		prev *backupServerKey
+		i          int
+		key        *b2.Key
+		prev       *backupServerKey
+		configured bool
 	}
 	var pending []pendingPush
 	stopped := ""
@@ -1039,36 +1134,17 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 			res.Skipped = "stopped before this server"
 			continue
 		}
-		if prev != nil && prev.Bucket == bucket.Name && prev.Prefix == prefixes[name] && !body.Rotate {
-			switch prev.State {
-			case backupKeyVerified:
-				res.Skipped, res.Verified, res.Pushed, res.KeyName = "already verified", true, true, prev.KeyName
-				continue
-			case backupKeyPushed, backupKeyPushing:
-				// It may be the server's key, so see whether it answers now.
-				if env, serr := s.readBackupStatus(ctx, name); serr == nil && env.Target.Configured && env.Target.Bucket == bucket.Name &&
-					env.Target.Prefix == prefixes[name] && env.Target.HasCredentials && env.Target.Reachable {
-					s.recordBackupStatus(name, env, nil, time.Now().UTC())
-					now := time.Now().UTC()
-					b.mu.Lock()
-					k := b.setupLocked().Keys[name]
-					k.State, k.Verified = backupKeyVerified, &now
-					replaced := k.Replaces
-					k.Replaces = nil
-					b.saveLocked()
-					b.mu.Unlock()
-					for _, old := range replaced {
-						dropKey(name, old.KeyID, old.KeyName, "replaced by a new key")
-					}
-					res.Skipped, res.Verified, res.Pushed, res.KeyName = "verified on this try", true, true, prev.KeyName
-					continue
-				}
-			}
+		// Only a key verified in the operation that pushed it counts as done. Anything
+		// else is pushed again: a server answering proves nothing about which key it has.
+		if prev != nil && prev.Bucket == bucket.Name && prev.Prefix == prefixes[name] && !body.Rotate && prev.State == backupKeyVerified {
+			res.Skipped, res.Verified, res.Pushed, res.KeyName = "already verified", true, true, prev.KeyName
+			continue
 		}
-		// A key left at minted never reached a server, and its secret is gone.
+		// A key left at minted never reached a server, and its secret is gone. What it
+		// was replacing may still be in use, so that stays on the record.
 		if prev != nil && prev.State == backupKeyMinted {
 			dropKey(name, prev.KeyID, prev.KeyName, "made by an earlier attempt and never pushed")
-			prev = nil
+			prev = chainRecord(prev)
 		}
 		keyName := setupKeyName(name)
 		key, lifecycleRead, err := mintServerKey(ctx, sess, keyName, bucket.ID, prefixes[name]+"/")
@@ -1090,7 +1166,10 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 			record.Lifecycle = "unknown"
 		}
 		if prev != nil {
-			record.Replaces = append(append([]backupLeftoverKey(nil), prev.Replaces...), backupLeftoverKey{KeyID: prev.KeyID, KeyName: prev.KeyName, Server: name})
+			record.Replaces = append([]backupLeftoverKey(nil), prev.Replaces...)
+			if prev.KeyID != "" {
+				record.Replaces = append(record.Replaces, backupLeftoverKey{KeyID: prev.KeyID, KeyName: prev.KeyName, Server: name})
+			}
 		}
 		b.mu.Lock()
 		b.setupLocked().Keys[name] = record
@@ -1098,7 +1177,7 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 		b.mu.Unlock()
 
 		req := request(key)
-		probe, _, ok := s.probeBackupStorage(ctx, req, prefixes[name])
+		probe, _, ok := s.probeBackupStorage(ctx, req, prefixes[name], true)
 		if !ok {
 			msg := scrubCredentials(scrub(probe.Error), key.ID, key.Secret)
 			res.Error = msg
@@ -1110,7 +1189,7 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 			}
 			continue
 		}
-		pending = append(pending, pendingPush{i: i, key: key, prev: prev})
+		pending = append(pending, pendingPush{i: i, key: key, prev: prev, configured: configured[name]})
 	}
 	if stopped != "" {
 		// Nothing reaches any server: drop what this run minted.
@@ -1125,63 +1204,108 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 		resp.Stopped = stopped
 	}
 
-	// Phase two, concurrently: push and verify, then retire any key this one replaces.
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, backupPushConcurrency)
-	for _, p := range pending {
-		wg.Add(1)
-		go func(p pendingPush) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			pctx, cancel := context.WithTimeout(ctx, backupPushTimeout)
-			defer cancel()
-			name := names[p.i]
-			res := &resp.Servers[p.i]
+	// Phase two: push and verify, then retire any key this one replaces. Servers with no
+	// target go first, because they lose nothing if the key turns out bad. With none of
+	// those, one configured server goes alone. An auth failure there stops the rest.
+	pushOne := func(p pendingPush) {
+		pctx, cancel := context.WithTimeout(ctx, backupPushTimeout)
+		defer cancel()
+		name := names[p.i]
+		res := &resp.Servers[p.i]
+		b.mu.Lock()
+		b.setupLocked().Keys[name].State = backupKeyPushing
+		b.saveLocked()
+		b.mu.Unlock()
+		pushed := s.pushBackupTargetOne(pctx, name, prefixes[name], request(p.key))
+		res.Pushed, res.Verified, res.Replaced = pushed.Pushed, pushed.Verified, pushed.Replaced
+		res.Error = scrub(pushed.Error)
+		if pushed.Lifecycle != "" && res.Lifecycle == "" {
+			res.Lifecycle = pushed.Lifecycle
+		}
+		now := time.Now().UTC()
+		switch {
+		case pushed.Verified:
+			// This key's own push succeeded and verified, so the server holds it.
 			b.mu.Lock()
-			b.setupLocked().Keys[name].State = backupKeyPushing
+			k := b.setupLocked().Keys[name]
+			k.State, k.Verified = backupKeyVerified, &now
+			if pushed.Lifecycle != "" && k.Lifecycle == "" {
+				k.Lifecycle = pushed.Lifecycle
+			}
+			replaced := k.Replaces
+			k.Replaces = nil
 			b.saveLocked()
 			b.mu.Unlock()
-			pushed := s.pushBackupTargetOne(pctx, name, prefixes[name], request(p.key))
-			res.Pushed, res.Verified, res.Replaced = pushed.Pushed, pushed.Verified, pushed.Replaced
-			res.Error = scrub(pushed.Error)
-			if pushed.Lifecycle != "" && res.Lifecycle == "" {
-				res.Lifecycle = pushed.Lifecycle
-			}
-			now := time.Now().UTC()
-			switch {
-			case pushed.Verified:
-				b.mu.Lock()
-				k := b.setupLocked().Keys[name]
-				k.State, k.Verified = backupKeyVerified, &now
-				if pushed.Lifecycle != "" && k.Lifecycle == "" {
-					k.Lifecycle = pushed.Lifecycle
+			for _, old := range replaced {
+				if !dropKey(name, old.KeyID, old.KeyName, "replaced by a new key") {
+					res.Note = strings.TrimSpace(res.Note + " The old key " + old.KeyName + " could not be deleted, so delete it in the Backblaze console.")
 				}
-				replaced := k.Replaces
-				k.Replaces = nil
-				b.saveLocked()
-				b.mu.Unlock()
-				for _, old := range replaced {
-					if !dropKey(name, old.KeyID, old.KeyName, "replaced by a new key") {
-						res.Note = strings.TrimSpace(res.Note + " The old key " + old.KeyName + " could not be deleted, so delete it in the Backblaze console.")
-					}
-				}
-				res.OldOwners = s.readOldOwners(pctx, name, res)
-			case pushed.Pushed || !s.pushProvablyMissed(pctx, name, bucket.Name, prefixes[name]):
-				// The server may hold this key. Keep it and say so.
-				res.Pushed = true
-				res.KeyKept = true
-				b.mu.Lock()
-				b.setupLocked().Keys[name].State = backupKeyPushed
-				b.saveLocked()
-				b.mu.Unlock()
-			default:
-				res.KeyDeleted = dropKey(name, p.key.ID, p.key.Name, "the push did not reach the server")
-				restoreSetupKey(b, name, p.prev)
 			}
-		}(p)
+			res.OldOwners = s.readOldOwners(pctx, name, res)
+		case pushed.Pushed:
+			// It landed and did not verify. Older keys stay until a later push verifies.
+			res.KeyKept = true
+			b.mu.Lock()
+			b.setupLocked().Keys[name].State = backupKeyPushed
+			b.saveLocked()
+			b.mu.Unlock()
+		case s.pushProvablyMissed(pctx, name, bucket.Name, prefixes[name]):
+			res.KeyDeleted = dropKey(name, p.key.ID, p.key.Name, "the push did not reach the server")
+			restoreSetupKey(b, name, p.prev)
+		default:
+			// The call failed and the server may or may not hold this key: keep every
+			// key, and do not say it was pushed.
+			res.KeyKept = true
+			b.mu.Lock()
+			b.setupLocked().Keys[name].State = backupKeyAmbiguous
+			b.saveLocked()
+			b.mu.Unlock()
+		}
 	}
-	wg.Wait()
+	pushGroup := func(group []pendingPush) {
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, backupPushConcurrency)
+		for _, p := range group {
+			wg.Add(1)
+			go func(p pendingPush) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				pushOne(p)
+			}(p)
+		}
+		wg.Wait()
+	}
+	var first, rest []pendingPush
+	for _, p := range pending {
+		if p.configured {
+			rest = append(rest, p)
+		} else {
+			first = append(first, p)
+		}
+	}
+	if len(first) == 0 && len(rest) > 0 {
+		first, rest = rest[:1], rest[1:]
+	}
+	pushGroup(first)
+	authFailed := ""
+	for _, p := range first {
+		if res := &resp.Servers[p.i]; !res.Verified && backupAuthClassError(res.Error) {
+			authFailed = res.Error
+		}
+	}
+	if authFailed != "" && len(rest) > 0 {
+		for _, p := range rest {
+			name := names[p.i]
+			res := &resp.Servers[p.i]
+			res.Skipped = "left as it was, because a new key failed on another server"
+			res.KeyDeleted = dropKey(name, p.key.ID, p.key.Name, "stopped before it was pushed")
+			restoreSetupKey(b, name, p.prev)
+		}
+		resp.Stopped = "A new key was refused on another server, so Dash did not touch the servers that already have a key. " + authFailed
+	} else {
+		pushGroup(rest)
+	}
 
 	resp.AllOK = resp.Stopped == ""
 	pushedAny := false
@@ -1199,8 +1323,15 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 		b.mu.Lock()
 		st := b.rec.Storage
 		if st == nil || st.Bucket != bucket.Name || st.Endpoint != sess.S3URL {
-			st = &backupStorage{Provider: backupProviderB2, Bucket: bucket.Name, Region: sess.Region, Endpoint: sess.S3URL,
+			fresh := &backupStorage{Provider: backupProviderB2, Bucket: bucket.Name, Region: sess.Region, Endpoint: sess.S3URL,
 				BasePrefix: base, Prefixes: map[string]string{}, ConnectedAt: now}
+			// Servers not ticked this time still write where they did.
+			if st != nil {
+				for k, v := range st.Prefixes {
+					fresh.Prefixes[k] = v
+				}
+			}
+			st = fresh
 		} else if body.Rotate {
 			st.RotatedAt = &now
 		}
@@ -1233,6 +1364,28 @@ func (s *Server) handleSetupStorageApply(w http.ResponseWriter, r *http.Request)
 	s.auditf(r, "backups.setup.storage", bucket.Name, "created=%v rules=%s servers=%d verified=%d stopped=%v", created, rulesState, len(names), verified, resp.Stopped != "")
 	s.kickBackupSweep()
 	writeData(w, resp)
+}
+
+// chainRecord is what is left of a record once its newest key has gone: the key it
+// replaced, which a server may still hold, and so never reads as verified.
+func chainRecord(k *backupServerKey) *backupServerKey {
+	if len(k.Replaces) == 0 {
+		return nil
+	}
+	last := k.Replaces[len(k.Replaces)-1]
+	return &backupServerKey{KeyID: last.KeyID, KeyName: last.KeyName, Bucket: k.Bucket, Prefix: k.Prefix, State: backupKeyAmbiguous,
+		CreatedAt: k.CreatedAt, Replaces: append([]backupLeftoverKey(nil), k.Replaces[:len(k.Replaces)-1]...)}
+}
+
+// backupAuthClassError: the store refused the key, as opposed to a server being down.
+func backupAuthClassError(text string) bool {
+	lower := strings.ToLower(text)
+	for _, sign := range []string{"invalidaccesskeyid", "signaturedoesnotmatch", "accessdenied", "access denied", "forbidden", "unauthorized", "invalid credentials", "(403)", " 403"} {
+		if strings.Contains(lower, sign) {
+			return true
+		}
+	}
+	return false
 }
 
 func restoreSetupKey(b *backupState, name string, prev *backupServerKey) {
@@ -1294,6 +1447,7 @@ func (s *Server) readOldOwners(ctx context.Context, name string, res *setupServe
 // handleSetupOwners clears a rebuilt server's old marker, with the person's consent.
 func (s *Server) handleSetupOwners(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Password    string `json:"password"`
 		Server      string `json:"server"`
 		Fingerprint string `json:"fingerprint"`
 		Force       bool   `json:"force"`
@@ -1308,6 +1462,10 @@ func (s *Server) handleSetupOwners(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.lookupServerStrict(r.Context(), body.Server); err != nil {
 		writeError(w, sanitizeDomainError(err.Error()))
+		return
+	}
+	// Forcing lets a prune delete what that machine wrote, so it asks again.
+	if body.Force && !s.requireReauth(w, r, body.Password) {
 		return
 	}
 	args := []string{"server", "backup-target", "owners", "--host", body.Server, "--clear", body.Fingerprint}
@@ -1404,11 +1562,13 @@ func (s *Server) handleSetupAlertsSkip(w http.ResponseWriter, r *http.Request) {
 // ── coverage and turning on ──────────────────────────────────────────────────
 
 type setupCoverageServer struct {
-	Server    string               `json:"server"`
-	Error     string               `json:"error,omitempty"`
-	Items     []setupCoverageItem  `json:"items"`
-	Unmanaged []setupCoverageItem  `json:"unmanaged"`
-	Target    *setupCoverageTarget `json:"target,omitempty"`
+	Server    string              `json:"server"`
+	Error     string              `json:"error,omitempty"`
+	Items     []setupCoverageItem `json:"items"`
+	Unmanaged []setupCoverageItem `json:"unmanaged"`
+	// NotCoverable are databases teploy has no way to back up: said, not offered.
+	NotCoverable []setupCoverageItem  `json:"not_coverable"`
+	Target       *setupCoverageTarget `json:"target,omitempty"`
 }
 
 type setupCoverageItem struct {
@@ -1428,20 +1588,22 @@ func backupAdoptable(e *backupEntry) bool {
 	return e.Unmanaged && e.Coverage == "uncovered" && e.Engine != "" && !strings.Contains(e.Reason, "no backup method")
 }
 
-func setupCoverageOf(env *backupStatusEnvelope) ([]setupCoverageItem, []setupCoverageItem) {
-	items, unmanaged := []setupCoverageItem{}, []setupCoverageItem{}
+func setupCoverageOf(env *backupStatusEnvelope) (items, unmanaged, notCoverable []setupCoverageItem) {
+	items, unmanaged, notCoverable = []setupCoverageItem{}, []setupCoverageItem{}, []setupCoverageItem{}
 	for i := range env.Entries {
 		e := &env.Entries[i]
 		item := setupCoverageItem{Name: e.Name, Kind: e.Kind, Engine: e.Engine, App: e.App, SizeBytes: entryStoredBytes(e)}
 		switch {
 		case backupAdoptable(e):
 			unmanaged = append(unmanaged, item)
-		case e.Coverage == "excluded" || e.Coverage == "uncovered":
+		case e.Coverage == "uncovered":
+			notCoverable = append(notCoverable, item)
+		case e.Coverage == "excluded":
 		default:
 			items = append(items, item)
 		}
 	}
-	return items, unmanaged
+	return items, unmanaged, notCoverable
 }
 
 func (s *Server) handleSetupCoverage(w http.ResponseWriter, r *http.Request) {
@@ -1459,21 +1621,27 @@ func (s *Server) handleSetupCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]setupCoverageServer, len(names))
 	s.eachBackupName(r.Context(), names, func(ctx context.Context, i int, name string) {
-		out[i] = setupCoverageServer{Server: name, Items: []setupCoverageItem{}, Unmanaged: []setupCoverageItem{}}
+		out[i] = setupCoverageServer{Server: name, Items: []setupCoverageItem{}, Unmanaged: []setupCoverageItem{}, NotCoverable: []setupCoverageItem{}}
 		env, err := s.readBackupStatus(ctx, name)
 		s.recordBackupStatus(name, env, err, time.Now().UTC())
 		if err != nil {
 			out[i].Error = sanitizeDomainError(err.Error())
 			return
 		}
-		out[i].Items, out[i].Unmanaged = setupCoverageOf(env)
+		out[i].Items, out[i].Unmanaged, out[i].NotCoverable = setupCoverageOf(env)
 		if env.Target.Configured {
 			out[i].Target = &setupCoverageTarget{Bucket: env.Target.Bucket, Prefix: env.Target.Prefix}
 		}
 	})
 	preset, interval, days := s.setupPolicyDefaults()
 	ret, _ := backupPresetRetention(preset)
-	writeData(w, map[string]any{"servers": out, "interval": interval, "preset": preset, "hide_days": days,
+	volumes, maxGB := true, 0.0
+	s.backups.mu.Lock()
+	if p := s.backups.rec.Policy; p != nil {
+		volumes, maxGB = p.Volumes, p.VolumeMaxGB
+	}
+	s.backups.mu.Unlock()
+	writeData(w, map[string]any{"servers": out, "interval": interval, "preset": preset, "hide_days": days, "volumes": volumes, "volume_max_gb": maxGB,
 		"multiplier": backupStorageMultiplier(backupStatPolicy{Interval: interval, Retention: ret}, days)})
 }
 
@@ -1510,16 +1678,23 @@ type setupTurnOnResult struct {
 
 func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Servers     []string `json:"servers"`
-		Adopt       bool     `json:"adopt"`
-		Start       string   `json:"start"`
-		Interval    string   `json:"interval"`
-		Preset      string   `json:"preset"`
-		SkipVolumes bool     `json:"skip_volumes"`
-		VolumeMaxGB float64  `json:"volume_max_gb"`
+		Password string   `json:"password"`
+		Servers  []string `json:"servers"`
+		// Skip names unmanaged databases, by server, left unticked. Everything else
+		// found is adopted: turning on is the consent.
+		Skip     map[string][]string `json:"skip"`
+		Start    string              `json:"start"`
+		Interval string              `json:"interval"`
+		Preset   string              `json:"preset"`
+		// SkipVolumes and VolumeMaxGB keep what is already set when they are left out.
+		SkipVolumes *bool    `json:"skip_volumes"`
+		VolumeMaxGB *float64 `json:"volume_max_gb"`
 	}
 	if err := strictDecode(r, &body); err != nil {
 		writeError(w, "invalid request body")
+		return
+	}
+	if !s.requireReauth(w, r, body.Password) {
 		return
 	}
 	if body.Start != backupStartNow && body.Start != backupStartNext {
@@ -1546,7 +1721,7 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "frequency must be one of "+strings.Join(backupIntervals, ", "))
 		return
 	}
-	if body.VolumeMaxGB < 0 {
+	if body.VolumeMaxGB != nil && *body.VolumeMaxGB < 0 {
 		writeError(w, "the volume size cap must be 0 or more")
 		return
 	}
@@ -1561,10 +1736,20 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 	if b.rec.Recovery != nil {
 		recipient = b.rec.Recovery.PublicKey
 	}
+	volumes, fleetMaxGB := true, 0.0
+	if p := b.rec.Policy; p != nil {
+		volumes, fleetMaxGB = p.Volumes, p.VolumeMaxGB
+	}
 	b.mu.Unlock()
 	if recipient == "" {
 		writeError(w, "Save a recovery key first: backups are encrypted to it.")
 		return
+	}
+	if body.SkipVolumes != nil {
+		volumes = !*body.SkipVolumes
+	}
+	if body.VolumeMaxGB != nil {
+		fleetMaxGB = *body.VolumeMaxGB
 	}
 	if !b.setupMu.TryLock() {
 		writeErrorStatus(w, "Another setup step is running. Wait for it to finish.", http.StatusConflict)
@@ -1572,7 +1757,6 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 	}
 	defer b.setupMu.Unlock()
 	ctx := context.WithoutCancel(r.Context())
-	volumes := !body.SkipVolumes
 	results := make([]setupTurnOnResult, len(names))
 	s.eachBackupName(ctx, names, func(ctx context.Context, i int, name string) {
 		res := setupTurnOnResult{Server: name}
@@ -1587,13 +1771,22 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 			res.Error = "This server has no storage yet, so it was skipped."
 			return
 		}
-		var adopt []string
-		targets := 0
+		skip := map[string]bool{}
+		for _, n := range body.Skip[name] {
+			skip[n] = true
+		}
+		var adopt, skipped []string
+		targets, databases := 0, 0
 		for j := range env.Entries {
 			e := &env.Entries[j]
+			if e.Kind != "volumes" {
+				databases++
+			}
 			switch {
 			case backupAdoptable(e):
-				if body.Adopt {
+				if skip[e.Name] {
+					skipped = append(skipped, e.Name)
+				} else {
 					adopt = append(adopt, e.Name+":"+e.Engine+":all")
 					res.Adopted = append(res.Adopted, e.Name)
 					targets++
@@ -1604,12 +1797,21 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 				targets++
 			}
 		}
-		// A server with nothing on it yet must not fail, and only that server gets
-		// allow_empty: on one with targets, losing them all should stay a failure.
-		res.AllowEmpty = targets == 0
+		// Only a server with really nothing on it gets allow_empty. One holding a database
+		// is not empty, whatever was chosen for that database, and losing every target on
+		// one with targets should stay a failure.
+		res.AllowEmpty = targets == 0 && databases == 0
+		// A server's own cap stays unless the person set one here.
+		maxGB := fleetMaxGB
+		if body.VolumeMaxGB == nil && env.Policy.Configured {
+			maxGB = env.Policy.VolumeMaxGB
+		}
 		note, err := s.applyBackupPolicy(ctx, name, backupPolicyApply{Interval: interval, Retention: retention, Volumes: volumes,
-			VolumeMaxGB: body.VolumeMaxGB, Recipient: recipient, AllowEmpty: &res.AllowEmpty, Adopt: adopt})
+			VolumeMaxGB: maxGB, Recipient: recipient, AllowEmpty: &res.AllowEmpty, Adopt: adopt})
 		res.Note = note
+		if targets == 0 && databases > 0 {
+			res.Note = strings.TrimSpace(res.Note + " Nothing on this server will be backed up, so each run will report a failure until you include something.")
+		}
 		if err != nil {
 			res.Error = sanitizeDomainError(err.Error())
 			return
@@ -1620,6 +1822,15 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 		rec := b.serverLocked(name)
 		rec.HeartbeatNote = note
 		rec.PolicyAppliedAt = now
+		setup := b.setupLocked()
+		if setup.Skipped == nil {
+			setup.Skipped = map[string][]string{}
+		}
+		if len(skipped) > 0 {
+			setup.Skipped[name] = skipped
+		} else {
+			delete(setup.Skipped, name)
+		}
 		b.saveLocked()
 		b.mu.Unlock()
 		if body.Start == backupStartNow {
@@ -1627,18 +1838,22 @@ func (s *Server) handleSetupTurnOn(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	now := time.Now().UTC()
-	allOK := true
+	allOK, anyOK := true, false
 	for _, res := range results {
 		allOK = allOK && res.OK
+		anyOK = anyOK || res.OK
 	}
-	b.mu.Lock()
-	b.rec.Policy = &backupPolicySpec{Interval: interval, Preset: preset, Volumes: volumes, VolumeMaxGB: body.VolumeMaxGB, UpdatedAt: now, UpdatedBy: requestActor(r)}
-	b.setupLocked().TurnedOnAt = &now
-	b.saveLocked()
-	b.mu.Unlock()
-	s.auditf(r, "backups.setup.turn_on", "", "interval=%s preset=%s volumes=%v adopt=%v start=%s servers=%d all_ok=%v", interval, preset, volumes, body.Adopt, body.Start, len(names), allOK)
+	// Turned on means at least one server really is.
+	if anyOK {
+		b.mu.Lock()
+		b.rec.Policy = &backupPolicySpec{Interval: interval, Preset: preset, Volumes: volumes, VolumeMaxGB: fleetMaxGB, UpdatedAt: now, UpdatedBy: requestActor(r)}
+		b.setupLocked().TurnedOnAt = &now
+		b.saveLocked()
+		b.mu.Unlock()
+	}
+	s.auditf(r, "backups.setup.turn_on", "", "interval=%s preset=%s volumes=%v start=%s servers=%d all_ok=%v any_ok=%v", interval, preset, volumes, body.Start, len(names), allOK, anyOK)
 	s.kickBackupSweep()
-	writeData(w, map[string]any{"servers": results, "all_ok": allOK, "interval": interval})
+	writeData(w, map[string]any{"servers": results, "all_ok": allOK, "any_ok": anyOK, "interval": interval})
 }
 
 // startDetachedBackup starts the same run a cron line starts, and records how it went.
@@ -1865,7 +2080,7 @@ func (s *Server) handleSetupRetire(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	need := []string{}
-	if key != nil && !sess.Has(b2.CapDeleteKeys) {
+	if key != nil && (key.KeyID != "" || len(key.Replaces) > 0) && !sess.Has(b2.CapDeleteKeys) {
 		need = append(need, b2.CapDeleteKeys)
 	}
 	if body.Data == "remove" {
@@ -1897,10 +2112,31 @@ func (s *Server) handleSetupRetire(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Every key this server may hold goes, older ones included. A key that will not go
+	// stays on the record, so another try can finish.
 	if key != nil {
-		if err := sess.DeleteKey(ctx, key.KeyID); err != nil && !b2.IsCode(err, "bad_request") {
-			s.auditf(r, "backups.setup.retire_failed", body.Server, "%s", scrub(err.Error()))
-			writeErrorStatus(w, "Dash could not delete this server's key: "+scrub(err.Error()), http.StatusBadGateway)
+		pendingKeys := append([]backupLeftoverKey(nil), key.Replaces...)
+		if key.KeyID != "" {
+			pendingKeys = append(pendingKeys, backupLeftoverKey{KeyID: key.KeyID, KeyName: key.KeyName, Server: body.Server})
+		}
+		var remaining []backupLeftoverKey
+		var lastErr error
+		for _, k := range pendingKeys {
+			if err := sess.DeleteKey(ctx, k.KeyID); err != nil && !b2.IsMissingKey(err) {
+				remaining = append(remaining, k)
+				lastErr = err
+			}
+		}
+		b.mu.Lock()
+		if k := b.setupLocked().Keys[body.Server]; k != nil {
+			// No longer a key anything can count on, whatever happens next.
+			k.KeyID, k.Replaces, k.State = "", remaining, backupKeyAmbiguous
+		}
+		b.saveLocked()
+		b.mu.Unlock()
+		if lastErr != nil {
+			s.auditf(r, "backups.setup.retire_failed", body.Server, "%s", scrub(lastErr.Error()))
+			writeErrorStatus(w, "Dash could not delete this server's key: "+scrub(lastErr.Error())+" Try again.", http.StatusBadGateway)
 			return
 		}
 	}
@@ -1912,17 +2148,35 @@ func (s *Server) handleSetupRetire(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil {
 			removed, err = sess.DeleteAllVersions(ctx, bucket.ID, prefix+"/")
-			if err == nil && sess.Has(b2.CapWriteBuckets) {
-				if rules, changed := b2.WithoutPrefix(bucket.Rules, b2.IncomingPrefix(prefix)); changed {
-					if uerr := sess.UpdateRules(ctx, bucket.ID, rules, bucket.Revision); uerr != nil {
-						notes = append(notes, "Could not remove this server's lifecycle rule: "+scrub(uerr.Error()))
-					}
-				}
-			}
 		}
 		if err != nil {
-			s.auditf(r, "backups.setup.retire_failed", body.Server, "removed=%d %s", removed, scrub(err.Error()))
-			notes = append(notes, fmt.Sprintf("Removed %d files, then stopped: %s", removed, scrub(err.Error())))
+			// Keep what a retry needs: the record still names the bucket and folder.
+			s.auditf(r, "backups.setup.retire_partial", body.Server, "removed=%d %s", removed, scrub(err.Error()))
+			msg := fmt.Sprintf("Removed %d files, then stopped: %s The rest is still there. Try again to finish.", removed, scrub(err.Error()))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]any{"error": msg, "data": map[string]any{"partial": true, "files_removed": removed}})
+			return
+		}
+		ruleNames := []string{b2.IncomingPrefix(prefix)}
+		if !strings.Contains(prefix, "/") {
+			ruleNames = append(ruleNames, prefix+"/") // a server at the bucket root has its own window rule
+		}
+		b.mu.Lock()
+		s3Managed := b.rec.Setup != nil && b.rec.Setup.S3Managed
+		b.mu.Unlock()
+		rules, changed := b2.WithoutPrefixes(bucket.Rules, ruleNames...)
+		switch {
+		case !changed:
+		case s3Managed || b2.Analyze(bucket.Rules, "", b2.DefaultHideDays).S3Managed:
+			// Never send rules to a bucket managed through S3. Say what to remove.
+			notes = append(notes, "This bucket's rules are managed through the S3 API, so Dash left them. Remove the rules on "+strings.Join(ruleNames, " and ")+" yourself.")
+		case sess.Has(b2.CapWriteBuckets):
+			if uerr := sess.UpdateRules(ctx, bucket.ID, rules, bucket.Revision); uerr != nil {
+				notes = append(notes, "Could not remove this server's lifecycle rule: "+scrub(uerr.Error()))
+			}
+		default:
+			notes = append(notes, "This key cannot change the bucket, so remove the rules on "+strings.Join(ruleNames, " and ")+" in the Backblaze console.")
 		}
 	}
 	b.mu.Lock()
@@ -1930,6 +2184,7 @@ func (s *Server) handleSetupRetire(w http.ResponseWriter, r *http.Request) {
 	delete(setup.Keys, body.Server)
 	delete(setup.Preflight, body.Server)
 	delete(setup.Runs, body.Server)
+	delete(setup.Skipped, body.Server)
 	if body.Data == "remove" && b.rec.Storage != nil {
 		delete(b.rec.Storage.Prefixes, body.Server)
 	}
@@ -1938,6 +2193,38 @@ func (s *Server) handleSetupRetire(w http.ResponseWriter, r *http.Request) {
 	s.auditf(r, "backups.setup.retire", body.Server, "data=%s files_removed=%d", body.Data, removed)
 	s.kickBackupSweep()
 	writeData(w, map[string]any{"server": body.Server, "data": body.Data, "files_removed": removed, "notes": notes})
+}
+
+// handleSetupLeftoverDismiss clears a notice about a key once the person dealt with it.
+func (s *Server) handleSetupLeftoverDismiss(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		KeyID string `json:"key_id"`
+	}
+	if err := strictDecode(r, &body); err != nil {
+		writeError(w, "invalid request body")
+		return
+	}
+	b := &s.backups
+	b.mu.Lock()
+	setup := b.setupLocked()
+	kept := setup.Leftovers[:0]
+	removed := false
+	for _, left := range setup.Leftovers {
+		if left.KeyID == body.KeyID {
+			removed = true
+			continue
+		}
+		kept = append(kept, left)
+	}
+	setup.Leftovers = kept
+	b.saveLocked()
+	b.mu.Unlock()
+	if !removed {
+		jsonError(w, "not found", http.StatusNotFound)
+		return
+	}
+	s.auditf(r, "backups.setup.leftover_dismissed", body.KeyID, "")
+	writeData(w, map[string]bool{"ok": true})
 }
 
 // ── routing ──────────────────────────────────────────────────────────────────
@@ -1976,6 +2263,8 @@ func (s *Server) handleBackupSetup(w http.ResponseWriter, r *http.Request, sub s
 		s.handleSetupProofResult(w, r)
 	case "retire":
 		s.handleSetupRetire(w, r)
+	case "leftovers/dismiss":
+		s.handleSetupLeftoverDismiss(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}

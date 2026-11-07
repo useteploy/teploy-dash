@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -52,19 +53,146 @@ type fakeBackblaze struct {
 	bodies   map[string][]map[string]any
 	echo     string
 	url      string
+	// topLevel is what b2_list_file_names shows, by bucket id.
+	topLevel map[string][]string
+	// violations are requests the docs would refuse; the test cleanup fails on any.
+	violations []string
+	// violationsExpected: this test uses a rule shape the fake would refuse on purpose.
+	violationsExpected bool
+}
+
+var fakeKeyNameRE = regexp.MustCompile(`^[A-Za-z0-9-]{1,100}$`)
+
+// hasWholeBucketRule: a person's own rule on the whole bucket goes back as it came.
+func (f *fakeBackblaze) hasWholeBucketRule(bucketID any) bool {
+	for _, b := range f.buckets {
+		if b["bucketId"] != bucketID {
+			continue
+		}
+		raw, _ := json.Marshal(b["lifecycleRules"])
+		return strings.Contains(string(raw), `"fileNamePrefix":""`)
+	}
+	return false
+}
+
+// docsProblem checks a request against Backblaze's documented shapes.
+func (f *fakeBackblaze) docsProblem(name string, body map[string]any) string {
+	bucketExists := func(id any) bool {
+		for _, b := range f.buckets {
+			if b["bucketId"] == id {
+				return true
+			}
+		}
+		return false
+	}
+	switch name {
+	case "b2_list_buckets", "b2_create_bucket", "b2_update_bucket", "b2_create_key":
+		if body["accountId"] != "acct" {
+			return "wrong or missing accountId"
+		}
+	}
+	switch name {
+	case "b2_create_bucket":
+		if body["bucketType"] != "allPrivate" && body["bucketType"] != "allPublic" {
+			return "bad bucketType"
+		}
+	case "b2_create_key":
+		if _, legacy := body["bucketId"]; legacy {
+			return "bucketId was removed in v4; use bucketIds"
+		}
+		ids, _ := body["bucketIds"].([]any)
+		if len(ids) == 0 {
+			return "no bucketIds"
+		}
+		for _, id := range ids {
+			if !bucketExists(id) {
+				return fmt.Sprintf("bucket %v does not exist", id)
+			}
+		}
+		keyName, _ := body["keyName"].(string)
+		if !fakeKeyNameRE.MatchString(keyName) {
+			return "bad keyName " + keyName
+		}
+		if capsList, _ := body["capabilities"].([]any); len(capsList) == 0 {
+			return "no capabilities"
+		}
+		if prefix, _ := body["namePrefix"].(string); prefix == "" || !strings.HasSuffix(prefix, "/") {
+			return "namePrefix must be a folder"
+		}
+	case "b2_update_bucket":
+		if !bucketExists(body["bucketId"]) {
+			return "unknown bucketId"
+		}
+		if _, ok := body["ifRevisionIs"].(float64); !ok {
+			return "no ifRevisionIs"
+		}
+		rules, ok := body["lifecycleRules"].([]any)
+		if !ok {
+			return "lifecycleRules must be a list"
+		}
+		for _, raw := range rules {
+			rule, _ := raw.(map[string]any)
+			prefix, isString := rule["fileNamePrefix"].(string)
+			if !isString {
+				return "a rule without fileNamePrefix"
+			}
+			if prefix == "" && !f.hasWholeBucketRule(body["bucketId"]) {
+				return "Dash must never add a whole-bucket rule"
+			}
+			days := 0
+			for field, v := range rule {
+				switch field {
+				case "fileNamePrefix":
+				case "daysFromHidingToDeleting", "daysFromUploadingToHiding", "daysFromStartingToCancelingUnfinishedLargeFiles":
+					if v == nil {
+						continue
+					}
+					if n, isNum := v.(float64); !isNum || n < 1 {
+						return field + " must be a positive whole number or null"
+					}
+					days++
+				default:
+					return "unknown rule field " + field
+				}
+			}
+			if days == 0 {
+				return "a rule that does nothing"
+			}
+		}
+	case "b2_list_file_names", "b2_list_file_versions":
+		if !bucketExists(body["bucketId"]) {
+			return "unknown bucketId"
+		}
+	case "b2_delete_file_version":
+		if body["fileName"] == nil || body["fileId"] == nil {
+			return "fileName and fileId are required"
+		}
+	}
+	return ""
 }
 
 func newFakeBackblaze(t *testing.T) (*fakeBackblaze, func() *b2.Client) {
 	t.Helper()
 	f := &fakeBackblaze{caps: []string{"listBuckets", "writeBuckets", "writeKeys", "deleteKeys"},
 		buckets: map[string]map[string]any{}, keys: map[string]map[string]any{},
-		fail: map[string][2]any{}, failOnce: map[string]bool{}, bodies: map[string][]map[string]any{}, revision: 1}
+		fail: map[string][2]any{}, failOnce: map[string]bool{}, bodies: map[string][]map[string]any{}, revision: 1, topLevel: map[string][]string{}}
 	exp := time.Now().Add(time.Hour).UnixMilli()
 	f.expiry = &exp
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	f.url = srv.URL
-	return f, func() *b2.Client { return &b2.Client{BaseURL: srv.URL, HTTP: srv.Client(), AnyHost: true} }
+	t.Cleanup(func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, v := range f.violations {
+			if !f.violationsExpected {
+				t.Errorf("a request Backblaze's docs would refuse: %s", v)
+			}
+		}
+	})
+	return f, func() *b2.Client {
+		return &b2.Client{BaseURL: srv.URL, HTTP: srv.Client(), AnyHost: true, RetryWait: time.Millisecond}
+	}
 }
 
 func (f *fakeBackblaze) addBucket(name, kind string, rules ...map[string]any) {
@@ -96,6 +224,15 @@ func (f *fakeBackblaze) serve(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		json.NewDecoder(r.Body).Decode(&body)
 		f.bodies[name] = append(f.bodies[name], body)
+		if r.Header.Get("Authorization") != "TOKEN" {
+			reply(401, map[string]any{"code": "bad_auth_token"})
+			return
+		}
+		if problem := f.docsProblem(name, body); problem != "" {
+			f.violations = append(f.violations, name+": "+problem)
+			reply(400, map[string]any{"code": "bad_request", "message": problem})
+			return
+		}
 	}
 	switch name {
 	case "b2_authorize_account":
@@ -150,11 +287,19 @@ func (f *fakeBackblaze) serve(w http.ResponseWriter, r *http.Request) {
 		reply(200, map[string]any{"applicationKeyId": id, "applicationKey": testMintSecret + fmt.Sprint(f.nextKey), "capabilities": capsList, "keyName": body["keyName"]})
 	case "b2_delete_key":
 		id := body["applicationKeyId"].(string)
+		if _, alive := f.keys[id]; !alive && id != testTempKeyID {
+			reply(400, map[string]any{"code": "bad_request", "message": "key does not exist"})
+			return
+		}
 		f.deleted = append(f.deleted, id)
 		delete(f.keys, id)
 		reply(200, map[string]any{"applicationKeyId": id})
 	case "b2_list_file_names":
-		reply(200, map[string]any{"files": []any{}})
+		files := []map[string]string{}
+		for _, n := range f.topLevel[body["bucketId"].(string)] {
+			files = append(files, map[string]string{"fileName": n})
+		}
+		reply(200, map[string]any{"files": files})
 	case "b2_list_file_versions":
 		reply(200, map[string]any{"files": []map[string]string{{"fileName": body["prefix"].(string) + "x", "fileId": "f1"}}})
 	case "b2_delete_file_version":
@@ -645,17 +790,20 @@ func TestSetupApply_PushFailedButMayHaveLanded_KeepsTheKey(t *testing.T) {
 				return nil, nil, false
 			}
 			body := applyBody("stage")
-			body["bucket"] = "chosen"
+			body["bucket"], body["replace_configured"] = "chosen", true
 			resp := applySetup(t, s, body)
 			stage := resultFor(t, resp, "stage")
-			if !stage.KeyKept || stage.KeyDeleted || len(f.deleted) != 0 {
-				t.Fatalf("%+v deleted=%v", stage, f.deleted)
+			if !stage.KeyKept || stage.KeyDeleted || stage.Pushed || len(f.deleted) != 0 {
+				t.Fatalf("a failed push is not reported as pushed, and its key stays: %+v deleted=%v", stage, f.deleted)
 			}
 		})
 	}
 }
 
-func TestSetupApply_PushedButUnverifiedKeepsTheKeyThenRerunRecovers(t *testing.T) {
+// A server answering says nothing about which key it holds, so a key left unverified
+// is never promoted later. The next run pushes a new one, and only that push's own
+// verification retires the older keys.
+func TestSetupApply_PushedButUnverifiedIsPushedAgain(t *testing.T) {
 	s, c, f := newSetupServer(t)
 	f.expiry = nil
 	bad := true
@@ -671,46 +819,181 @@ func TestSetupApply_PushedButUnverifiedKeepsTheKeyThenRerunRecovers(t *testing.T
 	if !stage.Pushed || stage.Verified || !stage.KeyKept || len(f.keys) != 1 {
 		t.Fatalf("%+v keys=%v", stage, f.keys)
 	}
+	s.backups.mu.Lock()
+	first := s.backups.rec.Setup.Keys["stage"].KeyID
+	s.backups.mu.Unlock()
 	if strings.Contains(fmt.Sprint(f.deleted), "MINTED") {
 		t.Fatalf("a pushed key must stay: %v", f.deleted)
 	}
-	// Next try the server answers on the key it already has: nothing new is minted.
 	bad = false
-	minted := f.nextKey
 	resp = applySetup(t, s, applyBody("stage"))
 	stage = resultFor(t, resp, "stage")
-	if !stage.Verified || f.nextKey != minted || !resp.AllOK {
-		t.Fatalf("%+v minted %d->%d", stage, minted, f.nextKey)
+	if !stage.Verified || !resp.AllOK || c.countOf("backup-target", "set") != 2 {
+		t.Fatalf("%+v pushes=%d", stage, c.countOf("backup-target", "set"))
+	}
+	if !strings.Contains(fmt.Sprint(f.deleted), first) {
+		t.Fatalf("the verified push retires the older key: %v", f.deleted)
 	}
 }
 
-func TestSetupApply_PushedUnverifiedRerunReplacesThenDeletesTheOldKey(t *testing.T) {
+// The reviewer's repro: rotation mints K2, the push fails on an SSH timeout, the server
+// still holds K1 at the same bucket and prefix. A later retry finds the target reachable,
+// on K1. K1 must survive until a push has actually replaced it.
+func TestSetupApply_FailedRotationThenRetryNeverDeletesTheKeyInUse(t *testing.T) {
 	s, c, f := newSetupServer(t)
 	f.expiry = nil
-	failing := true
-	orig := c.status["stage"]
-	c.status["stage"] = func() (*cli.Result, error) {
-		if failing {
-			return nil, fmt.Errorf("exit 1: timeout")
-		}
-		return orig()
-	}
-	applySetup(t, s, applyBody("stage"))
+	applySetup(t, s, applyBody("prod"))
 	s.backups.mu.Lock()
-	oldID := s.backups.rec.Setup.Keys["stage"].KeyID
+	k1 := s.backups.rec.Setup.Keys["prod"].KeyID
+	bucket, prefix, endpoint := s.backups.rec.Storage.Bucket, s.backups.rec.Storage.Prefixes["prod"], s.backups.rec.Storage.Endpoint
 	s.backups.mu.Unlock()
-	// The re-verify fails too, so a new key is made, and verification succeeds on it.
-	calls := 0
-	c.status["stage"] = func() (*cli.Result, error) {
-		calls++
-		if calls == 1 {
-			return nil, fmt.Errorf("exit 1: timeout")
+
+	serverHolds := k1
+	failPush := true
+	c.hook = func(args []string, stdin string) (*cli.Result, error, bool) {
+		if subsequence(args, []string{"backup-target", "set"}) {
+			if failPush {
+				return &cli.Result{ExitCode: 255, Stderr: "ssh: connect timeout"}, fmt.Errorf("exit 255: ssh"), true
+			}
+			serverHolds = strings.SplitN(stdin, "\n", 2)[0]
 		}
-		return orig()
+		if subsequence(args, []string{"backup-target", "show"}) {
+			return &cli.Result{Stdout: fmt.Sprintf(`{"machine_interface":2,"configured":true,"has_credentials":true,"bucket":%q,"prefix":%q,"endpoint":%q}`, bucket, prefix, endpoint)}, nil, true
+		}
+		return nil, nil, false
 	}
-	resp := applySetup(t, s, applyBody("stage"))
-	if !resultFor(t, resp, "stage").Verified || !strings.Contains(fmt.Sprint(f.deleted), oldID) {
-		t.Fatalf("%+v deleted=%v", resp, f.deleted)
+	body := applyBody("prod")
+	body["rotate"] = true
+	r := resultFor(t, applySetup(t, s, body), "prod")
+	if r.Pushed || r.Verified || !r.KeyKept {
+		t.Fatalf("a push that failed is not pushed: %+v", r)
+	}
+	if strings.Contains(fmt.Sprint(f.deleted), k1) {
+		t.Fatalf("K1 is still the server's key: %v", f.deleted)
+	}
+
+	// A retry with the push still failing, without Rotate: everything stays.
+	if r := resultFor(t, applySetup(t, s, applyBody("prod")), "prod"); r.Verified || strings.Contains(fmt.Sprint(f.deleted), k1) {
+		t.Fatalf("%+v deleted=%v", r, f.deleted)
+	}
+
+	// The push works now: the new key is on the server, and only then do the others go.
+	failPush = false
+	resp := applySetup(t, s, applyBody("prod"))
+	r = resultFor(t, resp, "prod")
+	if !r.Verified || !resp.AllOK || serverHolds == k1 {
+		t.Fatalf("%+v holds=%s", r, serverHolds)
+	}
+	if f.keys[serverHolds] == nil {
+		t.Fatalf("the server's key %s was deleted: %v", serverHolds, f.deleted)
+	}
+	if !strings.Contains(fmt.Sprint(f.deleted), k1) || len(f.keys) != 1 {
+		t.Fatalf("every older key goes once one is proved: deleted=%v alive=%v", f.deleted, f.keys)
+	}
+}
+
+// A crash between minting and pushing leaves a record at minted. Its secret is gone, but
+// the key it was replacing must not fall off the record.
+func TestSetupApply_ACrashDoesNotLoseTheOldKey(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	applySetup(t, s, applyBody("prod"))
+	s.backups.mu.Lock()
+	k := s.backups.rec.Setup.Keys["prod"]
+	k1 := k.KeyID
+	// As left by a run that died after minting K2 for a rotation.
+	f.keys["MINTEDCRASH"] = map[string]any{}
+	s.backups.rec.Setup.Keys["prod"] = &backupServerKey{KeyID: "MINTEDCRASH", KeyName: "teploy-prod-x", Bucket: k.Bucket, Prefix: k.Prefix, State: backupKeyMinted,
+		Replaces: []backupLeftoverKey{{KeyID: k1, KeyName: k.KeyName, Server: "prod"}}}
+	s.backups.mu.Unlock()
+
+	// This run's probe fails, so nothing new lands. K1 must still be on record.
+	good := s.backups.probe
+	s.backups.probe = probeBad
+	applySetup(t, s, applyBody("prod"))
+	s.backups.mu.Lock()
+	rec := s.backups.rec.Setup.Keys["prod"]
+	held := fmt.Sprint(*rec)
+	s.backups.mu.Unlock()
+	if !strings.Contains(held, k1) || strings.Contains(fmt.Sprint(f.deleted), k1) {
+		t.Fatalf("K1 fell off the record: %s deleted=%v", held, f.deleted)
+	}
+	if !strings.Contains(fmt.Sprint(f.deleted), "MINTEDCRASH") {
+		t.Fatalf("the never-pushed key goes: %v", f.deleted)
+	}
+	s.backups.probe = good
+	if r := resultFor(t, applySetup(t, s, applyBody("prod")), "prod"); !r.Verified {
+		t.Fatalf("%+v", r)
+	}
+	if !strings.Contains(fmt.Sprint(f.deleted), k1) {
+		t.Fatalf("K1 goes once replaced: %v", f.deleted)
+	}
+}
+
+// M9: a key that fails on a server with nothing to lose never reaches one that has.
+func TestSetupApply_AnAuthFailureStopsBeforeConfiguredServers(t *testing.T) {
+	s, c, f := newSetupServer(t)
+	c.hook = func(args []string, _ string) (*cli.Result, error, bool) {
+		if subsequence(args, []string{"backup-target", "show"}) && subsequence(args, []string{"prod"}) {
+			return &cli.Result{Stdout: `{"machine_interface":2,"configured":true,"bucket":"old","endpoint":"https://old"}`}, nil, true
+		}
+		return nil, nil, false
+	}
+	refused := func() (*cli.Result, error) {
+		return nil, fmt.Errorf("exit 1: An error occurred (InvalidAccessKeyId) when calling ListObjectsV2")
+	}
+	c.status["stage"] = refused
+	body := applyBody("prod", "stage")
+
+	// First the explicit warning: Dash cannot put prod's old key back.
+	rec := postJSON(t, s, "/api/backups/setup/storage/apply", body)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "prod") || !strings.Contains(rec.Body.String(), "cannot be undone") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if f.count("b2_create_bucket") != 0 || c.countOf("backup-target", "set") != 0 {
+		t.Fatal("nothing happens before the person confirms")
+	}
+
+	body["replace_configured"] = true
+	resp := applySetup(t, s, body)
+	if !strings.Contains(resp.Stopped, "did not touch") {
+		t.Fatalf("%+v", resp)
+	}
+	c.mu.Lock()
+	for _, call := range c.calls {
+		if subsequence(call.args, []string{"backup-target", "set"}) && subsequence(call.args, []string{"prod"}) {
+			c.mu.Unlock()
+			t.Fatalf("a configured server was touched: %v", call.args)
+		}
+	}
+	c.mu.Unlock()
+	prod := resultFor(t, resp, "prod")
+	if prod.Skipped == "" || !prod.KeyDeleted {
+		t.Fatalf("its unused key goes: %+v", prod)
+	}
+}
+
+func TestSetupApply_ConfiguredServersGoAfterThoseWithNothingToLose(t *testing.T) {
+	s, c, _ := newSetupServer(t)
+	order := []string{}
+	c.hook = func(args []string, _ string) (*cli.Result, error, bool) {
+		if subsequence(args, []string{"backup-target", "show"}) && subsequence(args, []string{"prod"}) {
+			return &cli.Result{Stdout: `{"machine_interface":2,"configured":true,"bucket":"old","endpoint":"https://old"}`}, nil, true
+		}
+		if subsequence(args, []string{"backup-target", "set"}) {
+			c.mu.Lock()
+			order = append(order, args[4])
+			c.mu.Unlock()
+		}
+		return nil, nil, false
+	}
+	body := applyBody("prod", "stage")
+	body["replace_configured"] = true
+	if resp := applySetup(t, s, body); !resp.AllOK {
+		t.Fatalf("%+v", resp)
+	}
+	if fmt.Sprint(order) != "[stage prod]" {
+		t.Fatalf("order = %v", order)
 	}
 }
 
@@ -1160,7 +1443,7 @@ func TestSetupTurnOn_BackUpNowWritesThePolicyAndStartsADetachedRun(t *testing.T)
 		}
 		return nil, nil, false
 	}
-	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "now", "adopt": true})
+	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "now"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
@@ -1174,6 +1457,7 @@ func TestSetupTurnOn_BackUpNowWritesThePolicyAndStartsADetachedRun(t *testing.T)
 		t.Fatalf("%+v", out)
 	}
 	args := strings.Join(policySetArgs(c, "prod"), " ")
+	// Unmanaged databases go in by default: turning on is the consent.
 	for _, want := range []string{"--interval 24h", "--recipient " + testRecipient, "--volumes=true", "--keep-daily=7", "--allow-empty=false", "--adopt redis-cache:redis:all"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("policy args %q miss %q", args, want)
@@ -1187,20 +1471,31 @@ func TestSetupTurnOn_BackUpNowWritesThePolicyAndStartsADetachedRun(t *testing.T)
 	}
 }
 
-func TestSetupTurnOn_NoAdoptWithoutTheTick(t *testing.T) {
+func TestSetupTurnOn_UntickingSkipsAndIsRecorded(t *testing.T) {
 	s, c, _ := newSetupServer(t)
 	setRecipient(s)
-	postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "next"})
-	if strings.Contains(strings.Join(policySetArgs(c, "prod"), " "), "--adopt") {
-		t.Fatal("adopting needs the tick")
+	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "next", "skip": map[string][]string{"prod": {"redis-cache"}}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
+	if strings.Contains(strings.Join(policySetArgs(c, "prod"), " "), "redis-cache") {
+		t.Fatal("an unticked database is not adopted")
+	}
+	s.backups.mu.Lock()
+	defer s.backups.mu.Unlock()
+	if fmt.Sprint(s.backups.rec.Setup.Skipped["prod"]) != "[redis-cache]" {
+		t.Fatalf("%+v", s.backups.rec.Setup.Skipped)
+	}
+}
+
+func emptyStatusJSON() string {
+	return `{"machine_interface":2,"host":"h","observed_at":"2026-11-04T03:17:04Z","target":{"configured":true,"bucket":"b","prefix":"p","has_credentials":true,"reachable":true},"policy":{"configured":false,"cron_installed":false,"retention":{},"volumes":false,"heartbeat_count":0},"encrypted":false,"aws_cli":true,"age_cli":true,"entries":[],"uncovered_databases":[]}`
 }
 
 func TestSetupTurnOn_NextRunStartsNothingAndAnEmptyServerAllowsEmpty(t *testing.T) {
 	s, c, _ := newSetupServer(t)
 	setRecipient(s)
-	empty := `{"machine_interface":2,"host":"h","observed_at":"2026-11-04T03:17:04Z","target":{"configured":true,"bucket":"b","prefix":"p","has_credentials":true,"reachable":true},"policy":{"configured":false,"cron_installed":false,"retention":{},"volumes":false,"heartbeat_count":0},"encrypted":false,"aws_cli":true,"age_cli":true,"entries":[],"uncovered_databases":[]}`
-	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: empty}, nil }
+	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: emptyStatusJSON()}, nil }
 	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "next"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
@@ -1210,6 +1505,51 @@ func TestSetupTurnOn_NextRunStartsNothingAndAnEmptyServerAllowsEmpty(t *testing.
 	}
 	if c.countOf("--detach") != 0 {
 		t.Fatal("next scheduled run starts nothing")
+	}
+}
+
+// B2: a server with only a skipped Postgres is not empty, so a run there must not report ok.
+func TestSetupTurnOn_ASkippedDatabaseIsNotAnEmptyServer(t *testing.T) {
+	s, c, _ := newSetupServer(t)
+	setRecipient(s)
+	withDB := strings.Replace(emptyStatusJSON(), `"entries":[]`, `"entries":[{"name":"customer-pg","kind":"unmanaged","engine":"postgres","unmanaged":true,"coverage":"uncovered","schedule":"none","adopted":false,"encrypted":false}]`, 1)
+	c.status["prod"] = func() (*cli.Result, error) { return &cli.Result{Stdout: withDB}, nil }
+	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "next", "skip": map[string][]string{"prod": {"customer-pg"}}})
+	var out struct {
+		Servers []setupTurnOnResult `json:"servers"`
+	}
+	decodeData(t, rec, &out)
+	if out.Servers[0].AllowEmpty || !strings.Contains(strings.Join(policySetArgs(c, "prod"), " "), "--allow-empty=false") {
+		t.Fatalf("%+v %v", out.Servers[0], policySetArgs(c, "prod"))
+	}
+	if !strings.Contains(out.Servers[0].Note, "Nothing on this server will be backed up") {
+		t.Fatalf("it says so: %+v", out.Servers[0])
+	}
+}
+
+// M12: leaving these out keeps what is already set.
+func TestSetupTurnOn_KeepsExistingSettings(t *testing.T) {
+	s, c, _ := newSetupServer(t)
+	setRecipient(s)
+	s.backups.mu.Lock()
+	s.backups.rec.Policy = &backupPolicySpec{Interval: "6h", Preset: "simple", Volumes: false, VolumeMaxGB: 20}
+	s.backups.mu.Unlock()
+	// A new server, set up on its own.
+	c.status["stage"] = func() (*cli.Result, error) { return &cli.Result{Stdout: emptyStatusJSON()}, nil }
+	rec := postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"stage"}, "start": "next"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	args := strings.Join(policySetArgs(c, "stage"), " ")
+	for _, want := range []string{"--interval 6h", "--max-age-days=14", "--volumes=false", "--volume-max-gb=20"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("args %q miss %q", args, want)
+		}
+	}
+	s.backups.mu.Lock()
+	defer s.backups.mu.Unlock()
+	if p := s.backups.rec.Policy; p.Interval != "6h" || p.Preset != "simple" || p.Volumes || p.VolumeMaxGB != 20 {
+		t.Fatalf("saved settings were reset: %+v", p)
 	}
 }
 
@@ -1223,10 +1563,23 @@ func TestSetupTurnOn_ServerWithoutStorageIsSkipped(t *testing.T) {
 	var out struct {
 		Servers []setupTurnOnResult `json:"servers"`
 		AllOK   bool                `json:"all_ok"`
+		AnyOK   bool                `json:"any_ok"`
 	}
 	decodeData(t, rec, &out)
-	if out.AllOK || !strings.Contains(out.Servers[0].Error, "no storage") || c.countOf("backup-policy", "set") != 0 {
+	if out.AllOK || out.AnyOK || !strings.Contains(out.Servers[0].Error, "no storage") || c.countOf("backup-policy", "set") != 0 {
 		t.Fatalf("%+v", out)
+	}
+}
+
+// M5: turned on means at least one server is.
+func TestSetupTurnOn_NothingTurnedOnIsNotTurnedOn(t *testing.T) {
+	s, c, _ := newSetupServer(t)
+	setRecipient(s)
+	c.status["prod"] = func() (*cli.Result, error) { return nil, fmt.Errorf("exit 1: timeout") }
+	postJSON(t, s, "/api/backups/setup/turn-on", map[string]any{"servers": []string{"prod"}, "start": "now"})
+	view := s.backupsView(context.Background(), backupsNow)
+	if view.Setup.TurnedOn || view.Policy != nil {
+		t.Fatalf("every server failed: turned_on=%v policy=%+v", view.Setup.TurnedOn, view.Policy)
 	}
 }
 
@@ -1356,6 +1709,10 @@ func TestSetupProof_RefusesAnUnencryptedObject(t *testing.T) {
 }
 
 // ── retiring a server ────────────────────────────────────────────────────────
+
+func probeBad(context.Context, s3probe.Config) s3probe.Result {
+	return s3probe.Result{Delete: s3probe.DeleteNotReached, Error: "write: the store answered 403"}
+}
 
 func retireBody(server, data string) map[string]any {
 	return map[string]any{"key_id": testTempKeyID, "application_key": testTempKey, "server": server, "data": data}
@@ -1586,56 +1943,253 @@ func TestSetupStatus_NewAndRetiredServers(t *testing.T) {
 	}
 }
 
-func TestSetupStatus_LifecycleRecheckedOnEachRead(t *testing.T) {
-	s, _, _ := newSetupServer(t)
-	for lifecycle, opens := range map[string]bool{"absent": true, "covered": false} {
-		env := statusWith(nil, true)
-		env.Target.IncomingLifecycle = lifecycle
-		s.recordBackupStatus("prod", env, nil, backupsNow)
-		s.backups.mu.Lock()
-		obs, _ := backupObservations(s.backups.rec.Servers["prod"], backupsNow)
-		s.backups.mu.Unlock()
-		failing := false
-		for _, o := range obs {
-			if strings.Contains(o.rule.Key, ":lifecycle:") {
-				failing = !o.ok
-			}
-		}
-		if failing != opens {
-			t.Errorf("%s: failing = %v", lifecycle, failing)
-		}
-	}
-	// A key that cannot read rules proves nothing either way.
+// M7: until the spike confirms native rules show through the S3 read, a missing rule pages
+// nobody. It is a note on the page, for buckets this flow set up.
+func TestSetupStatus_LifecycleIsANoteNotAnAlert(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
 	env := statusWith(nil, true)
-	env.Target.IncomingLifecycle = "unknown"
+	env.Target.IncomingLifecycle = "absent"
 	s.recordBackupStatus("prod", env, nil, backupsNow)
 	s.backups.mu.Lock()
 	obs, _ := backupObservations(s.backups.rec.Servers["prod"], backupsNow)
 	s.backups.mu.Unlock()
 	for _, o := range obs {
-		if strings.Contains(o.rule.Key, ":lifecycle:") {
-			t.Fatalf("unknown raises nothing: %+v", o)
+		if strings.Contains(o.rule.Key, "lifecycle") {
+			t.Fatalf("a missing lifecycle rule must not alert: %+v", o)
 		}
+	}
+	// Not set up by this flow: no note either.
+	if got := setupStateOf(t, s, "prod"); got.Lifecycle != "" {
+		t.Fatalf("manual or other store: %+v", got)
+	}
+}
+
+// M1: the live read wins; what verification recorded only fills in when it cannot say.
+func TestSetupStatus_LifecycleFollowsTheLiveRead(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	applySetup(t, s, applyBody("prod"))
+	for _, c := range []struct{ recorded, live, want string }{
+		{"covered", "absent", "absent"}, {"absent", "covered", "covered"}, {"covered", "unknown", "covered"}, {"covered", "", "covered"}, {"unknown", "unknown", "unknown"},
+	} {
+		s.backups.mu.Lock()
+		s.backups.rec.Setup.Keys["prod"].Lifecycle = c.recorded
+		s.backups.mu.Unlock()
+		env := statusWith([]backupEntry{goodEntry("blog/volumes", "volumes")}, true)
+		env.Target.IncomingLifecycle = c.live
+		s.recordBackupStatus("prod", env, nil, backupsNow)
+		if got := setupStateOf(t, s, "prod").Lifecycle; got != c.want {
+			t.Errorf("recorded=%s live=%q: %s", c.recorded, c.live, got)
+		}
+	}
+}
+
+// B2: "protected" with a database nobody backs up was a false claim.
+func TestSetupStatus_UncoveredDatabasesAreNotProtected(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	vol := goodEntry("blog/volumes", "volumes")
+	db := backupEntry{Name: "customer-pg", Kind: "unmanaged", Engine: "postgres", Coverage: "uncovered", Unmanaged: true, Reason: "not adopted"}
+	s.recordBackupStatus("prod", statusWith([]backupEntry{vol, db}, true), nil, backupsNow)
+	s.recordBackupStatus("stage", statusWith([]backupEntry{db}, true), nil, backupsNow)
+	view := s.backupsView(context.Background(), backupsNow)
+	if view.Setup.State == "protected" || strings.Contains(view.Setup.Headline, "is protected") {
+		t.Fatalf("%+v", view.Setup)
+	}
+	for _, sv := range view.Setup.Servers {
+		if sv.State != setupNotCovered || !strings.Contains(sv.Detail, "customer-pg") {
+			t.Errorf("%s: %+v", sv.Server, sv)
+		}
+	}
+}
+
+func TestSetupStatus_UncoveredDatabaseInsideACoveredRow(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	e := goodEntry("blog-db", "accessory")
+	e.UncoveredDatabases = []string{"orders"}
+	s.recordBackupStatus("prod", statusWith([]backupEntry{e}, true), nil, backupsNow)
+	got := setupStateOf(t, s, "prod")
+	if got.State != setupNotCovered || !strings.Contains(got.Detail, "blog-db/orders") {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestSetupStatus_ADeliberateSkipIsNeverTheBareClaim(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	vol := goodEntry("blog/volumes", "volumes")
+	db := backupEntry{Name: "scratch-pg", Kind: "unmanaged", Engine: "postgres", Coverage: "uncovered", Unmanaged: true}
+	s.recordBackupStatus("prod", statusWith([]backupEntry{vol, db}, true), nil, backupsNow)
+	s.backups.mu.Lock()
+	s.backups.setupLocked().Skipped = map[string][]string{"prod": {"scratch-pg"}}
+	s.backups.mu.Unlock()
+	view := s.backupsView(context.Background(), backupsNow)
+	if view.Setup.State != setupExcept || !strings.Contains(view.Setup.Headline, "Protected, except scratch-pg (you chose to skip)") {
+		t.Fatalf("%+v", view.Setup)
+	}
+	if got := setupStateOf(t, s, "prod"); got.State != setupExcept {
+		t.Fatalf("%+v", got)
+	}
+	// All skipped, nothing else: never protected at all.
+	s.recordBackupStatus("prod", statusWith([]backupEntry{db}, true), nil, backupsNow)
+	view = s.backupsView(context.Background(), backupsNow)
+	if got := setupStateOf(t, s, "prod"); got.State != setupAllSkipped || !strings.Contains(got.Detail, "Nothing here is backed up") {
+		t.Fatalf("%+v", got)
+	}
+	if strings.HasPrefix(view.Setup.Headline, "Protected") || view.Setup.State == "protected" {
+		t.Fatalf("%+v", view.Setup)
+	}
+}
+
+func TestSetupStatus_AnExcludedDatabaseIsNamedToo(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	db := goodEntry("old-db", "accessory")
+	db.Coverage = "excluded"
+	s.recordBackupStatus("prod", statusWith([]backupEntry{goodEntry("blog/volumes", "volumes"), db}, true), nil, backupsNow)
+	if got := setupStateOf(t, s, "prod"); got.State != setupExcept || !strings.Contains(got.Detail, "old-db") {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// H2: a pass from long ago, or repeated skips since, no longer proves anything.
+func TestSetupStatus_ARestoreTestGoesOverdue(t *testing.T) {
+	cases := []struct {
+		name string
+		hist []backupTestRun
+		want string
+		text string
+	}{
+		{"recent pass", []backupTestRun{{At: backupsNow.AddDate(0, 0, -6), OK: true}}, setupProtected, ""},
+		{"just inside", []backupTestRun{{At: backupsNow.AddDate(0, 0, -20), OK: true}}, setupProtected, ""},
+		{"too old", []backupTestRun{{At: backupsNow.AddDate(0, 0, -22), OK: true}}, setupTestOverdue, "22 days ago"},
+		{"recent pass, repeated skips", []backupTestRun{{At: backupsNow.AddDate(0, 0, -2), OK: true}, {At: backupsNow, Skipped: "a"}, {At: backupsNow, Skipped: "b"}, {At: backupsNow, Skipped: "not enough free disk"}}, setupTestOverdue, "not enough free disk"},
+		{"one skip", []backupTestRun{{At: backupsNow.AddDate(0, 0, -2), OK: true}, {At: backupsNow, Skipped: "a"}}, setupProtected, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, _, _ := newSetupServer(t)
+			s.recordBackupStatus("prod", statusWith([]backupEntry{goodEntry("blog-db", "accessory")}, true), nil, backupsNow)
+			s.backups.mu.Lock()
+			s.backups.rec.Tests["t1"] = &backupAutoTest{Server: "prod", Container: "blog-db", History: c.hist}
+			s.backups.mu.Unlock()
+			got := setupStateOf(t, s, "prod")
+			if got.State != c.want || !strings.Contains(got.Detail, c.text) {
+				t.Fatalf("%+v", got)
+			}
+			if c.want == setupTestOverdue && !strings.Contains(got.Detail, "Restore test overdue") {
+				t.Fatalf("%+v", got)
+			}
+		})
+	}
+}
+
+func TestSetupStatus_AnOldRunErrorClearsAfterASuccess(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	env := statusWith([]backupEntry{goodEntry("blog/volumes", "volumes")}, true)
+	s.recordBackupStatus("prod", env, nil, backupsNow)
+	s.backups.mu.Lock()
+	s.backups.setupLocked().Runs["prod"] = &backupSetupRun{RequestedAt: backupsNow.Add(-2 * time.Hour), Status: "failed", Error: "no room"}
+	s.backups.mu.Unlock()
+	if got := setupStateOf(t, s, "prod"); got.Run == nil {
+		t.Fatalf("still the latest word: %+v", got)
+	}
+	env = statusWith([]backupEntry{goodEntry("blog/volumes", "volumes")}, true)
+	env.LastRun = &backupStatRun{At: backupsNow.Add(-time.Hour), Status: "ok"}
+	s.recordBackupStatus("prod", env, nil, backupsNow)
+	if got := setupStateOf(t, s, "prod"); got.Run != nil {
+		t.Fatalf("a later success clears it: %+v", got.Run)
+	}
+}
+
+func TestSetupView_KeyIDsAreOnlyForThoseWhoCanAct(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	s.backups.mu.Lock()
+	s.backups.setupLocked().Leftovers = []backupLeftoverKey{{KeyID: "KEYIDVISIBLE", KeyName: "teploy-x", Server: "x", Reason: "r"}}
+	s.backups.mu.Unlock()
+	// No-auth mode holds every capability.
+	rec := httptest.NewRecorder()
+	s.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/backups", nil))
+	if !strings.Contains(rec.Body.String(), "KEYIDVISIBLE") || !strings.Contains(rec.Body.String(), `"reauth":"none"`) {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	// Viewers: the handler removes them when the caller lacks the capability.
+	view := s.backupsView(context.Background(), backupsNow)
+	if len(view.Setup.Leftovers) != 1 {
+		t.Fatalf("%+v", view.Setup.Leftovers)
+	}
+	if rec := postJSON(t, s, "/api/backups/setup/leftovers/dismiss", map[string]any{"key_id": "KEYIDVISIBLE"}); rec.Code != http.StatusOK {
+		t.Fatalf("%d", rec.Code)
+	}
+	if rec := postJSON(t, s, "/api/backups/setup/leftovers/dismiss", map[string]any{"key_id": "KEYIDVISIBLE"}); rec.Code != http.StatusNotFound {
+		t.Fatalf("%d", rec.Code)
+	}
+	if got := s.backupsView(context.Background(), backupsNow).Setup.Leftovers; len(got) != 0 {
+		t.Fatalf("%+v", got)
 	}
 }
 
 // ── Dash's own volumes ───────────────────────────────────────────────────────
 
-func TestPolicy_NoRecipientExcludesDashsOwnVolumes(t *testing.T) {
+func siblingsJSON(server, product, app string) string {
+	return fmt.Sprintf(`{"machine_interface":2,"server":%q,"observed_at":"2026-11-05T12:00:00Z","state":"ok","siblings":[{"container":"c1","product":%q,"app":%q,"state":"running","image":"i","port_hints":[],"source":"label"}],"unknown_labeled":[]}`, server, product, app)
+}
+
+func dashVolumesStatus(extra ...backupEntry) func() (*cli.Result, error) {
+	e := backupEntry{Name: "dash/volumes", Kind: "volumes", App: "dash", Coverage: "covered"}
+	env := statusWith(append([]backupEntry{e}, extra...), false)
+	raw, _ := json.Marshal(env)
+	return func() (*cli.Result, error) { return &cli.Result{Stdout: string(raw)}, nil }
+}
+
+func policyOnlyServer(t *testing.T, siblings map[string]string) (*Server, *backupCLI) {
+	t.Helper()
 	s, c, _ := newSetupServer(t)
+	c.tokens = append(c.tokens, "siblings-v1")
 	s.backups.selfApp = "dash"
 	c.policyShow["prod"] = `{"machine_interface":2,"configured":true,"excludes":["blog/volumes"]}`
 	c.policyShow["stage"] = `{"machine_interface":2,"configured":true}`
+	c.status["prod"], c.status["stage"] = dashVolumesStatus(), dashVolumesStatus()
+	c.hook = func(args []string, _ string) (*cli.Result, error, bool) {
+		if subsequence(args, []string{"server", "siblings"}) {
+			if out, ok := siblings[args[2]]; ok {
+				return &cli.Result{Stdout: out}, nil, true
+			}
+			return &cli.Result{ExitCode: 1, Stderr: "no route"}, nil, true
+		}
+		return nil, nil, false
+	}
+	return s, c
+}
+
+// M6: the server proved to host this Dash gets the exclude. A user's own app called dash
+// on another server does not, and an unprovable one gets a warning, never a silent exclude.
+func TestPolicy_NoRecipientExcludesOnlyOnTheServerProvedToHostDash(t *testing.T) {
+	s, c := policyOnlyServer(t, map[string]string{
+		"prod":  siblingsJSON("prod", "dash", "dash"),
+		"stage": siblingsJSON("stage", "observe", "other"),
+	})
 	rec := postJSON(t, s, "/api/backups/policy", map[string]any{"interval": "24h", "preset": "simple", "volumes": true})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
-	args := strings.Join(policySetArgs(c, "prod"), " ")
-	if !strings.Contains(args, "--exclude=blog/volumes,dash/volumes") {
+	if args := strings.Join(policySetArgs(c, "prod"), " "); !strings.Contains(args, "--exclude=blog/volumes,dash/volumes") {
 		t.Fatalf("Dash's SSH key must not go up in plaintext: %s", args)
 	}
+	if args := strings.Join(policySetArgs(c, "stage"), " "); strings.Contains(args, "--exclude") {
+		t.Fatalf("a user's app called dash is not this Dash: %s", args)
+	}
+	var out struct {
+		Servers []backupServerResult `json:"servers"`
+	}
+	decodeData(t, rec, &out)
+	notes := map[string]string{}
+	for _, r := range out.Servers {
+		notes[r.Server] = r.Note
+	}
+	if !strings.Contains(notes["stage"], "could not tell") || strings.Contains(notes["prod"], "could not tell") {
+		t.Fatalf("%+v", notes)
+	}
 
-	// Including them back is refused until there is a key.
+	// Including them back is refused only on the proved host, until there is a key.
 	if rec := postJSON(t, s, "/api/backups/exclude", map[string]any{"server": "prod", "name": "dash/volumes", "excluded": false}); rec.Code != http.StatusBadRequest {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
@@ -1650,9 +2204,35 @@ func TestPolicy_NoRecipientExcludesDashsOwnVolumes(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
-	args = strings.Join(policySetArgs(c, "prod"), " ")
+	args := strings.Join(policySetArgs(c, "prod"), " ")
 	if !strings.Contains(args, "--exclude=blog/volumes") || strings.Contains(args, "dash/volumes") {
 		t.Fatalf("%s", args)
+	}
+}
+
+func TestPolicy_UnprovableHostWarnsAndNeverExcludesByName(t *testing.T) {
+	s, c := policyOnlyServer(t, nil) // siblings cannot answer
+	rec := postJSON(t, s, "/api/backups/policy", map[string]any{"interval": "24h", "preset": "simple", "volumes": true})
+	if strings.Contains(strings.Join(policySetArgs(c, "prod"), " "), "--exclude") {
+		t.Fatal("never by name alone")
+	}
+	var out struct {
+		Servers []backupServerResult `json:"servers"`
+	}
+	decodeData(t, rec, &out)
+	if !strings.Contains(out.Servers[0].Note, "SSH key") {
+		t.Fatalf("%+v", out.Servers[0])
+	}
+}
+
+func TestPolicy_NoSuchVolumesNoWarning(t *testing.T) {
+	s, c := policyOnlyServer(t, nil)
+	raw, _ := json.Marshal(statusWith([]backupEntry{}, false))
+	empty := func() (*cli.Result, error) { return &cli.Result{Stdout: string(raw)}, nil }
+	c.status["prod"], c.status["stage"] = empty, empty
+	rec := postJSON(t, s, "/api/backups/policy", map[string]any{"interval": "24h", "preset": "simple", "volumes": true})
+	if strings.Contains(rec.Body.String(), "SSH key") || c.countOf("server", "siblings") != 0 {
+		t.Fatalf("%s", rec.Body.String())
 	}
 }
 
@@ -1663,6 +2243,330 @@ func TestPolicy_AnEncryptedServerKeepsItsOwnVolumes(t *testing.T) {
 	postJSON(t, s, "/api/backups/policy", map[string]any{"interval": "24h", "preset": "simple", "volumes": true})
 	if strings.Contains(strings.Join(policySetArgs(c, "prod"), " "), "--exclude") {
 		t.Fatal("a server encrypting already needs no exclude")
+	}
+}
+
+// ── storage: the rest of the review ──────────────────────────────────────────
+
+// H1: the bucket root never gets a whole-bucket rule, and refuses a bucket holding data.
+func TestSetupApply_BucketRootUsesPerServerRulesAndNeedsAnEmptyBucket(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	f.caps = append(f.caps, "listFiles")
+	f.addBucket("family-photos", "allPrivate")
+	f.topLevel["id-family-photos"] = []string{"holiday/"}
+	body := applyBody("prod")
+	body["bucket"], body["empty_base"] = "family-photos", true
+	rec := postJSON(t, s, "/api/backups/setup/storage/apply", body)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "needs an empty bucket") || !strings.Contains(rec.Body.String(), "holiday/") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	check := postJSON(t, s, "/api/backups/setup/storage/check", map[string]any{"key_id": testTempKeyID, "application_key": testTempKey, "bucket": "family-photos", "empty_base": true})
+	if !strings.Contains(check.Body.String(), "needs an empty bucket") {
+		t.Fatalf("%s", check.Body.String())
+	}
+	if f.count("b2_update_bucket") != 0 || f.count("b2_create_key") != 0 {
+		t.Fatal("a refused bucket gets nothing")
+	}
+
+	f.addBucket("spare", "allPrivate")
+	body["bucket"] = "spare"
+	resp := applySetup(t, s, body)
+	if !resp.AllOK {
+		t.Fatalf("%+v", resp)
+	}
+	raw, _ := json.Marshal(f.buckets["spare"]["lifecycleRules"])
+	if strings.Contains(string(raw), `"fileNamePrefix":""`) || !strings.Contains(string(raw), `"fileNamePrefix":"prod/"`) || !strings.Contains(string(raw), `"fileNamePrefix":"prod/.incoming/"`) {
+		t.Fatalf("rules = %s", raw)
+	}
+
+	// Without listFiles it cannot look, so it refuses.
+	s2, _, f2 := newSetupServer(t)
+	f2.addBucket("unknown", "allPrivate")
+	body = applyBody("prod")
+	body["bucket"], body["empty_base"] = "unknown", true
+	if rec := postJSON(t, s2, "/api/backups/setup/storage/apply", body); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "listFiles") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// M11: the bucket the flow would use gets its warnings at check time, not a 409 later.
+func TestSetupCheck_WarnsAboutTheSuggestedBucket(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.caps = append(f.caps, "listFiles")
+	f.addBucket("mine", "allPrivate")
+	f.topLevel["id-mine"] = []string{"other/"}
+	s.backups.mu.Lock()
+	s.backups.setupLocked().Bucket = "mine"
+	s.backups.mu.Unlock()
+	rec := postJSON(t, s, "/api/backups/setup/storage/check", map[string]any{"key_id": testTempKeyID, "application_key": testTempKey})
+	var out struct {
+		Suggested string                `json:"suggested_bucket"`
+		Buckets   []backupBucketFinding `json:"buckets"`
+	}
+	decodeData(t, rec, &out)
+	if out.Suggested != "mine" || len(out.Buckets) != 1 || !strings.Contains(strings.Join(out.Buckets[0].Warnings, " "), "other/") {
+		t.Fatalf("%+v", out)
+	}
+	if strings.Contains(strings.Join(out.Buckets[0].Warnings, " "), "leaves alone") {
+		t.Fatal("the old claim")
+	}
+}
+
+func TestSetupCheck_ASnapshotBucketIsNamedForWhatItIs(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.addBucket("snap", "snapshot")
+	rec := postJSON(t, s, "/api/backups/setup/storage/check", map[string]any{"key_id": testTempKeyID, "application_key": testTempKey})
+	if !strings.Contains(rec.Body.String(), "snapshot bucket") || strings.Contains(rec.Body.String(), "is public") {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	body := applyBody("prod")
+	body["bucket"] = "snap"
+	if rec := postJSON(t, s, "/api/backups/setup/storage/apply", body); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "snapshot bucket") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// LOW: what is recorded is what is in force, not what was asked.
+func TestSetupApply_RecordsTheRealWindow(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.addBucket("kept", "allPrivate", map[string]any{"fileNamePrefix": "teploy/", "daysFromHidingToDeleting": 30})
+	body := applyBody("prod")
+	body["bucket"] = "kept"
+	if resp := applySetup(t, s, body); resp.HideDays != 30 {
+		t.Fatalf("%+v", resp)
+	}
+	s.backups.mu.Lock()
+	defer s.backups.mu.Unlock()
+	if s.backups.rec.Setup.HideDays != 30 {
+		t.Fatalf("%d", s.backups.rec.Setup.HideDays)
+	}
+}
+
+// LOW: servers not ticked this time still write where they did.
+func TestSetupApply_SwitchingBucketsKeepsOtherServersPrefixes(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	applySetup(t, s, applyBody("prod"))
+	f.addBucket("second", "allPrivate")
+	body := applyBody("stage")
+	body["bucket"] = "second"
+	applySetup(t, s, body)
+	s.backups.mu.Lock()
+	defer s.backups.mu.Unlock()
+	st := s.backups.rec.Storage
+	if st.Bucket != "second" || st.Prefixes["prod"] == "" || st.Prefixes["stage"] == "" {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// M4: only a key that is really gone counts as deleted.
+func TestSetupApply_ABadRequestOnDeleteLeavesAKnownLeftover(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	s.backups.probe = probeBad
+	f.fail["b2_delete_key"] = [2]any{400, "bad_request"}
+	r := resultFor(t, applySetup(t, s, applyBody("prod")), "prod")
+	if r.KeyDeleted {
+		t.Fatalf("%+v", r)
+	}
+	view := s.backupsView(context.Background(), backupsNow)
+	if len(view.Setup.Leftovers) != 1 {
+		t.Fatalf("%+v", view.Setup.Leftovers)
+	}
+	// Already gone is fine, and raises nothing.
+	s2, _, f2 := newSetupServer(t)
+	f2.expiry = nil
+	s2.backups.probe = probeBad
+	s2.backups.mu.Lock()
+	s2.backups.setupLocked().Keys["prod"] = &backupServerKey{KeyID: "GONE", KeyName: "n", Bucket: "b", Prefix: "teploy/prod", State: backupKeyMinted}
+	s2.backups.mu.Unlock()
+	applySetup(t, s2, applyBody("prod"))
+	if got := s2.backupsView(context.Background(), backupsNow).Setup.Leftovers; len(got) != 1 && len(got) != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestSetupRetire_HonorsReplacesAndNeverSendsRulesToS3Managed(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	f.addBucket("s3ish", "allPrivate", map[string]any{"fileNamePrefix": "teploy/prod/.incoming/", "id": "rule-1", "daysFromUploadingToHiding": 1, "daysFromHidingToDeleting": 1})
+	body := applyBody("prod")
+	body["bucket"] = "s3ish"
+	if resp := applySetup(t, s, body); resp.RulesState != "s3_managed" {
+		t.Fatalf("%+v", resp)
+	}
+	s.backups.mu.Lock()
+	f.keys["OLDKEY"] = map[string]any{}
+	s.backups.rec.Setup.Keys["prod"].Replaces = []backupLeftoverKey{{KeyID: "OLDKEY", KeyName: "old", Server: "prod"}}
+	s.backups.mu.Unlock()
+	f.caps = append(f.caps, "listFiles", "deleteFiles")
+	rb := retireBody("prod", "remove")
+	rb["confirm"] = "prod"
+	rec := postJSON(t, s, "/api/backups/setup/retire", rb)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if f.count("b2_update_bucket") != 0 {
+		t.Fatalf("lifecycleRules went to an S3-managed bucket: %v", f.bodies["b2_update_bucket"])
+	}
+	if !strings.Contains(rec.Body.String(), "Remove the rules on teploy/prod/.incoming/") {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	if !strings.Contains(fmt.Sprint(f.deleted), "OLDKEY") || len(f.keys) != 0 {
+		t.Fatalf("every key goes: deleted=%v alive=%v", f.deleted, f.keys)
+	}
+}
+
+// M3: a removal that stops partway says so, and can be finished.
+func TestSetupRetire_APartialRemovalReportsAndCanFinish(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	applySetup(t, s, applyBody("prod"))
+	f.caps = append(f.caps, "listFiles", "deleteFiles")
+	f.fail["b2_delete_file_version"] = [2]any{403, "transaction_cap_exceeded"}
+	rb := retireBody("prod", "remove")
+	rb["confirm"] = "prod"
+	rec := postJSON(t, s, "/api/backups/setup/retire", rb)
+	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "Try again to finish") || !strings.Contains(rec.Body.String(), "partial") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	s.backups.mu.Lock()
+	_, kept := s.backups.rec.Setup.Keys["prod"]
+	s.backups.mu.Unlock()
+	if !kept {
+		t.Fatal("the record a retry needs was deleted")
+	}
+	delete(f.fail, "b2_delete_file_version")
+	rec = postJSON(t, s, "/api/backups/setup/retire", rb)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	s.backups.mu.Lock()
+	_, kept = s.backups.rec.Setup.Keys["prod"]
+	s.backups.mu.Unlock()
+	if kept {
+		t.Fatal("finished means gone")
+	}
+}
+
+// After a partial retire there is no live key, so setting the server up again must mint
+// one, not read the old record as done.
+func TestSetupRetire_APartlyRetiredServerIsNotVerified(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	applySetup(t, s, applyBody("prod"))
+	f.caps = append(f.caps, "listFiles", "deleteFiles")
+	f.fail["b2_delete_file_version"] = [2]any{403, "transaction_cap_exceeded"}
+	rb := retireBody("prod", "remove")
+	rb["confirm"] = "prod"
+	postJSON(t, s, "/api/backups/setup/retire", rb)
+	delete(f.fail, "b2_delete_file_version")
+	minted := f.nextKey
+	if r := resultFor(t, applySetup(t, s, applyBody("prod")), "prod"); !r.Verified || f.nextKey != minted+1 {
+		t.Fatalf("%+v minted %d->%d", r, minted, f.nextKey)
+	}
+}
+
+func TestSetupPreflight_AnUnfinishedKeyOfOursStartsTicked(t *testing.T) {
+	s, c, _ := newSetupServer(t)
+	s.backups.mu.Lock()
+	s.backups.setupLocked().Keys["prod"] = &backupServerKey{KeyID: "K", KeyName: "n", Bucket: "b", Prefix: "teploy/prod", State: backupKeyAmbiguous}
+	s.backups.mu.Unlock()
+	c.hook = func(args []string, _ string) (*cli.Result, error, bool) {
+		if subsequence(args, []string{"server", "backup-preflight"}) {
+			return &cli.Result{Stdout: corpusFixtureFile(t, "preflight-ready.json")}, nil, true
+		}
+		return nil, nil, false
+	}
+	rec := postJSON(t, s, "/api/backups/setup/preflight", map[string]any{"servers": []string{"prod"}})
+	var out struct {
+		Servers []backupPreflightSummary `json:"servers"`
+	}
+	decodeData(t, rec, &out)
+	if !out.Servers[0].Selected || !out.Servers[0].OwnKey {
+		t.Fatalf("%+v", out.Servers[0])
+	}
+}
+
+func TestSetupView_AViewerSeesNoKeyIDs(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	s.gate = &authGate{}
+	s.backups.mu.Lock()
+	s.backups.setupLocked().Leftovers = []backupLeftoverKey{{KeyID: "KEYIDHIDDEN", KeyName: "teploy-hidden", Server: "x", Reason: "r"}}
+	s.backups.mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/api/backups", nil)
+	req = withUser(req, &sessionInfo{user: "v", role: "viewer", caps: caps.NewSet(caps.ViewMetadata)})
+	rec := httptest.NewRecorder()
+	s.handleBackupsPage(rec, req)
+	if strings.Contains(rec.Body.String(), "KEYIDHIDDEN") || strings.Contains(rec.Body.String(), "teploy-hidden") {
+		t.Fatalf("%s", rec.Body.String())
+	}
+}
+
+func TestBackupSelfRows_AUsersAppOnAnotherServerIsNotDash(t *testing.T) {
+	good := backupsNow
+	rows := []backupRowView{
+		{Server: "other", Name: "dash/volumes", Kind: "volumes", App: "dash", State: "covered", LastGood: &good, Encrypted: true},
+		{Server: "infra", Name: "dash/volumes", Kind: "volumes", App: "dash", State: "excluded"},
+	}
+	v := backupSelfStatus("dash", "/var/teploy-dash", backupSelfRows(rows, map[string]bool{"infra": true}), false)
+	if v.Available || !strings.Contains(v.Reason, "infra") {
+		t.Fatalf("%+v", v)
+	}
+}
+
+func TestSetupRetire_AKeyThatWillNotGoStaysOnRecord(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.expiry = nil
+	applySetup(t, s, applyBody("prod"))
+	f.fail["b2_delete_key"] = [2]any{500, "internal_error"}
+	rec := postJSON(t, s, "/api/backups/setup/retire", retireBody("prod", "keep"))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	s.backups.mu.Lock()
+	k := s.backups.rec.Setup.Keys["prod"]
+	remaining := len(k.Replaces)
+	s.backups.mu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("the key must stay on record: %+v", k)
+	}
+	delete(f.fail, "b2_delete_key")
+	if rec := postJSON(t, s, "/api/backups/setup/retire", retireBody("prod", "keep")); rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetupApply_RetriesAnUnavailableStore(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.fail["b2_list_buckets"] = [2]any{503, "service_unavailable"}
+	f.failOnce["b2_list_buckets"] = true
+	if resp := applySetup(t, s, applyBody("prod")); !resp.AllOK {
+		t.Fatalf("%+v", resp)
+	}
+}
+
+func TestSetupCheck_AWrongKeyIsNotANotAllowedKey(t *testing.T) {
+	s, _, f := newSetupServer(t)
+	f.fail["b2_authorize_account"] = [2]any{401, "unauthorized"}
+	rec := postJSON(t, s, "/api/backups/setup/storage/check", map[string]any{"key_id": testTempKeyID, "application_key": testTempKey})
+	if !strings.Contains(rec.Body.String(), "did not accept that key") || strings.Contains(rec.Body.String(), "not allowed") {
+		t.Fatalf("%s", rec.Body.String())
+	}
+}
+
+func TestSetupReauth_SingleSignOnGetsAPath(t *testing.T) {
+	s, _, _ := newSetupServer(t)
+	s.gate = &authGate{}
+	req := httptest.NewRequest(http.MethodPost, "/x", nil)
+	rec := httptest.NewRecorder()
+	req = withUser(req, &sessionInfo{user: "sso-user", role: RoleAdmin, local: false})
+	if s.requireReauth(rec, req, "") {
+		t.Fatal("a single sign-on session has no password to confirm")
+	}
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "local admin account") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 }
 

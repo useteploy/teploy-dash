@@ -45,6 +45,10 @@ RUN set -eux; \
 
 COPY --from=builder /teploy-dash /usr/local/bin/teploy-dash
 
+# How `teploy server siblings` recognizes this container, and how Dash proves which
+# server hosts it.
+LABEL dev.teploy.product="dash"
+
 EXPOSE 3456
 VOLUME ["/var/teploy-dash"]
 

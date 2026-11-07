@@ -81,18 +81,6 @@ func backupObservations(rec *backupServerRecord, now time.Time) (obs []backupObs
 		}
 	}
 
-	// The bucket's rule, rechecked on every read through the server's own key. A key that
-	// cannot read rules says unknown, which proves nothing either way and raises nothing.
-	if st.Target.Configured {
-		rule := backupRule(rec.Server, "lifecycle", "", "backup lifecycle rule on "+rec.Server, alert.SeverityWarning)
-		switch st.Target.IncomingLifecycle {
-		case "covered":
-			add(backupObservation{rule, true, "the lifecycle rule is in place"})
-		case "absent":
-			add(backupObservation{rule, false, "the bucket has no lifecycle rule for this server's pending uploads, so what retention removes stays billed: " + backupLifecycleRule(nil, st.Target)})
-		}
-	}
-
 	if problem := st.AWSCLIProblem; problem != "" {
 		rule := backupRule(rec.Server, "tools", "", "backup tooling on "+rec.Server, alert.SeverityWarning)
 		add(backupObservation{rule, false, problem})
