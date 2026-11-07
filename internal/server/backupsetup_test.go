@@ -2382,7 +2382,7 @@ func TestSetupApply_ABadRequestOnDeleteLeavesAKnownLeftover(t *testing.T) {
 	s2.backups.setupLocked().Keys["prod"] = &backupServerKey{KeyID: "GONE", KeyName: "n", Bucket: "b", Prefix: "teploy/prod", State: backupKeyMinted}
 	s2.backups.mu.Unlock()
 	applySetup(t, s2, applyBody("prod"))
-	if got := s2.backupsView(context.Background(), backupsNow).Setup.Leftovers; len(got) != 1 && len(got) != 0 {
+	if got := s2.backupsView(context.Background(), backupsNow).Setup.Leftovers; len(got) != 0 {
 		t.Fatalf("%+v", got)
 	}
 }
