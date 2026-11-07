@@ -150,7 +150,7 @@ test('applying sends the ticked servers, and a finished run forgets the key', as
   assert.deepEqual(sent.servers, ['a']);
   assert.equal(sent.application_key, 'APPKEY');
   assert.equal(p.setupKey.secret, 'APPKEY', 'a partial run keeps it in memory to retry');
-  assert.match(p.storageResultLine(reply.servers[0]), /kept the key/);
+  assert.match(p.storageResultLine(reply.servers[0]), /kept every key/);
   assert.equal(p.setupPassword, '');
   reply = { all_ok: true, servers: [{ server: 'a', verified: true }], key_note: 'n', warnings: [] };
   p.setupPassword = 'pw';
@@ -190,11 +190,137 @@ test('the recovery key: only its public half reaches Dash, after the saved file 
   p.destroy();
 });
 
-test('the clipboard is optional: plain HTTP has none, and download is the main path', async () => {
+test('the key is a file, because checking and proving only take a file', () => {
+  const h = setupHarness({});
+  const html = h.readHTML();
+  assert.ok(html.includes('Download the key file'));
+  assert.ok(!html.includes('copyRecovery'));
+  assert.ok(!html.includes('password manager'));
+});
+
+test('closing with an unsaved key warns that its file is no use', async () => {
   const h = setupHarness({});
   const p = h.page('backupsPage');
-  assert.equal(p.canCopy(), typeof navigator !== 'undefined' && !!navigator.clipboard);
-  assert.ok(h.readHTML().includes('Download the key file'));
+  await p.init();
+  p.setupOpen = true;
+  p.recoveryGen = { publicKey: 'age1x', fileText: 'x', fileName: 'y' };
+  const seen = [];
+  globalThis.confirm = text => { seen.push(text); return false; };
+  p.closeSetup();
+  assert.equal(p.setupOpen, true);
+  assert.match(seen[0], /delete it/);
+  globalThis.confirm = () => true;
+  p.closeSetup();
+  assert.equal(p.setupOpen, false);
+  assert.equal(p.recoveryGen, null);
+  delete globalThis.confirm;
+  p.destroy();
+});
+
+test('M11: the suggested bucket has its warnings and its confirm box', async () => {
+  const h = setupHarness({ '/api/backups/setup/storage/check': () => response({ missing: [], suggested_bucket: 'mine', can_create_bucket: true, buckets: [{ name: 'mine', refusals: [], warnings: ['careful'] }] }) });
+  const p = h.page('backupsPage');
+  await p.init();
+  p.setupKey = { id: 'K', secret: 'S' };
+  await p.checkKey();
+  assert.equal(p.setupBucket, '');
+  assert.equal(p.chosenBucket().name, 'mine');
+  assert.equal(p.canApplyStorage(), false);
+  p.setupAccept = true;
+  assert.equal(p.canApplyStorage(), true);
+  p.destroy();
+});
+
+test('M9: replacing a server key needs an explicit yes', async () => {
+  const h = setupHarness({ '/api/backups/setup/preflight': preflight, '/api/backups/setup/storage/check': () => response({ missing: [], buckets: [], can_create_bucket: true }) });
+  const p = h.page('backupsPage');
+  await p.init();
+  await p.openSetup();
+  p.setupTicked = { a: true, b: true };
+  p.setupKey = { id: 'K', secret: 'S' };
+  await p.checkKey();
+  assert.deepEqual(p.replaceConsentNeeded(), ['b']);
+  assert.equal(p.canApplyStorage(), false);
+  p.setupReplaceOK = true;
+  assert.equal(p.canApplyStorage(), true);
+  assert.ok(h.readHTML().includes('Dash cannot put the old one back'));
+  p.destroy();
+});
+
+test('H3: the way to a key is plain steps, and a key missing permissions gets two ways forward', () => {
+  const html = harness('/backups').readHTML();
+  assert.ok(!html.includes('b2 key create'), 'not only the command line');
+  assert.ok(html.includes('Add a New Application Key'));
+  assert.ok(html.includes('Master Application Key'));
+  assert.ok(html.includes('Dash cannot delete it'));
+  assert.ok(html.includes('that would break anything else using it'));
+  assert.ok(html.includes('Set up by hand'));
+});
+
+test('re-auth follows how this viewer signed in', async () => {
+  for (const [mode, want] of [['password', 'password'], ['local_account', 'local_account'], [undefined, 'none']]) {
+    const h = setupHarness({}, { reauth: mode });
+    const p = h.page('backupsPage');
+    await p.init();
+    assert.equal(p.reauthMode(), want);
+    p.destroy();
+  }
+  assert.ok(harness('/backups').readHTML().includes('sign in with a local admin account'));
+});
+
+test('a leftover notice can be dismissed', async () => {
+  const h = setupHarness({ '/api/backups/setup/leftovers/dismiss': () => response({ ok: true }) });
+  const p = h.page('backupsPage');
+  await p.init();
+  await p.dismissLeftover('K1');
+  assert.deepEqual(h.requests.filter(r => r.url === '/api/backups/setup/leftovers/dismiss').at(-1).body, { key_id: 'K1' });
+  p.destroy();
+});
+
+test('M5: Continue goes to the proof only when nothing is waiting to be set up', async () => {
+  const h = setupHarness({ '/api/backups/setup/preflight': preflight }, { turned_on: true, servers: [{ server: 'a', state: 'not_protected' }] });
+  const p = h.page('backupsPage');
+  await p.init();
+  await p.openSetup();
+  assert.equal(p.setupStep, 'check');
+  p.destroy();
+  const h2 = setupHarness({}, { turned_on: true, servers: [{ server: 'a', state: 'waiting_first_backup' }] });
+  const p2 = h2.page('backupsPage');
+  await p2.init();
+  await p2.openSetup();
+  assert.equal(p2.setupStep, 'prove');
+  p2.destroy();
+});
+
+test('M10: a key that worked but could not be recorded is not a key that failed', async () => {
+  let fail = true;
+  const h = setupHarness({
+    '/api/backups/setup/proof/start': () => response({ server: 'a', key: 's3://b/k.age', length: 71680, data_base64: prefix }),
+    '/api/backups/setup/proof/result': () => (fail ? response({ error: 'down' }, { raw: true, status: 502 }) : response({ recorded: true })),
+  });
+  const p = h.page('backupsPage');
+  await p.init();
+  await p.proveWith(keyFile);
+  assert.deepEqual(p.proofUnrecorded, { key: 's3://b/k.age' });
+  assert.equal(p.proofState, null);
+  assert.ok(!/did not open your backup/.test(p.setupError));
+  assert.equal(h.requests.filter(r => r.url === '/api/backups/setup/proof/result').every(r => r.body.passed), true, 'never recorded as a failure');
+  fail = false;
+  await p.retryProofRecord();
+  assert.equal(p.proofUnrecorded, null);
+  assert.deepEqual(p.proofState, { passed: true, key: 's3://b/k.age' });
+  p.destroy();
+});
+
+test('a bad file and an unreadable backup are not blamed on the key', async () => {
+  const h = setupHarness({ '/api/backups/setup/proof/start': () => response({ error: 'server down' }, { raw: true, status: 502 }) });
+  const p = h.page('backupsPage');
+  await p.init();
+  await p.proveWith('hello');
+  assert.match(p.setupError, /does not look like/);
+  await p.proveWith(keyFile);
+  assert.match(p.setupError, /server down/);
+  p.destroy();
 });
 
 test('proving recovery decrypts the real prefix and records a pass', async () => {
@@ -248,9 +374,9 @@ test('alerts use the settings channel API with a test send, and can be skipped',
   p.destroy();
 });
 
-test('turning on names the ticked servers, the start choice and the tick', async () => {
+test('turning on names the ticked servers and the start choice, and unticking skips', async () => {
   const h = setupHarness({
-    '/api/backups/setup/coverage': () => response({ servers: [{ server: 'a', items: [{ name: 'blog/volumes', kind: 'volumes', app: 'blog', size_bytes: 2048 }], unmanaged: [{ name: 'pg' }] }], multiplier: 39, interval: '24h', preset: 'standard' }),
+    '/api/backups/setup/coverage': () => response({ servers: [{ server: 'a', items: [{ name: 'blog/volumes', kind: 'volumes', app: 'blog', size_bytes: 2048 }], unmanaged: [{ name: 'pg' }, { name: 'scratch' }], not_coverable: [] }], multiplier: 39, interval: '24h', preset: 'standard', volumes: false }),
     '/api/backups/setup/turn-on': () => response({ all_ok: true, servers: [{ server: 'a', ok: true, run: { status: 'started' } }] }),
   });
   const p = h.page('backupsPage');
@@ -258,14 +384,15 @@ test('turning on names the ticked servers, the start choice and the tick', async
   p.setupTicked = { a: true };
   await p.loadCoverage();
   assert.equal(p.setupCoverage.multiplier, 39);
-  assert.equal(p.hasUnmanaged(), true);
+  assert.equal(p.setupPolicy.skip_volumes, true, 'starts from what is saved');
+  assert.equal(p.isSkipped('a', 'pg'), false, 'ticked by default');
   assert.match(p.coverageLine(p.setupCoverage.servers[0].items[0]), /blog files, 2\.0 KB/);
-  p.setupAdopt = true;
+  p.setSkipped('a', 'scratch', true);
   await p.turnOn('now');
   const sent = h.requests.filter(r => r.url === '/api/backups/setup/turn-on').at(-1).body;
   assert.deepEqual(sent.servers, ['a']);
   assert.equal(sent.start, 'now');
-  assert.equal(sent.adopt, true);
+  assert.deepEqual(sent.skip, { a: ['scratch'] });
   assert.equal(sent.interval, '24h');
   assert.match(p.turnOnLine(p.turnOnResult.servers[0]), /backing up now/);
   p.destroy();
@@ -305,6 +432,8 @@ test('states read in plain words', () => {
   assert.equal(p.setupStateClass('protected'), 'green');
   assert.equal(p.setupStateClass('failing'), 'red');
   assert.equal(p.setupStateLabel('capped'), 'daily cap reached');
+  assert.equal(p.setupStateLabel('restore_test_overdue'), 'restore test overdue');
+  assert.equal(p.setupStateClass('not_covered'), 'red');
   assert.equal(p.canBackUpNow({ state: 'late' }), true);
   assert.equal(p.canBackUpNow({ state: 'protected' }), false);
 });

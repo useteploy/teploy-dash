@@ -77,7 +77,8 @@ objects. Give this command the read-only key in `TEPLOY_S3_ACCESS_KEY` and
 Dash's own state is in a backup when Dash runs from the deployment template and a
 recovery key is set. It appears on the Backups page as `dash/volumes`. Your recovery key
 opens that backup on its own, with no need for the lost machine's identity. Dash's
-volumes hold its SSH key, so Dash leaves them out of any backup with no recovery key.
+volumes hold its SSH key, so with no recovery key Dash leaves them out on the server it
+can prove hosts it, and warns on any server where it cannot tell.
 
 | Path | What it is | Template volume |
 |---|---|---|

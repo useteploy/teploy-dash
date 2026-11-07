@@ -3688,6 +3688,7 @@ document.addEventListener('alpine:init', () => {
       setupCheck: null,
       setupBucket: '',
       setupAccept: false,
+      setupReplaceOK: false,
       setupAdv: { hide_days: '', empty_base: false, s3_managed: false, rotate: false },
       setupStorage: null,
       ownerForce: {},
@@ -3698,10 +3699,11 @@ document.addEventListener('alpine:init', () => {
       alertChannelId: '',
       alertTest: null,
       setupCoverage: null,
-      setupAdopt: false,
+      setupSkipped: {},
       setupPolicy: { interval: '', preset: '', skip_volumes: false },
       turnOnResult: null,
       proofState: null,
+      proofUnrecorded: null,
       retireFor: null,
       retireData: '',
       retireConfirm: '',
@@ -3715,17 +3717,32 @@ document.addEventListener('alpine:init', () => {
           unreachable: 'cannot reach storage', empty: 'nothing to back up yet',
           waiting_first_backup: 'waiting for the first backup', late: 'backups are late', failing: 'backups are failing',
           waiting_restore_test: 'waiting for a restore test', guard_skipped: 'restore test put off',
-          restore_test_failed: 'restore test failed', protected: 'protected',
+          restore_test_failed: 'restore test failed', restore_test_overdue: 'restore test overdue',
+          not_covered: 'not fully backed up', protected_except: 'protected, with exceptions', all_skipped: 'nothing backed up',
+          protected: 'protected',
         })[state] || state;
       },
       setupStateClass(state) {
-        if (state === 'protected') return 'green';
-        if (state === 'failing' || state === 'restore_test_failed' || state === 'unreachable' || state === 'not_protected') return 'red';
+        if (state === 'protected' || state === 'protected_except') return 'green';
+        if (state === 'failing' || state === 'restore_test_failed' || state === 'unreachable' || state === 'not_protected' || state === 'not_covered') return 'red';
         if (state === 'empty' || state === 'unknown') return 'gray';
         return 'yellow';
       },
       canBackUpNow(sv) {
         return ['waiting_first_backup', 'late', 'failing'].includes(sv.state);
+      },
+
+      // How this viewer confirms a sensitive step: password, none, or local_account when a
+      // single sign-on session has no password here.
+      reauthMode() {
+        return (this.view && this.view.setup && this.view.setup.reauth) || 'none';
+      },
+
+      async dismissLeftover(keyId) {
+        try {
+          await api.post('/api/backups/setup/leftovers/dismiss', { key_id: keyId });
+          await this.load();
+        } catch (e) { showToast(e.message, 'error'); }
       },
 
       clearSetupSecrets() {
@@ -3741,7 +3758,9 @@ document.addEventListener('alpine:init', () => {
         this.setupScope = server || null;
         this.retireFor = null;
         const setup = this.view && this.view.setup;
-        if (!server && setup && setup.turned_on && !this.recovery.drill_passed_at) {
+        // Continue goes to the proof only when no server is still waiting to be set up.
+        const unfinished = ((setup && setup.servers) || []).some(sv => sv.state === 'not_protected');
+        if (!server && setup && setup.turned_on && !unfinished && !this.recovery.drill_passed_at) {
           this.setupStep = 'prove';
           return;
         }
@@ -3754,6 +3773,11 @@ document.addEventListener('alpine:init', () => {
         this.setupStep = step;
       },
       closeSetup() {
+        // A key made and not saved opens nothing: its file must not be kept by mistake.
+        if (this.recoveryGen && typeof confirm === 'function' &&
+            !confirm('This recovery key was not saved to Dash, so no backup will use it. If you downloaded the file, it is no use: delete it. Close anyway?')) {
+          return;
+        }
         this.setupOpen = false;
         this.setupError = '';
         this.setupCheck = null;
@@ -3843,9 +3867,16 @@ document.addEventListener('alpine:init', () => {
         }
         this.setupBusy = false;
       },
+      // With nothing chosen, the flow uses the bucket it suggested.
       chosenBucket() {
-        if (!this.setupCheck || !this.setupBucket) return null;
-        return (this.setupCheck.buckets || []).find(b => b.name === this.setupBucket) || null;
+        if (!this.setupCheck) return null;
+        const name = this.setupBucket || this.setupCheck.suggested_bucket;
+        if (!name) return null;
+        return (this.setupCheck.buckets || []).find(b => b.name === name) || null;
+      },
+      // A ticked server that has a target, or might: Dash cannot put its old key back.
+      replaceConsentNeeded() {
+        return this.setupServers.filter(sv => this.setupTicked[sv.server] && sv.target_state !== 'absent' && !sv.own_key).map(sv => sv.server);
       },
       canApplyStorage() {
         if (!this.setupCheck || (this.setupCheck.missing || []).length) return false;
@@ -3853,6 +3884,7 @@ document.addEventListener('alpine:init', () => {
         const b = this.chosenBucket();
         if (b && (b.refusals || []).length) return false;
         if (b && (b.warnings || []).length && !this.setupAccept) return false;
+        if (this.replaceConsentNeeded().length && !this.setupReplaceOK) return false;
         return true;
       },
       async applyStorage() {
@@ -3862,7 +3894,7 @@ document.addEventListener('alpine:init', () => {
         try {
           this.setupStorage = await api.post('/api/backups/setup/storage/apply', {
             password: this.setupPassword, key_id: this.setupKey.id.trim(), application_key: this.setupKey.secret.trim(),
-            bucket: this.setupBucket, servers: this.selectedServers(), accept_warnings: this.setupAccept,
+            bucket: this.setupBucket, servers: this.selectedServers(), accept_warnings: this.setupAccept, replace_configured: this.setupReplaceOK,
             s3_managed: this.setupAdv.s3_managed, rotate: this.setupAdv.rotate, ...this.storageExtras(),
           });
           this.setupPassword = '';
@@ -3874,13 +3906,15 @@ document.addEventListener('alpine:init', () => {
       storageResultLine(r) {
         if (r.verified) return r.skipped ? 'is ready, as before.' : 'is ready.';
         if (r.skipped) return `was not set up: ${r.skipped}.`;
-        if (r.key_kept) return `may have its key but did not answer on it. Dash kept the key. ${r.error || ''}`;
+        if (r.key_kept && r.pushed) return `has the new key but did not answer on it. Dash kept every key. Try again. ${r.error || ''}`;
+        if (r.key_kept) return `may or may not have the new key, because the push failed. Dash kept every key, so nothing it was using is lost. Try again. ${r.error || ''}`;
         return `did not get a key. ${r.error || ''}`;
       },
       async clearOwner(server, fingerprint) {
         this.setupError = '';
         try {
-          await api.post('/api/backups/setup/owners', { server, fingerprint, force: !!this.ownerForce[fingerprint] });
+          await api.post('/api/backups/setup/owners', { server, fingerprint, force: !!this.ownerForce[fingerprint], password: this.setupPassword });
+          this.setupPassword = '';
           showToast('Cleared the older machine\'s mark', 'success');
           for (const r of (this.setupStorage && this.setupStorage.servers) || []) {
             if (r.server === server) r.old_owners = (r.old_owners || []).filter(o => o.fingerprint !== fingerprint);
@@ -3953,17 +3987,8 @@ document.addEventListener('alpine:init', () => {
         document.body.appendChild(link);
         link.click();
         link.remove();
-        URL.revokeObjectURL(url);
-      },
-      // navigator.clipboard does not exist on plain HTTP, so the download is the main path.
-      canCopy() {
-        return typeof navigator !== 'undefined' && !!navigator.clipboard;
-      },
-      async copyRecovery() {
-        try {
-          await navigator.clipboard.writeText(this.recoveryGen.fileText);
-          showToast('Copied. Save it somewhere safe.', 'success');
-        } catch (e) { showToast('Could not copy. Use the download.', 'error'); }
+        // Revoking straight away can cancel the download in some browsers.
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
       },
       async recoveryFilePicked(event) {
         const file = event.target.files && event.target.files[0];
@@ -4047,10 +4072,23 @@ document.addEventListener('alpine:init', () => {
           this.setupCoverage = await api.post('/api/backups/setup/coverage', { servers });
           this.setupPolicy.interval = this.setupPolicy.interval || this.setupCoverage.interval;
           this.setupPolicy.preset = this.setupPolicy.preset || this.setupCoverage.preset;
+          // Start from what is saved, so setting up one server changes nothing else.
+          this.setupPolicy.skip_volumes = this.setupCoverage.volumes === false;
         } catch (e) { this.setupError = e.message; }
       },
-      hasUnmanaged() {
-        return ((this.setupCoverage && this.setupCoverage.servers) || []).some(sv => (sv.unmanaged || []).length > 0);
+      isSkipped(server, name) {
+        return !!(this.setupSkipped[server] && this.setupSkipped[server][name]);
+      },
+      setSkipped(server, name, skipped) {
+        this.setupSkipped = { ...this.setupSkipped, [server]: { ...(this.setupSkipped[server] || {}), [name]: skipped } };
+      },
+      skipList() {
+        const out = {};
+        for (const [server, names] of Object.entries(this.setupSkipped)) {
+          const list = Object.keys(names).filter(n => names[n]);
+          if (list.length) out[server] = list;
+        }
+        return out;
       },
       coverageLine(item) {
         const what = item.kind === 'volumes' ? `${item.app || item.name} files` : `${item.name}${item.engine ? ' (' + item.engine + ')' : ''}`;
@@ -4061,9 +4099,10 @@ document.addEventListener('alpine:init', () => {
         this.setupError = '';
         try {
           this.turnOnResult = await api.post('/api/backups/setup/turn-on', {
-            servers: this.selectedServers(), start, adopt: this.setupAdopt, interval: this.setupPolicy.interval,
+            password: this.setupPassword, servers: this.selectedServers(), start, skip: this.skipList(), interval: this.setupPolicy.interval,
             preset: this.setupPolicy.preset, skip_volumes: this.setupPolicy.skip_volumes,
           });
+          this.setupPassword = '';
           await this.load();
         } catch (e) { this.setupError = e.message; }
         this.setupBusy = false;
@@ -4097,27 +4136,52 @@ document.addEventListener('alpine:init', () => {
         this.setupBusy = true;
         this.setupError = '';
         this.proofState = null;
+        this.proofUnrecorded = null;
         let key = '';
+        let start;
+        let identity;
+        // Each stage fails differently: a bad file, a backup Dash could not read, a key
+        // that does not open it, and a result Dash could not record are not the same news.
         try {
           const age = await this.ageLib();
-          const { identity } = age.parseIdentityFile(text);
-          const start = await api.post('/api/backups/setup/proof/start', {});
+          ({ identity } = age.parseIdentityFile(text));
+          start = await api.post('/api/backups/setup/proof/start', {});
           key = start.key;
+        } catch (e) {
+          this.setupError = e.message;
+          this.setupBusy = false;
+          return;
+        }
+        try {
           const raw = atob(start.data_base64);
           const bytes = new Uint8Array(raw.length);
           for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-          await age.decryptStart(identity, bytes);
+          await (await this.ageLib()).decryptStart(identity, bytes);
+        } catch (e) {
+          await api.post('/api/backups/setup/proof/result', { key, passed: false, detail: e.message }).catch(() => {});
+          this.setupError = 'This key did not open your backup. Check you picked the right file. If you have lost the file, you cannot read these backups.';
+          this.setupBusy = false;
+          return;
+        }
+        await this.recordProof(key);
+        this.setupBusy = false;
+      },
+      async recordProof(key) {
+        try {
           await api.post('/api/backups/setup/proof/result', { key, passed: true });
+          this.proofUnrecorded = null;
           this.proofState = { passed: true, key };
           await this.load();
         } catch (e) {
-          if (key) {
-            await api.post('/api/backups/setup/proof/result', { key, passed: false, detail: e.message }).catch(() => {});
-            this.setupError = 'This key did not open your backup. Check you picked the right file. If you have lost the file, you cannot read these backups.';
-          } else {
-            this.setupError = e.message;
-          }
+          this.proofUnrecorded = { key };
+          this.setupError = e.message;
         }
+      },
+      async retryProofRecord() {
+        if (!this.proofUnrecorded) return;
+        this.setupBusy = true;
+        this.setupError = '';
+        await this.recordProof(this.proofUnrecorded.key);
         this.setupBusy = false;
       },
 

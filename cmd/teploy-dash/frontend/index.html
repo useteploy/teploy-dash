@@ -1849,7 +1849,7 @@
                   <span class="text-muted" x-show="sv.uncovered && sv.uncovered.length" x-text="'Not backed up: ' + (sv.uncovered || []).join(', ') + '.'"></span>
                   <span class="text-muted" x-show="sv.run && sv.run.error" x-text="sv.run ? sv.run.error : ''"></span>
                   <span class="text-muted" x-show="sv.lifecycle === 'unknown'">Dash cannot recheck the bucket's cleanup rules with this server's key.</span>
-                  <span class="setup-warn" x-show="sv.lifecycle === 'absent'">The bucket has no cleanup rule for this server, so what retention removes stays billed.</span>
+                  <span class="text-muted" x-show="sv.lifecycle === 'absent'">Reading this bucket through S3 shows no cleanup rule for this server. Check it under Lifecycle Settings in the Backblaze console, because Dash set one up and this read may not show it.</span>
                   <button class="btn btn-sm" x-show="sv.state === 'not_protected'" @click="openSetup(sv.server)">Back up this server</button>
                   <button class="btn btn-sm" x-show="sv.state !== 'not_protected' && sv.key_name" @click="beginRetire(sv.server)">Retire…</button>
                   <button class="btn btn-sm" x-show="canBackUpNow(sv)" @click="backUpNow(sv.server)">Back up now</button>
@@ -1873,7 +1873,10 @@
             </p>
           </template>
           <template x-for="left in view.setup.leftovers || []" :key="left.key_id">
-            <p class="setup-note">Dash could not delete the key <span class="mono" x-text="left.key_name"></span> (<span x-text="left.reason"></span>). Delete it in the Backblaze console.</p>
+            <p class="setup-note">
+              <span>Dash could not delete the key <span class="mono" x-text="left.key_name"></span> (<span x-text="left.reason"></span>). Delete it in the Backblaze console.</span>
+              <button class="btn btn-sm" @click="dismissLeftover(left.key_id)">Done</button>
+            </p>
           </template>
           <p class="text-muted" x-show="view.setup.stored_bytes" x-text="'One backup of everything is ' + bytesLabel(view.setup.stored_bytes) + '. Expect the bucket to hold about ' + bytesLabel(view.setup.projected_bytes) + ' once it settles.'"></p>
           <p class="text-muted"><a :href="view.setup.recovery_doc" target="_blank" rel="noopener">How to get your data back</a></p>
@@ -1890,7 +1893,8 @@
               <label class="checkbox-label"><input type="radio" value="keep" x-model="retireData"> Keep its backups in the bucket</label>
               <label class="checkbox-label"><input type="radio" value="remove" x-model="retireData"> Remove its backups for good (the key also needs listFiles and deleteFiles)</label>
               <label x-show="retireData === 'remove'">Type the server's name to confirm<input x-model="retireConfirm" autocomplete="off"></label>
-              <label>Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+              <label x-show="reauthMode() === 'password'">Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                  <p class="setup-warn" x-show="reauthMode() === 'local_account'">This step needs a password, and single sign-on accounts do not have one here. Sign out, then sign in with a local admin account to finish it. An admin can create one under Settings, Users.</p>
               <p class="setup-error" role="alert" x-show="setupError" x-text="setupError"></p>
               <div class="header-actions">
                 <button class="btn btn-danger" type="submit" :disabled="setupBusy" x-text="setupBusy ? 'Working…' : 'Retire'"></button>
@@ -1944,10 +1948,17 @@
                   <h3>Storage with Backblaze</h3>
                   <p class="setup-warn" x-show="insecurePage()">This page is not encrypted on its way to you. Connect over HTTPS, localhost or your tailnet before pasting a key.</p>
                   <p>Paste a temporary Backblaze key. Dash uses it once and never saves it, then makes each server its own limited key.</p>
-                  <details class="setup-help">
-                    <summary>How to make the key</summary>
-                    <p>It needs listBuckets, writeBuckets and writeKeys, plus deleteKeys so Dash can clean up afterwards. Give it a short expiry. With the Backblaze command line:</p>
-                    <p class="mono setup-code">b2 key create --duration 3600 teploy-setup listBuckets,writeBuckets,writeKeys,deleteKeys,listFiles</p>
+                  <!-- Draft wording: finalize after the real-account spike shows what the
+                       console offers. Backblaze's docs do not say a console key gets writeKeys. -->
+                  <details class="setup-help" open>
+                    <summary>How to get a key</summary>
+                    <ol>
+                      <li>Sign in at backblaze.com. This works from a phone too.</li>
+                      <li>Open <strong>Application Keys</strong>, then <strong>Add a New Application Key</strong>.</li>
+                      <li>Give it any name, allow access to all buckets, and set an expiry if the page offers one.</li>
+                      <li>Copy the key ID and the application key into the boxes below. Backblaze shows the second one only once.</li>
+                    </ol>
+                    <p>Dash then tells you if this key can do what setup needs.</p>
                   </details>
                   <div class="form-row">
                     <label>Key ID<input x-model="setupKey.id" autocomplete="off" @input="setupCheck = null"></label>
@@ -1956,14 +1967,21 @@
                   <template x-if="setupCheck">
                     <div>
                       <template x-if="(setupCheck.missing || []).length">
-                        <p class="setup-error" x-text="'This key is missing: ' + setupCheck.missing.join(', ') + '.'"></p>
+                        <div>
+                          <p class="setup-error" x-text="'This key cannot set up storage. It is missing: ' + setupCheck.missing.join(', ') + '.'"></p>
+                          <p>There are two ways forward:</p>
+                          <ul>
+                            <li><strong>Use your account's Master Application Key</strong>, shown on the same Backblaze page. It works once for setup, and Dash forgets it straight after. Dash cannot delete it for you. You can regenerate it in Backblaze afterwards if you like, but that would break anything else using it.</li>
+                            <li><strong>Set up by hand</strong> under Advanced, further down this page.</li>
+                          </ul>
+                        </div>
                       </template>
                       <template x-for="w in setupCheck.warnings || []" :key="w"><p class="setup-warn" x-text="w"></p></template>
                       <p class="setup-warn" x-show="setupCheck.listing_error" x-text="setupCheck.listing_error"></p>
                       <template x-if="!(setupCheck.missing || []).length">
                         <div>
                           <label>Bucket
-                            <select x-model="setupBucket" @change="checkKey()">
+                            <select x-model="setupBucket" @change="setupAccept = false; checkKey()">
                               <option value="" :disabled="!setupCheck.can_create_bucket && !setupCheck.suggested_bucket" x-text="setupCheck.suggested_bucket ? 'Use ' + setupCheck.suggested_bucket : 'Create a new private bucket'"></option>
                               <template x-for="b in setupCheck.buckets || []" :key="b.name"><option :value="b.name" x-text="b.name" :selected="b.name === setupBucket"></option></template>
                             </select>
@@ -1981,11 +1999,18 @@
                       <details class="setup-help">
                         <summary>Advanced</summary>
                         <label>Keep hidden copies for (days)<input type="number" min="1" max="365" x-model="setupAdv.hide_days" placeholder="14"></label>
-                        <label class="checkbox-label"><input type="checkbox" x-model="setupAdv.empty_base"> Use the bucket root instead of a teploy folder</label>
+                        <label class="checkbox-label"><input type="checkbox" x-model="setupAdv.empty_base" @change="setupCheck && checkKey()"> Use the bucket root instead of a teploy folder (needs an empty bucket, and a key with listFiles)</label>
                         <label class="checkbox-label"><input type="checkbox" x-model="setupAdv.s3_managed"> I manage this bucket's rules through the S3 API. Dash shows the rules to add instead.</label>
                         <label class="checkbox-label"><input type="checkbox" x-model="setupAdv.rotate"> Replace the keys of servers already set up</label>
                       </details>
-                      <label>Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                      <label x-show="reauthMode() === 'password'">Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                  <p class="setup-warn" x-show="reauthMode() === 'local_account'">This step needs a password, and single sign-on accounts do not have one here. Sign out, then sign in with a local admin account to finish it. An admin can create one under Settings, Users.</p>
+                    </div>
+                  </template>
+                  <template x-if="setupCheck && replaceConsentNeeded().length">
+                    <div class="setup-server">
+                      <p class="setup-warn" x-text="replaceConsentNeeded().join(', ') + ' already has a backup key. This replaces it, and Dash cannot put the old one back, because it never had a copy.'"></p>
+                      <label class="checkbox-label"><input type="checkbox" x-model="setupReplaceOK"> Replace it anyway</label>
                     </div>
                   </template>
                   <div class="header-actions">
@@ -2008,6 +2033,7 @@
                             <div class="setup-server">
                               <p>An older machine with this name left its mark here. Until it is cleared, old backups of this server will not be removed.</p>
                               <label class="checkbox-label"><input type="checkbox" x-model="ownerForce[o.fingerprint]"> That machine is gone and will not write here again</label>
+                              <label x-show="reauthMode() === 'password'">Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
                               <button class="btn btn-sm" type="button" :disabled="!ownerForce[o.fingerprint]" @click="clearOwner(r.server, o.fingerprint)">Clear it</button>
                             </div>
                           </template>
@@ -2038,13 +2064,13 @@
                         <div>
                           <div class="header-actions">
                             <button class="btn btn-primary" @click="downloadRecovery()">Download the key file</button>
-                            <button class="btn btn-sm" x-show="canCopy()" @click="copyRecovery()">Copy</button>
                           </div>
-                          <p>Keep it somewhere away from your servers: a password manager, or a USB stick in a drawer.</p>
+                          <p>Keep the file somewhere away from your servers, where you can pick it again later: a USB stick in a drawer, or a private folder on your own computer.</p>
                           <label>Now pick the file you saved, so your browser can check it<input type="file" accept=".txt,text/plain" @change="recoveryFilePicked($event)"></label>
                           <p class="setup-error" x-show="recoveryError" x-text="recoveryError"></p>
                           <p x-show="recoveryProven"><span class="dot green"></span> The file matches.</p>
-                          <label x-show="recoveryProven">Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                          <label x-show="recoveryProven && reauthMode() === 'password'">Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                          <p class="setup-warn" x-show="recoveryProven && reauthMode() === 'local_account'">This step needs a password, and single sign-on accounts do not have one here. Sign out, then sign in with a local admin account to finish it. An admin can create one under Settings, Users.</p>
                           <button class="btn btn-primary" x-show="recoveryProven" :disabled="setupBusy" @click="saveRecovery()">Next</button>
                         </div>
                       </template>
@@ -2107,11 +2133,18 @@
                           <p class="text-muted" x-show="!sv.error && sv.items.length === 0 && sv.unmanaged.length === 0">Nothing to back up yet. Dash will pick things up when you deploy them.</p>
                           <ul x-show="sv.items.length"><template x-for="item in sv.items" :key="item.name"><li x-text="coverageLine(item)"></li></template></ul>
                           <template x-if="sv.unmanaged.length">
-                            <p x-text="'Not managed by teploy: ' + sv.unmanaged.map(u => u.name).join(', ') + '.'"></p>
+                            <div>
+                              <p>Databases teploy does not manage. These are backed up too. Untick any you do not want:</p>
+                              <template x-for="u in sv.unmanaged" :key="u.name">
+                                <label class="checkbox-label"><input type="checkbox" :checked="!isSkipped(sv.server, u.name)" @change="setSkipped(sv.server, u.name, !$event.target.checked)"> <span x-text="u.name + (u.engine ? ' (' + u.engine + ')' : '')"></span></label>
+                              </template>
+                            </div>
+                          </template>
+                          <template x-if="(sv.not_coverable || []).length">
+                            <p class="setup-warn" x-text="'Teploy cannot back up ' + sv.not_coverable.map(u => u.name).join(', ') + '. Your data is not fully protected until you back these up another way, and exclude them under Advanced.'"></p>
                           </template>
                         </div>
                       </template>
-                      <label class="checkbox-label" x-show="hasUnmanaged()"><input type="checkbox" x-model="setupAdopt"> Also back up the databases not managed by teploy</label>
                       <p x-text="'Your bucket will hold about ' + setupCoverage.multiplier + ' times the size of one backup. Dash shows the real size after the first run.'"></p>
                       <details class="setup-help">
                         <summary>Advanced</summary>
@@ -2125,6 +2158,8 @@
                         </div>
                         <label class="checkbox-label"><input type="checkbox" x-model="setupPolicy.skip_volumes"> Leave out app volumes</label>
                       </details>
+                      <label x-show="reauthMode() === 'password'">Your Dash password<input type="password" x-model="setupPassword" autocomplete="current-password"></label>
+                      <p class="setup-warn" x-show="reauthMode() === 'local_account'">This step needs a password, and single sign-on accounts do not have one here. Sign out, then sign in with a local admin account to finish it. An admin can create one under Settings, Users.</p>
                       <div class="header-actions">
                         <button class="btn btn-primary" :disabled="setupBusy" @click="turnOn('now')">Back up now</button>
                         <button class="btn" :disabled="setupBusy" @click="turnOn('next')">Start with the next scheduled run</button>
@@ -2132,9 +2167,13 @@
                       <template x-if="turnOnResult">
                         <div class="setup-result">
                           <template x-for="r in turnOnResult.servers" :key="r.server">
-                            <p><span class="dot" :class="r.ok ? 'green' : 'red'"></span> <span class="mono" x-text="r.server"></span> <span x-text="turnOnLine(r)"></span></p>
+                            <div>
+                              <p><span class="dot" :class="r.ok ? 'green' : 'red'"></span> <span class="mono" x-text="r.server"></span> <span x-text="turnOnLine(r)"></span></p>
+                              <p class="text-muted" x-show="r.note" x-text="r.note"></p>
+                            </div>
                           </template>
-                          <button class="btn btn-primary" @click="setupStep = 'prove'; setupError = ''">Next</button>
+                          <p class="setup-error" x-show="!turnOnResult.any_ok">No server was turned on. Fix what is listed, then try again.</p>
+                          <button class="btn btn-primary" x-show="turnOnResult.any_ok" @click="setupStep = 'prove'; setupError = ''">Next</button>
                         </div>
                       </template>
                     </div>
@@ -2156,6 +2195,12 @@
                       <label>Your key file<input type="file" accept=".txt,text/plain" :disabled="setupBusy" @change="proofFilePicked($event)"></label>
                       <p x-show="setupBusy">Opening a backup…</p>
                       <p x-show="proofState && proofState.passed"><span class="dot green"></span> <span x-text="proofState ? 'It worked. Your key opened ' + proofState.key : ''"></span></p>
+                      <template x-if="proofUnrecorded">
+                        <div>
+                          <p>Your key opened the backup, but Dash could not record that. Nothing is wrong with your key.</p>
+                          <button class="btn btn-primary" :disabled="setupBusy" @click="retryProofRecord()">Try recording it again</button>
+                        </div>
+                      </template>
                     </div>
                   </template>
                 </div>
@@ -2249,8 +2294,8 @@
                     <label>Secret access key<input type="password" x-model="storage.secret_key" autocomplete="new-password"></label>
                   </div>
                   <label class="checkbox-label" x-show="storage.provider === 'custom'"><input type="checkbox" x-model="storage.allow_internal"> This endpoint is on a private network (admin choice)</label>
-                  <label class="checkbox-label"><input type="checkbox" x-model="storage.delete_refusal_ok"> The store refuses deletes on purpose (a bucket lock)</label>
-                  <p class="text-muted">Dash probes write/read/delete first. On B2, a key without deleteFiles is the recommended setup, because it can only hide files: a compromised server cannot destroy history. Dash checks that the hide really works, and stops if it does not, because retention needs it.</p>
+                  <label class="checkbox-label"><input type="checkbox" x-model="storage.delete_refusal_ok"> Accept a store that refuses deletes. Retention will not be able to remove old backups.</label>
+                  <p class="text-muted">Dash probes write/read/delete first. On B2, a key without deleteFiles is the recommended setup, because it can only hide files: a compromised server cannot destroy history. Dash checks that the hide really works, and warns if it does not, because retention needs it.</p>
                   <p class="text-muted" x-show="storage.provider === 'b2'">Create a B2 application key limited to this bucket with listFiles, readFiles, writeFiles and readBucketLifecycleRules, and without deleteFiles. If you limit it to a file name prefix, use the same value as the prefix here, because every server stores under it.</p>
                   <button class="btn" type="submit" :disabled="storageBusy" x-text="storageBusy ? 'Working…' : (rotateMode ? 'Push new keys to every server' : 'Probe and connect every server')"></button>
                   <button class="btn btn-sm" type="button" x-show="rotateMode" @click="rotateMode = false">Cancel</button>
