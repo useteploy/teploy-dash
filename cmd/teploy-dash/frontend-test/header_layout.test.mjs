@@ -21,6 +21,13 @@ assert(menu.includes('class="nav-pins"') && menu.includes('x-data="navLinks"'), 
 assert(/\.nav-pins \{ display: none; \}/.test(css), 'menu pins are hidden by default (desktop shows header icons)');
 assert(/@media \(max-width: 640px\)[\s\S]*\.nav-pins \{ display: block;/.test(css), 'menu pins show on phones');
 
+// The nav collapses before it can overflow: thirteen destinations do not fit
+// beside the brand below about 1200px (measured), so the toggle must take over
+// at a width above that, not at the 980px content breakpoint.
+const collapse = css.match(/@media \(max-width: (\d+)px\) \{\s*\.navbar \{[\s\S]*?\.nav-toggle \{ display: flex; \}/);
+assert(collapse && Number(collapse[1]) >= 1200, 'the nav collapses to the toggle at 1200px or wider');
+assert((menu.match(/<li><a /g) || []).length === 13, 'thirteen destinations: re-measure the collapse width when this changes');
+
 // The theme store keeps toggle() and gains set().
 const listeners = [];
 globalThis.document = {
