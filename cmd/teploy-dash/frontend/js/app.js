@@ -4465,6 +4465,7 @@ document.addEventListener('alpine:init', () => {
   // run is a durable operation; the page shows the cached report with its
   // age while one runs.
   Alpine.data('cleanupPage', () => withAsyncLoad({
+    loading: true,
     rows: [],
     detail: null,
     cliSupported: true,
@@ -4673,6 +4674,7 @@ document.addEventListener('alpine:init', () => {
 
   // ── Siblings Page (Programme B: discovery + Observe connect) ──
   Alpine.data('siblingsPage', () => withAsyncLoad({
+    loading: true,
     servers: [],
     candidates: [],
     allowInternal: false,

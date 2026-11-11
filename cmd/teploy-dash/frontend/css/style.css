@@ -20,6 +20,11 @@
   --green: #3fb950;
   --yellow: #d29922;
   --red: #f85149;
+  --success: var(--green);
+  --warning: var(--yellow);
+  --danger: var(--red);
+  --success-bg: rgba(63, 185, 80, 0.15);
+  --bg-inset: rgba(139, 148, 158, 0.15);
   --font: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   --mono: var(--font);
   --radius: 8px;
@@ -163,6 +168,7 @@ a.nav-link:hover { background: var(--bg-card); }
 .form-group, .field { margin-bottom: 14px; }
 .form-label, .field label { display: block; margin-bottom: 5px; color: var(--text-muted); font-size: 12px; font-weight: 500; }
 .form-input, .field input, .field select, .search-input, .log-controls input, .log-controls select { width: 100%; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; outline: none; background: var(--bg-input); color: var(--text); font-size: 13px; }
+.field input[type="checkbox"], .field input[type="radio"], .form-input[type="checkbox"] { width: auto; min-height: 0; padding: 0; }
 .form-input::placeholder, .field input::placeholder, .search-input::placeholder { color: var(--text-muted); opacity: .7; }
 .form-input:focus, .field input:focus, .field select:focus, .search-input:focus, .log-controls input:focus, .log-controls select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -277,6 +283,15 @@ tbody tr:hover { background: var(--bg-card-hover); }
   background: var(--bg-card); color: var(--yellow);
   font-size: 12px; word-break: break-word;
 }
+/* A neutral setting line (not a warning): same shape as the stale banner,
+   muted colours. */
+.info-banner {
+  display: flex; margin-bottom: 16px; padding: 8px 14px; gap: 12px;
+  align-items: center; justify-content: space-between; flex-wrap: wrap;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-card); color: var(--text-secondary); font-size: 12px;
+}
+.backups-page .card { margin-bottom: 12px; cursor: default; }
 .empty-icon { margin-bottom: 12px; opacity: .4; }
 .loading, .spinner { display: none; }
 .back-link { display: inline-flex; margin-bottom: 14px; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; text-decoration: none; }

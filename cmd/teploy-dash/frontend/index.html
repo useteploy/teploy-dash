@@ -189,7 +189,7 @@
               </div>
               <div class="form-group">
                 <label class="form-label">URL</label>
-                <input class="form-input" type="url" x-model="form.url" placeholder="http://100.108.123.49:49152">
+                <input class="form-input" type="url" x-model="form.url" placeholder="https://git.example.com">
               </div>
               <div class="form-group">
                 <label class="form-label">Description <span class="text-muted">(optional)</span></label>
@@ -290,8 +290,8 @@
                 <div>
                   <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
                     Apps that appear to belong together — they share a registrable domain
-                    (<span class="mono">akiroo.com</span>), or a name prefix when they publish no domain
-                    (<span class="mono">fylun-</span>). Accepting a suggestion uses the ordinary group
+                    (<span class="mono">example.com</span>), or a name prefix when they publish no domain
+                    (<span class="mono">shop-</span>). Accepting a suggestion uses the ordinary group
                     assignment (server-bound); nothing is grouped until you accept it.
                   </p>
                   <div class="table-wrap">
@@ -886,7 +886,7 @@
                             <div style="display: flex; align-items: center; gap: 8px;">
                               <strong x-text="act.label"></strong>
                               <span style="font-size: 11px; padding: 1px 6px; border-radius: 3px;"
-                                :style="act.supported ? 'background: var(--success-bg, #d8f0d8); color: var(--success, #2a7a2a);' : 'background: var(--bg-inset, #eee); color: var(--text-muted);'"
+                                :style="act.supported ? 'background: var(--success-bg); color: var(--success);' : 'background: var(--bg-inset); color: var(--text-muted);'"
                                 x-text="act.supported ? 'supported' : 'not available from dash'"></span>
                             </div>
                             <p style="margin: 6px 0 0; font-size: 13px;" x-text="act.blast_radius"></p>
@@ -1788,7 +1788,7 @@
        drill, one policy. Reads the cached fleet view; nothing probes a
        server on load. -->
   <template x-if="$store.router.page === 'backups'">
-    <div x-data="backupsPage">
+    <div x-data="backupsPage" class="backups-page">
       <div class="page-header">
         <div>
           <h1 class="page-title">Backups</h1>
@@ -2692,8 +2692,8 @@
             </div>
             <div class="header-actions" x-show="detail">
               <button class="btn btn-sm" @click="load()">Refresh</button>
-              <button class="btn btn-sm btn-primary" @click="runAudit(detail.server)" :disabled="auditBusy === detail.server || !!detail.live_audit || !cliSupported"
-                      x-text="auditBusy === detail.server ? 'Auditing…' : 'Re-run audit'"></button>
+              <button class="btn btn-sm btn-primary" @click="runAudit(detail.server)" :disabled="!detail || auditBusy === detail.server || !!detail.live_audit || !cliSupported"
+                      x-text="detail && auditBusy === detail.server ? 'Auditing…' : 'Re-run audit'"></button>
             </div>
           </div>
 
@@ -2803,7 +2803,7 @@
                         <td>
                           <span x-text="f.evidence"></span>
                           <div class="text-muted" style="margin-top: 4px;" x-show="f.related && f.related.length" x-text="'related: ' + (f.related || []).join(', ')"></div>
-                          <div class="text-muted" style="margin-top: 4px;" x-show="f.dismissed" x-text="'dismissed by ' + f.dismissed.actor"></div>
+                          <div class="text-muted" style="margin-top: 4px;" x-show="f.dismissed" x-text="f.dismissed ? 'dismissed by ' + f.dismissed.actor : ''"></div>
                         </td>
                         <td>
                           <template x-if="f.remedy && f.remedy.runnable">
@@ -2895,7 +2895,7 @@
            when an admin allows it. The A13 rule applies: an editor cannot
            flip this. -->
       <template x-if="!loading && cliSupported">
-        <div class="stale-banner" role="status" style="display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;">
+        <div class="info-banner" role="status">
           <span x-text="allowInternal
             ? 'Probing reaches internal addresses (tailnet/LAN) — matches where siblings usually run.'
             : 'Internal addresses (tailnet/LAN) are not probed — candidates there read “Blocked (internal)” until an admin allows it.'"></span>
@@ -2969,7 +2969,7 @@
               </form>
 
               <template x-if="telemetryPlanError">
-                <p role="alert" style="color: var(--danger, #c0392b); margin: 8px 0; font-size: 13px;" x-text="telemetryPlanError"></p>
+                <p role="alert" style="color: var(--danger); margin: 8px 0; font-size: 13px;" x-text="telemetryPlanError"></p>
               </template>
 
               <!-- The plan: exactly what apply will do. Approving this is
@@ -3031,12 +3031,12 @@
                 </div>
                 <div class="field" style="padding-bottom: 6px;">
                   <label style="display: flex; gap: 6px; align-items: center; font-weight: 400;">
-                    <input type="checkbox" x-model="connectForm.allow_internal"> allow internal
+                    <input type="checkbox" x-model="connectForm.allow_internal"> Allow an internal address
                   </label>
                 </div>
               </div>
               <template x-if="previewError">
-                <p role="alert" class="text-muted" style="color: var(--danger, #c0392b); margin: 8px 0;" x-text="previewError"></p>
+                <p role="alert" class="text-muted" style="color: var(--danger); margin: 8px 0;" x-text="previewError"></p>
               </template>
               <template x-if="previewDoc">
                 <div role="status" class="stale-banner" style="margin: 8px 0;">
@@ -3094,7 +3094,7 @@
                   </td>
                   <td>
                     <div x-text="probeHint(c)"></div>
-                    <div class="text-muted mono" style="font-size: 12px;" x-show="c.doc && c.doc.dashboard_url"><a :href="c.doc.dashboard_url" target="_blank" rel="noopener" x-text="c.doc.dashboard_url"></a></div>
+                    <div class="text-muted mono" style="font-size: 12px;" x-show="c.doc && c.doc.dashboard_url"><a :href="c.doc ? c.doc.dashboard_url : null" target="_blank" rel="noopener" x-text="c.doc ? c.doc.dashboard_url : ''"></a></div>
                     <div class="text-muted" x-show="c.base_url && (!c.doc || !c.doc.dashboard_url)"><a :href="c.base_url" target="_blank" rel="noopener" x-text="c.base_url"></a></div>
                   </td>
                 </tr>
@@ -3174,10 +3174,6 @@
               <p class="subtitle" x-text="monitors.length ? monitors.length + ' monitor' + (monitors.length !== 1 ? 's' : '') : 'No monitors configured'"></p>
             </div>
             <div class="header-actions">
-              <span class="cli-status" x-show="cliStatus">
-                <span class="dot" :class="cliStatus?.installed ? 'green' : 'gray'"></span>
-                CLI <span x-text="cliStatus?.version || 'not installed'"></span>
-              </span>
               <button class="btn btn-primary" @click="openCreate()">Add Monitor</button>
             </div>
           </div>
@@ -4037,7 +4033,7 @@
             ? 'Version pin: v' + selected.version + ' (verified against the catalog when you submit)'
             : 'This template is unversioned — the install uses the catalog\'s current revision.'"></p>
           <template x-if="selected.upgrade">
-            <div class="table-wrap" style="padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--warning, #d08770);">
+            <div class="table-wrap" style="padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--warning);">
               <p style="margin: 0; font-size: 13px;"><strong x-text="'Upgrade available: v' + selected.upgrade.from + ' -> v' + selected.upgrade.to"></strong></p>
               <p style="margin: 4px 0 0; font-size: 13px; color: var(--text-muted);" x-text="selected.upgrade.notes || 'See the template\'s upgrade notes.'"></p>
               <p x-show="selected.upgrade.backup_scope" style="margin: 4px 0 0; font-size: 13px; color: var(--text-muted);" x-text="'Backup before upgrading: ' + (selected.upgrade.backup_scope || '')"></p>
@@ -4082,9 +4078,9 @@
                 <span x-text="t.name"></span>
                 <!-- D05: version state is rendered, never guessed — an
                      unversioned catalog says "unversioned". -->
-                <span style="margin-left: 8px; font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--bg-inset, #eee); color: var(--text-muted);"
+                <span style="margin-left: 8px; font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--bg-inset); color: var(--text-muted);"
                   x-text="t.version_state === 'versioned' ? 'v' + t.version : 'unversioned'"></span>
-                <span x-show="t.upgrade" style="margin-left: 4px; font-size: 11px; color: var(--warning, #d08770);" x-text="t.upgrade ? 'upgrade to v' + t.upgrade.to : ''"></span>
+                <span x-show="t.upgrade" style="margin-left: 4px; font-size: 11px; color: var(--warning);" x-text="t.upgrade ? 'upgrade to v' + t.upgrade.to : ''"></span>
               </div>
               <div class="card-meta" x-text="t.description"></div>
               <div class="card-meta" x-show="t.installed" style="font-size: 12px;" x-text="t.installed ? ('installed on ' + t.installed.server + (t.installed.version ? ' (v' + t.installed.version + ')' : '')) : ''"></div>
