@@ -4,6 +4,14 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-11-11
+
+### Fixed
+
+- The header no longer makes the page scroll sideways between 981 and 1280px
+  wide. The menu tightens up to 1400px and collapses into the menu button below
+  1240px.
+
 ## [0.1.25] - 2026-11-07
 
 ### Added
