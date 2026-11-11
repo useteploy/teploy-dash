@@ -38,5 +38,5 @@ test('D09: real GET-shaped restore rows toggle both directions with only configu
   }
   assert.deepEqual(input, original, 'toggle must not mutate its GET input');
   const html = readFileSync(fileURLToPath(new URL('../frontend/index.html', import.meta.url)), 'utf8');
-  assert.ok(html.includes('toggleEnabled(t)'), 'restore cards invoke this method with their GET row');
+  assert.ok(html.includes('toggleEnabled(row.manual)'), 'restore cards invoke this method with their GET row');
 });

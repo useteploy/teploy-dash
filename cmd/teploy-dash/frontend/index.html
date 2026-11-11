@@ -38,11 +38,11 @@
     </div>
   </div>
   </div>
-  <!-- Primary nav (D07 IA regroup): destinations grouped by task —
-       resource work (Projects, Fleet, Activity), then service operations
-       (Monitors, Restore Tests, Templates), then Settings. Labels name the
-       task; URLs are unchanged (aliases /projects /fleet /activity also
-       deep-link here). -->
+  <!-- Primary nav (2026-11 rework): seven destinations. Pages that used to
+       have their own header slot are tabs of these (Monitoring: Uptime,
+       Domains, Alerts; Servers: Cleanup; Apps: Templates; Backups: Restore
+       tests; Settings: Integrations, Git sources); their old URLs still
+       open the right page and tab. -->
   <ul class="navbar-nav" id="primary-nav" :class="{ open: menuOpen }" @click="if ($event.target.closest('a')) menuOpen = false">
     <!-- Phones: the header has no room for pinned links, so they open from
          the menu as named tiles (hidden on wider screens, where the header
@@ -69,21 +69,14 @@
         </template>
       </div>
     </li>
-    <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" :aria-current="$store.router.page === 'homepage' ? 'page' : null" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
-    <li><a href="#" title="Groups, projects, and the apps deployed to them" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" :aria-current="['projects', 'project-detail', 'app-detail'].includes($store.router.page) ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Apps</a></li>
-    <li><a href="#" title="Every server this dash manages — health, host detail, routes" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" :aria-current="$store.router.page === 'servers' || $store.router.page === 'server-detail' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
-    <li><a href="#" title="Operations started through dash — deploys, rollbacks, removals, with live logs" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" :aria-current="$store.router.page === 'operations' || $store.router.page === 'operation-detail' ? 'page' : null" @click.prevent="$store.router.navigate('operations')">Activity</a></li>
+    <li><a href="/" :class="{ active: $store.router.section === 'home' }" :aria-current="$store.router.section === 'home' ? 'page' : null" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
+    <li><a href="/deployments" title="Groups, projects, the apps deployed to them, and app templates" :class="{ active: $store.router.section === 'apps' }" :aria-current="$store.router.section === 'apps' ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Apps</a></li>
+    <li><a href="/servers" title="Every server this dash manages — health, host detail, routes, cleanup" :class="{ active: $store.router.section === 'servers' }" :aria-current="$store.router.section === 'servers' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
+    <li><a href="/monitors" title="Uptime monitors, domain health and alerts" :class="{ active: $store.router.section === 'monitoring' }" :aria-current="$store.router.section === 'monitoring' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitoring</a></li>
+    <li><a href="/backups" title="Every database and volume across your servers — coverage, setup, restore tests" :class="{ active: $store.router.section === 'backups' }" :aria-current="$store.router.section === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
+    <li><a href="/operations" title="Operations started through dash — deploys, rollbacks, removals, with live logs" :class="{ active: $store.router.section === 'activity' }" :aria-current="$store.router.section === 'activity' ? 'page' : null" @click.prevent="$store.router.navigate('operations')">Activity</a></li>
     <li class="nav-sep" aria-hidden="true"></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
-    <li><a href="#" title="DNS, route, certificate and HTTP health for every domain" :class="{ active: $store.router.page === 'domains' }" :aria-current="$store.router.page === 'domains' ? 'page' : null" @click.prevent="$store.router.navigate('domains')">Domains</a></li>
-    <li><a href="#" title="What is left over on each server — stale routes, old versions, reclaimable space — with the fix where one exists" :class="{ active: $store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' }" :aria-current="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' ? 'page' : null" @click.prevent="$store.router.navigate('cleanup')">Cleanup</a></li>
-    <li><a href="#" title="Teploy products on your servers — discovered, probed, and connected where you allow it" :class="{ active: $store.router.page === 'siblings' }" :aria-current="$store.router.page === 'siblings' ? 'page' : null" @click.prevent="$store.router.navigate('siblings')">Integrations</a></li>
-    <li><a href="#" title="Every database and volume across your servers — coverage, encryption, restore tests" :class="{ active: $store.router.page === 'backups' }" :aria-current="$store.router.page === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'sources' }" @click.prevent="$store.router.navigate('sources')">Git sources</a></li>
-    <li class="nav-sep" aria-hidden="true"></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'settings' }" :aria-current="$store.router.page === 'settings' ? 'page' : null" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
+    <li><a href="/settings" title="Servers, groups, notifications, integrations, git sources, users and your account" :class="{ active: $store.router.section === 'settings' }" :aria-current="$store.router.section === 'settings' ? 'page' : null" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
   <div class="navbar-spacer"></div>
   <!-- Pinned service links. Same shortcut list as the Home grid; the ones
@@ -133,6 +126,18 @@
 
 <!-- Content -->
 <div class="content" id="main" tabindex="-1">
+
+  <!-- Hub tabs: Apps, Servers and Monitoring list pages share a tab strip;
+       each tab is its own page with its own URL. -->
+  <template x-if="$store.router.hubTabs">
+    <nav class="hub-tabs" aria-label="Section pages">
+      <template x-for="ht in $store.router.hubTabs" :key="ht[0]">
+        <a class="hub-tab" :href="$store.router.url(ht[0])" :class="{ active: $store.router.page === ht[0] }"
+           :aria-current="$store.router.page === ht[0] ? 'page' : null"
+           @click.prevent="$store.router.navigate(ht[0])" x-text="ht[1]"></a>
+      </template>
+    </nav>
+  </template>
 
   <!-- ═══ Homepage ═══ -->
   <template x-if="$store.router.page === 'homepage'">
@@ -263,7 +268,13 @@
           <button class="btn" @click="createGroup">+ Group</button>
           <!-- A first deploy must not require creating a group first: this
                deploys into Ungrouped, which can be organized later. -->
-          <button class="btn btn-primary" @click="openDeployForm('Ungrouped')">+ Deploy</button>
+          <div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false" @keydown.escape="open = false">
+            <button class="btn btn-primary" @click="open = !open" aria-haspopup="menu" :aria-expanded="open">+ Deploy <span class="ps-caret" aria-hidden="true">&#9662;</span></button>
+            <div class="menu" role="menu" x-show="open" x-transition.opacity x-cloak>
+              <button class="menu-item" role="menuitem" @click="open = false; openDeployForm('Ungrouped')">From an image<span class="menu-note">a registry image you build</span></button>
+              <button class="menu-item" role="menuitem" @click="open = false; $store.router.navigate('templates')">From a template<span class="menu-note">a packaged app, e.g. Forgejo</span></button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -467,7 +478,13 @@
               <div class="card-meta" x-text="groupName"></div>
             </div>
             <div style="display: flex; gap: 8px;">
-              <button class="btn btn-primary" @click="openDeployForm()">+ Deploy</button>
+              <div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false" @keydown.escape="open = false">
+            <button class="btn btn-primary" @click="open = !open" aria-haspopup="menu" :aria-expanded="open">+ Deploy <span class="ps-caret" aria-hidden="true">&#9662;</span></button>
+            <div class="menu" role="menu" x-show="open" x-transition.opacity x-cloak>
+              <button class="menu-item" role="menuitem" @click="open = false; openDeployForm()">From an image<span class="menu-note">a registry image you build</span></button>
+              <button class="menu-item" role="menuitem" @click="open = false; $store.router.navigate('templates')">From a template<span class="menu-note">a packaged app, e.g. Forgejo</span></button>
+            </div>
+          </div>
               <button class="btn" @click="renameThisProject()">Rename</button>
               <button class="btn btn-danger" @click="deleteThisProject()">Delete Project</button>
             </div>
@@ -1801,6 +1818,14 @@
         </div>
       </div>
 
+      <div class="tabs tabs-scroll" role="tablist" aria-label="Backup sections"
+           @keydown.arrow-right.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.nextElementSibling?.focus()"
+           @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
+        <button class="tab" :class="{ active: tab === 'coverage' }" role="tab" id="bk-tab-coverage" :aria-selected="(tab === 'coverage').toString()" :tabindex="tab === 'coverage' ? 0 : -1" @click="setTab('coverage')" @focus="setTab('coverage')">Coverage</button>
+        <button class="tab" :class="{ active: tab === 'setup' }" role="tab" id="bk-tab-setup" :aria-selected="(tab === 'setup').toString()" :tabindex="tab === 'setup' ? 0 : -1" @click="setTab('setup')" @focus="setTab('setup')">Setup</button>
+        <button class="tab" :class="{ active: tab === 'restore-tests' }" role="tab" id="bk-tab-restore-tests" :aria-selected="(tab === 'restore-tests').toString()" :tabindex="tab === 'restore-tests' ? 0 : -1" @click="setTab('restore-tests')" @focus="setTab('restore-tests')">Restore tests</button>
+      </div>
+
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
       </template>
@@ -1823,7 +1848,7 @@
 
       <!-- Protect my data: where things stand, then the flow. Never forced, and the
            manual controls stay under Advanced below. -->
-      <template x-if="!loading && setupSupported()">
+      <template x-if="!loading && setupSupported() && tab !== 'restore-tests'">
         <div class="card setup-card" :class="view.setup.state === 'protected' ? '' : 'setup-card-todo'">
           <div class="setup-head">
             <div>
@@ -1832,9 +1857,9 @@
               <p class="text-muted" x-show="view.setup.state === 'none'">Set up encrypted backups kept away from your servers. It takes a few minutes.</p>
             </div>
             <div class="header-actions">
-              <button class="btn btn-primary" x-show="!setupOpen && view.setup.state !== 'protected'" @click="openSetup()" x-text="view.setup.turned_on ? 'Continue' : 'Protect my data'"></button>
-              <button class="btn btn-sm" x-show="!setupOpen && view.setup.state === 'protected'" @click="openSetup()">Open setup</button>
-              <button class="btn btn-sm" x-show="setupOpen" @click="closeSetup()">Close</button>
+              <button class="btn btn-primary" x-show="!(setupOpen && tab === 'setup') && view.setup.state !== 'protected'" @click="setTab('setup'); openSetup()" x-text="view.setup.turned_on ? 'Continue' : 'Protect my data'"></button>
+              <button class="btn btn-sm" x-show="!(setupOpen && tab === 'setup') && view.setup.state === 'protected'" @click="setTab('setup'); openSetup()">Open setup</button>
+              <button class="btn btn-sm" x-show="setupOpen && tab === 'setup'" @click="closeSetup()">Close</button>
             </div>
           </div>
 
@@ -1850,7 +1875,7 @@
                   <span class="text-muted" x-show="sv.run && sv.run.error" x-text="sv.run ? sv.run.error : ''"></span>
                   <span class="text-muted" x-show="sv.lifecycle === 'unknown'">Dash cannot recheck the bucket's cleanup rules with this server's key.</span>
                   <span class="text-muted" x-show="sv.lifecycle === 'absent'">Reading this bucket through S3 shows no cleanup rule for this server. Check it under Lifecycle Settings in the Backblaze console, because Dash set one up and this read may not show it.</span>
-                  <button class="btn btn-sm" x-show="sv.state === 'not_protected' || sv.state === 'all_skipped'" @click="openSetup(sv.server)">Back up this server</button>
+                  <button class="btn btn-sm" x-show="sv.state === 'not_protected' || sv.state === 'all_skipped'" @click="setTab('setup'); openSetup(sv.server)">Back up this server</button>
                   <button class="btn btn-sm" x-show="sv.state !== 'not_protected' && sv.key_name" @click="beginRetire(sv.server)">Retire…</button>
                   <button class="btn btn-sm" x-show="canBackUpNow(sv)" @click="backUpNow(sv.server)">Back up now</button>
                 </li>
@@ -1860,11 +1885,11 @@
 
           <p class="setup-note" x-show="view.setup.configured && !view.setup.alerts_configured">
             Nothing will tell you if a backup fails until you add an alert.
-            <button class="btn btn-sm" @click="openSetupAt('alerts')">Add an alert</button>
+            <button class="btn btn-sm" @click="setTab('setup'); openSetupAt('alerts')">Add an alert</button>
           </p>
           <p class="setup-note" x-show="view.setup.turned_on && !view.setup.proof && !recovery.drill_passed_at">
             You have not yet proved your recovery key opens your backups.
-            <button class="btn btn-sm" @click="openSetupAt('prove')">Prove it</button>
+            <button class="btn btn-sm" @click="setTab('setup'); openSetupAt('prove')">Prove it</button>
           </p>
           <template x-for="name in view.setup.retired_keys || []" :key="name">
             <p class="setup-note">
@@ -1904,7 +1929,7 @@
           </template>
 
           <!-- The flow -->
-          <template x-if="setupOpen">
+          <template x-if="setupOpen && tab === 'setup'">
             <div class="setup-flow">
               <ol class="setup-steps">
                 <template x-for="(s, i) in setupStepNames" :key="s.id">
@@ -2212,7 +2237,7 @@
 
       <!-- First-run checklist: storage → alert channel → recovery drill →
            first verified backup. Shown until complete, on a CLI too old for the flow. -->
-      <template x-if="!loading && checklist.length > 0 && !setupSupported()">
+      <template x-if="!loading && checklist.length > 0 && !setupSupported() && tab !== 'restore-tests'">
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Get protected</h2><span class="card-meta">Four steps, once</span></div>
           <ul style="list-style:none;padding:0;margin:0">
@@ -2229,7 +2254,7 @@
 
       <!-- The decrypt drill banner: a key (or storage) without a passed
            drill keeps this up. Deliberately not an alert. -->
-      <template x-if="!loading && recovery.banner && !setupSupported()">
+      <template x-if="!loading && recovery.banner && !setupSupported() && tab !== 'restore-tests'">
         <div role="status" class="stale-banner">
           <strong>Recovery is unproven.</strong>
           <span x-text="recovery.public_key
@@ -2238,11 +2263,11 @@
         </div>
       </template>
 
-      <template x-if="!loading && view && view.cli_supported">
+      <template x-if="!loading && view && view.cli_supported && tab !== 'restore-tests'">
         <div>
           <!-- Storage + recovery + policy: every manual control, as it always was. -->
-          <details class="setup-advanced" :open="!setupSupported()">
-          <summary>Advanced</summary>
+          <details class="setup-advanced" :open="!setupSupported()" x-show="tab === 'setup'">
+          <summary>Advanced <span class="text-muted" style="font-weight: 400;">— storage, recovery key and the backup policy, set by hand</span></summary>
           <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));margin-bottom:1rem">
             <div class="card">
               <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
@@ -2414,13 +2439,15 @@
           </details>
 
           <!-- Fleet rows -->
+          <div x-show="tab === 'coverage'">
           <template x-for="s in servers" :key="s.server">
             <template x-if="s.state !== 'ok' || serverNotes(s).length > 0">
               <div role="status" class="stale-banner" x-text="serverProblemLine(s) || (s.server + ': ' + serverNotes(s).join('; '))"></div>
             </template>
+          </div>
           </template>
 
-          <div class="card">
+          <div class="card" x-show="tab === 'coverage'">
             <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
               <h2>Every target</h2>
               <span class="card-meta" x-text="'projected ' + bytesLabel(view.projected_bytes) + ' of storage at steady state'"></span>
@@ -2522,49 +2549,8 @@
             </template>
           </div>
 
-          <!-- Automatic restore tests -->
-          <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem">
-              <h2>Automatic restore tests</h2>
-              <span class="card-meta" x-text="tests.length + ' dash-owned, weekly, in the off-hours window'"></span>
-            </div>
-            <p class="text-muted">One per covered database: the latest backup is restored into a scratch container on its own server and proven usable. One test per server at a time, only inside the window, and only when the host has RAM and disk to spare.</p>
-            <template x-if="tests.length === 0">
-              <div class="empty-state"><p>None yet — they appear as the policy covers databases.</p></div>
-            </template>
-            <template x-if="tests.length > 0">
-              <div class="table-wrap">
-                <table>
-                  <thead><tr><th>Test</th><th>Engine</th><th>Next</th><th>Last run</th><th>History</th></tr></thead>
-                  <tbody>
-                    <template x-for="t in tests" :key="t.id">
-                      <tr>
-                        <td>
-                          <span class="mono" x-text="[t.server, t.app || t.accessory, t.database].filter(Boolean).join(' · ')"></span>
-                          <span class="text-muted" x-show="t.adopted"> adopted</span>
-                        </td>
-                        <td x-text="t.engine || '—'"></td>
-                        <td x-text="ageLabel(Math.round((Date.parse(t.next_due_at) - Date.now()) / 1000)).replace(' ago', '')"></td>
-                        <td>
-                          <template x-if="t.last_run">
-                            <span>
-                              <span class="dot" :class="t.last_run.ok ? 'green' : (t.last_run.skipped ? 'gray' : 'red')"></span>
-                              <span x-text="t.last_run.skipped ? t.last_run.skipped : (t.last_run.ok ? 'passed' : 'failed')"></span>
-                            </span>
-                          </template>
-                          <span class="text-muted" x-show="!t.last_run">not yet</span>
-                        </td>
-                        <td class="text-muted" x-text="t.history"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </template>
-          </div>
-
           <!-- Migration off hand-written jobs (report-only): only when some are found. -->
-          <div class="card" x-show="hasHandwritten()">
+          <div class="card" x-show="hasHandwritten() && tab === 'coverage'">
             <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Retiring hand-written backup jobs</h2></div>
             <p class="text-muted" x-text="view.handwritten_rule"></p>
             <p class="text-muted">Dash cannot read a server's systemd timers and cron scripts (no CLI read for them yet), so the known job names are a checklist to confirm by hand:</p>
@@ -2577,12 +2563,146 @@
           </div>
 
           <!-- Dash itself -->
-          <div class="card">
+          <div class="card" x-show="tab === 'coverage'">
             <div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem"><h2>Dash itself</h2><span class="card-meta" x-text="view.self_backup.available ? 'backed up' : 'not backed up yet'"></span></div>
             <p x-text="view.self_backup.reason"></p>
             <p class="setup-warn" x-show="view.self_backup.warning" x-text="view.self_backup.warning"></p>
             <p class="text-muted">Getting it back: <span class="mono" x-text="view.self_backup.runbook"></span> in the repository.</p>
           </div>
+        </div>
+      </template>
+
+      <!-- Restore tests tab (was the Restore Tests page; /restore-tests opens
+           it): the automatic, dash-owned tests and the ones added by hand,
+           in one table. -->
+      <template x-if="!loading && tab === 'restore-tests'">
+        <div x-data="restoreTestsPage">
+          <div class="page-header">
+            <div>
+              <h2 class="subpage-title">Restore tests</h2>
+              <p class="subtitle">A restore test restores a database's latest backup into a scratch container on its own server and proves it is usable. Automatic tests cover each database the policy backs up, weekly in the off-hours window; add one by hand for anything else.</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-primary" @click="showCreateDialog = true">Add restore test</button>
+            </div>
+          </div>
+
+          <template x-if="loading">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
+          <template x-if="!loading && loadFailed && !showingStale">
+            <div role="alert" class="stale-banner"><span x-text="'Could not load the tests added by hand: ' + loadError"></span> <button class="btn btn-sm" @click="loadTests()">Retry</button></div>
+          </template>
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
+          </template>
+
+          <template x-if="!loading && restoreTestRows(automaticTests(), tests).length > 0">
+            <div class="table-wrap">
+              <table class="stack-table">
+                <thead><tr><th>Test</th><th>Added by</th><th>Schedule</th><th>Last result</th><th><span class="sr-only">Actions</span></th></tr></thead>
+                <tbody>
+                  <template x-for="row in restoreTestRows(automaticTests(), tests)" :key="row.key">
+                    <tr>
+                      <td data-label="Test">
+                        <span class="mono" x-text="row.label"></span>
+                        <span class="text-muted" x-show="row.engine" x-text="' ' + row.engine"></span>
+                        <span class="badge" x-show="row.manual && !row.manual.enabled" style="opacity: .6;">disabled</span>
+                      </td>
+                      <td data-label="Added by" x-text="row.addedBy"></td>
+                      <td data-label="Schedule">
+                        <template x-if="row.auto">
+                          <span x-text="'weekly' + (row.auto.next_due_at ? ', next in ' + ageLabel(Math.round((Date.parse(row.auto.next_due_at) - Date.now()) / 1000)).replace(' ago', '') : '')"></span>
+                        </template>
+                        <template x-if="row.manual">
+                          <span x-text="formatInterval(row.manual.interval_hours)"></span>
+                        </template>
+                      </td>
+                      <td data-label="Last result">
+                        <span class="dot" :class="{ ok: 'green', failed: 'red', skipped: 'gray', never: 'gray' }[row.state]"></span>
+                        <span x-text="row.lastText"></span>
+                        <template x-if="row.auto && row.auto.history">
+                          <div class="text-muted" x-text="'history ' + row.auto.history"></div>
+                        </template>
+                        <template x-if="row.manual && row.state !== 'never'">
+                          <div class="text-muted" x-text="[row.manual.last_date ? 'backup ' + row.manual.last_date : '', row.manual.last_metric, row.manual.last_duration_ms ? (row.manual.last_duration_ms / 1000).toFixed(1) + 's' : '', formatDate(row.manual.last_run_at)].filter(Boolean).join(' · ')"></div>
+                        </template>
+                        <template x-if="row.manual && !row.manual.last_ok && row.manual.last_detail">
+                          <div class="check-msg" x-text="row.manual.last_detail"></div>
+                        </template>
+                        <template x-if="row.manual && deliveryWarns(row.manual.delivery)">
+                          <span class="badge" style="background: var(--red); color: #fff; opacity: .9;" :title="(row.manual.delivery && row.manual.delivery.last_error) || ''" x-text="deliveryLabel(row.manual.delivery)"></span>
+                        </template>
+                      </td>
+                      <td class="row-actions">
+                        <template x-if="row.manual">
+                          <div class="btn-row">
+                            <button class="btn btn-sm" @click="runNow(row.manual)" :disabled="running === row.manual.id" x-text="running === row.manual.id ? 'Running…' : 'Run now'"></button>
+                            <button class="btn btn-sm" @click="toggleEnabled(row.manual)" x-text="row.manual.enabled ? 'Disable' : 'Enable'"></button>
+                            <button class="btn btn-sm btn-danger" @click="deleteTest(row.manual.id)">Delete</button>
+                          </div>
+                        </template>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+
+          <template x-if="!loading && !loadFailed && restoreTestRows(automaticTests(), tests).length === 0">
+            <div class="empty-state">
+              <p>No restore tests yet. Automatic ones appear as the backup policy covers databases; add one by hand for anything else.</p>
+            </div>
+          </template>
+
+      <!-- Create Restore Test Dialog (focus-trapped, Escape closes — A49/A58). -->
+      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="showCreateDialog = false"
+           @keydown.tab="trapDialogFocus($event)"
+           @keydown.escape.window="showCreateDialog && closeDialog()" x-cloak>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="restore-dialog-title"
+             tabindex="-1" x-effect="showCreateDialog && $nextTick(() => $el.focus())">
+          <h2 id="restore-dialog-title">Add Restore Test</h2>
+          <form @submit.prevent="createTest()">
+            <div class="field">
+              <label for="restore-server">Server</label>
+              <select id="restore-server" x-model="newTest.server" required>
+                <option value="" disabled>Select a server</option>
+                <template x-for="s in servers" :key="s.name">
+                  <option :value="s.name" x-text="s.name + ' (' + s.host + ')'"></option>
+                </template>
+              </select>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="restore-app">App</label>
+                <input type="text" id="restore-app" x-model="newTest.app" placeholder="myapp" required>
+              </div>
+              <div class="field">
+                <label for="restore-accessory">Accessory</label>
+                <input type="text" id="restore-accessory" x-model="newTest.accessory" placeholder="postgres" required>
+              </div>
+            </div>
+            <p class="card-meta">The backup comes from the server's stored backup target — nothing to configure here.</p>
+            <div class="field">
+              <label for="restore-interval">Run Every</label>
+              <select id="restore-interval" x-model="newTest.interval_hours">
+                <option value="6">6 hours</option>
+                <option value="12">12 hours</option>
+                <option value="24" selected>24 hours</option>
+                <option value="168">7 days</option>
+              </select>
+            </div>
+            <div class="dialog-actions">
+              <button type="button" class="btn" @click="closeDialog()">Cancel</button>
+              <button type="submit" class="btn btn-primary" :disabled="creating">
+                <span x-show="!creating">Create</span>
+                <span x-show="creating">Creating...</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
         </div>
       </template>
     </div>
@@ -2591,7 +2711,7 @@
   <!-- Cleanup (Slice 6): what is left over on each server, from the CLI's
        read-only `server audit`. One component serves the fleet overview
        (/cleanup) and a server's report (/cleanup/:server), like monitors. -->
-  <template x-if="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail'">
+  <template x-if="$store.router.page === 'cleanup'">
     <div x-data="cleanupPage">
 
       <!-- Fleet overview -->
@@ -2681,492 +2801,17 @@
         </div>
       </template>
 
-      <!-- One server's report -->
-      <template x-if="routeIdentity()">
-        <div>
-          <a href="#" class="back-link" @click.prevent="$store.router.navigate('cleanup')">&larr; Cleanup</a>
-          <div class="page-header">
-            <div>
-              <h1 class="page-title" x-text="detail ? detail.server : routeIdentity()"></h1>
-              <p class="subtitle" x-text="detail ? auditLabel(detail.state, detailCounts()) + (detail.audited_at ? ' — audited ' + ageLabel(detail.age_seconds) : '') : ''"></p>
-            </div>
-            <div class="header-actions" x-show="detail">
-              <button class="btn btn-sm" @click="load()">Refresh</button>
-              <button class="btn btn-sm btn-primary" @click="runAudit(detail.server)" :disabled="!detail || auditBusy === detail.server || !!detail.live_audit || !cliSupported"
-                      x-text="detail && auditBusy === detail.server ? 'Auditing…' : 'Re-run audit'"></button>
-            </div>
-          </div>
-
-          <template x-if="loading">
-            <div class="loading"><div class="spinner"></div></div>
-          </template>
-
-          <template x-if="!loading && loadFailed && !showingStale">
-            <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
-          </template>
-
-          <template x-if="showingStale">
-            <div role="status" class="stale-banner" x-text="'Showing the last report — the refresh failed: ' + loadError"></div>
-          </template>
-
-          <template x-if="!loading && !cliSupported">
-            <div role="status" class="stale-banner" x-text="note"></div>
-          </template>
-
-          <template x-if="detail && detail.state === 'unreachable'">
-            <div role="status" class="stale-banner" x-text="'The server could not be audited' + (detail.error ? ': ' + detail.error : '') + '. Nothing here says it is clean.'"></div>
-          </template>
-
-          <template x-if="detail && detail.state === 'partial'">
-            <div role="status" class="stale-banner">Part of the audit could not read its sources (below); the findings that depend on them are missing, not cleared.</div>
-          </template>
-
-          <template x-if="detail && detail.last_error">
-            <div role="status" class="stale-banner" x-text="detail.last_error + ' — the report below is the last good one.'"></div>
-          </template>
-
-          <template x-if="detail && detail.live_audit">
-            <div role="status" class="stale-banner">An audit is <span x-text="detail.live_audit.status"></span> — <a :href="'/operations/' + detail.live_audit.id">follow it</a>.</div>
-          </template>
-
-          <template x-if="finishedServers.includes(routeIdentity())">
-            <div role="status" class="stale-banner">A remedy finished here. <button class="btn btn-sm" style="margin-left: 8px;" @click="runAudit(routeIdentity())" :disabled="auditBusy === routeIdentity()" x-text="auditBusy === routeIdentity() ? 'Auditing…' : 'Re-audit now'"></button></div>
-          </template>
-
-          <template x-if="detail && detail.state === 'never'">
-            <div class="empty-state">
-              <p>This server has not been audited yet.</p>
-              <button class="btn btn-primary" @click="runAudit(detail.server)" :disabled="auditBusy === detail.server || !cliSupported" x-text="auditBusy === detail.server ? 'Auditing…' : 'Run the first audit'"></button>
-            </div>
-          </template>
-
-          <template x-if="detail && detail.checks && detail.checks.length > 0">
-            <div style="margin-bottom: 20px;">
-              <h3 style="font-size: 15px; margin: 0 0 8px;">Checks</h3>
-              <div class="table-wrap">
-                <table>
-                  <thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead>
-                  <tbody>
-                    <template x-for="c in detail.checks" :key="c.name">
-                      <tr>
-                        <td x-text="c.name"></td>
-                        <td><span class="dot" :class="c.status === 'ok' ? 'green' : 'yellow'"></span> <span x-text="c.status === 'ok' ? 'ok' : 'unknown'"></span></td>
-                        <td class="text-muted" x-text="c.detail || (c.status === 'unknown' ? 'could not be read' : '')"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-
-          <template x-if="detail && detail.disk">
-            <div style="margin-bottom: 20px;">
-              <h3 style="font-size: 15px; margin: 0 0 8px;">Disk</h3>
-              <p class="card-meta" x-text="detail.disk.path + ': ' + fmtBytes(detail.disk.available_bytes) + ' available (' + detail.disk.used_percent + '% used)'"></p>
-              <div class="table-wrap" x-show="detail.disk.attribution && detail.disk.attribution.length">
-                <table>
-                  <thead><tr><th>Attribution</th><th>Size</th></tr></thead>
-                  <tbody>
-                    <template x-for="a in (detail.disk.attribution || [])" :key="a.name">
-                      <tr><td x-text="a.name"></td><td x-text="fmtBytes(a.size_bytes)"></td></tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-
-          <template x-if="detail && detail.state !== 'never'">
-            <div>
-              <div class="section-header" style="margin-bottom: 12px;">
-                <h3 style="font-size: 15px; margin: 0;">Findings</h3>
-                <label class="checkbox-label" x-show="dismissedFindings.length > 0"><input type="checkbox" x-model="showDismissed"> Show dismissed (<span x-text="dismissedFindings.length"></span>)</label>
-              </div>
-              <template x-if="visibleFindings.length === 0">
-                <div class="empty-state"><p>No open findings<x-show="dismissedFindings.length"> — <span x-text="dismissedFindings.length"></span> dismissed</x-show>.</p></div>
-              </template>
-              <div class="table-wrap" x-show="visibleFindings.length > 0">
-                <table>
-                  <thead>
-                    <tr><th>Finding</th><th>Evidence</th><th style="width: 280px;"></th></tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="f in visibleFindings" :key="f.id">
-                      <tr :class="f.dismissed ? 'text-muted' : ''">
-                        <td>
-                          <span class="dot" :class="severityClass(f.severity)"></span>
-                          <strong x-text="kindLabel(f.kind)"></strong>
-                          <div class="mono" style="font-size: 12px;" x-text="f.subject"></div>
-                          <div class="text-muted" x-show="f.size_bytes" x-text="f.size_bytes ? fmtBytes(f.size_bytes) : ''"></div>
-                        </td>
-                        <td>
-                          <span x-text="f.evidence"></span>
-                          <div class="text-muted" style="margin-top: 4px;" x-show="f.related && f.related.length" x-text="'related: ' + (f.related || []).join(', ')"></div>
-                          <div class="text-muted" style="margin-top: 4px;" x-show="f.dismissed" x-text="f.dismissed ? 'dismissed by ' + f.dismissed.actor : ''"></div>
-                        </td>
-                        <td>
-                          <template x-if="f.remedy && f.remedy.runnable">
-                            <button class="btn btn-sm" :class="f.remedy.destructive ? 'btn-danger' : ''" @click="openRemedy(f)" :disabled="remedyBusy"
-                                    :title="remedyLabel(f)" x-text="f.remedy.destructive ? 'Fix (destructive)…' : 'Fix'"></button>
-                          </template>
-                          <template x-if="f.remedy && f.remedy.available && !f.remedy.runnable">
-                            <div>
-                              <span class="badge">report-only here</span>
-                              <div class="text-muted" style="font-size: 12px;" x-text="f.remedy.note"></div>
-                            </div>
-                          </template>
-                          <template x-if="f.remedy && !f.remedy.available">
-                            <span class="text-muted" style="font-size: 12px;">report-only</span>
-                          </template>
-                          <button class="btn btn-sm" style="margin-left: 8px;" @click="f.dismissed ? undismiss(f) : dismiss(f)" x-text="f.dismissed ? 'Un-dismiss' : 'Dismiss'" title="Hide this finding; a fresh audit that proves it cleared retires the dismissal"></button>
-                        </td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-        </div>
-      </template>
-
-      <!-- Destructive remedy confirmation: type the finding's app or subject
-           name. The server enforces the match; this dialog is the prompt. -->
-      <div class="dialog-overlay" x-show="confirmFinding" @click.self="confirmFinding = null" @keydown.escape.window="confirmFinding && (confirmFinding = null)" x-cloak>
-        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="cleanup-remedy-title" tabindex="-1" x-effect="confirmFinding && $nextTick(() => $el.focus())">
-          <h2 id="cleanup-remedy-title">Fix <span x-text="confirmFinding ? kindLabel(confirmFinding.kind) : ''"></span>?</h2>
-          <template x-if="confirmFinding">
-            <form @submit.prevent="confirmRemedy()">
-              <p>This runs <span class="mono" x-text="remedyLabel(confirmFinding)"></span> — the fix the audit named. It is destructive: what it removes does not come back.</p>
-              <p class="text-muted" x-text="confirmFinding.evidence"></p>
-              <div class="field">
-                <label for="cleanup-remedy-confirm">Type <span class="mono" x-text="confirmName(confirmFinding)"></span> to confirm</label>
-                <input id="cleanup-remedy-confirm" type="text" class="form-input" x-model="confirmText" autocomplete="off">
-              </div>
-              <div class="dialog-actions">
-                <button type="button" class="btn" @click="confirmFinding = null">Cancel</button>
-                <button type="submit" class="btn btn-danger" :disabled="remedyBusy || confirmText !== confirmName(confirmFinding)" x-text="remedyBusy ? 'Starting…' : 'Run it'"></button>
-              </div>
-            </form>
-          </template>
-        </div>
-      </div>
     </div>
   </template>
 
-  <!-- Programme B: sibling products on the fleet — discovery evidence,
-       probe verdicts, and (for Observe only) the deep connect flow. -->
-  <template x-if="$store.router.page === 'siblings'">
-    <div x-data="siblingsPage">
-
-      <div class="page-header">
-        <div>
-          <h1 class="page-title">Integrations</h1>
-          <p class="subtitle">Teploy products running on your servers, found by their labels and probed on their published ports. Nothing is connected until you confirm it.</p>
-        </div>
-        <div class="header-actions">
-          <button class="btn btn-sm" @click="load()">Refresh</button>
-          <button class="btn btn-sm btn-primary" @click="rescan()" :disabled="scanBusy || !cliSupported" x-text="scanBusy ? 'Scanning…' : 'Rescan now'" title="Reads each server's containers and probes the candidates — quick, read-only"></button>
-        </div>
-      </div>
-
-      <template x-if="loading">
-        <div class="loading"><div class="spinner"></div></div>
-      </template>
-
-      <template x-if="!loading && loadFailed && !showingStale">
-        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
-      </template>
-
-      <template x-if="showingStale">
-        <div role="status" class="stale-banner" x-text="'Showing the last discovery — the refresh failed: ' + loadError"></div>
-      </template>
-
-      <template x-if="!loading && !cliSupported">
-        <div role="status" class="stale-banner" x-text="note"></div>
-      </template>
-
-      <template x-if="sweepError">
-        <div role="status" class="stale-banner" x-text="'The last sweep did not finish: ' + sweepError"></div>
-      </template>
-
-      <!-- Probing consent: internal addresses (tailnet, LAN) are probed only
-           when an admin allows it. The A13 rule applies: an editor cannot
-           flip this. -->
-      <template x-if="!loading && cliSupported">
-        <div class="info-banner" role="status">
-          <span x-text="allowInternal
-            ? 'Probing reaches internal addresses (tailnet/LAN) — matches where siblings usually run.'
-            : 'Internal addresses (tailnet/LAN) are not probed — candidates there read “Blocked (internal)” until an admin allows it.'"></span>
-          <button class="btn btn-sm" @click="setAllowInternal(!allowInternal)" :disabled="settingsBusy"
-                  x-text="settingsBusy ? 'Saving…' : (allowInternal ? 'Stop probing internal' : 'Allow probing internal')"></button>
-        </div>
-      </template>
-
-      <template x-if="!loading && !loadFailed && servers.length === 0">
-        <div class="empty-state"><p x-text="cliSupported ? 'No servers configured, or the first sweep has not run yet.' : 'Sibling discovery needs teploy ' + minCLI + ' on the dashboard host.'"></p></div>
-      </template>
-
-      <!-- Observe connect: the one sibling with a deep flow. The owner
-           confirms the instance identity from the discovery doc BEFORE any
-           token moves; dash re-checks it on every later write. -->
-      <template x-if="!loading && cliSupported">
-        <div style="border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 16px; margin-bottom: 16px;">
-          <template x-if="observeConnected && observeConnection">
-            <div>
-              <h2 class="section-title" style="margin-bottom: 8px;">Observe <span class="status-dot dot green"></span> connected</h2>
-              <p style="margin: 0 0 8px 0;">
-                <span x-text="observeConnection.base_url"></span>
-                <span class="text-muted"> — instance <span class="mono" x-text="observeConnection.instance_id.slice(0, 8) + '…'"></span>,
-                  <span x-text="observeConnection.version || 'version unknown'"></span>,
-                  token <span class="mono" x-text="observeConnection.token_fp"></span></span>
-              </p>
-              <p class="text-muted" style="margin: 0 0 8px 0; font-size: 13px;">
-                Per-app telemetry is opt-in, one app at a time, always shown as a plan first.
-                <a x-show="observeConnection.dashboard_url" :href="observeConnection.dashboard_url" target="_blank" rel="noopener">Open Observe</a>
-              </p>
-
-              <!-- Opted-in apps -->
-              <template x-if="telemetryApps.length > 0">
-                <div style="margin: 12px 0;">
-                  <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Apps sending telemetry</h3>
-                  <table style="width: 100%; font-size: 13px;">
-                    <tbody>
-                      <template x-for="entry in telemetryApps" :key="entry.server + '/' + entry.app">
-                        <tr>
-                          <td style="padding: 4px 8px 4px 0;"><span x-text="entry.app"></span> <span class="text-muted" x-text="'on ' + entry.server"></span></td>
-                          <td class="text-muted" style="padding: 4px 8px 4px 0;" x-text="envDisplay(entry)"></td>
-                          <td style="padding: 4px 0; text-align: right;">
-                            <button type="button" class="btn btn-sm" @click="openDisable(entry)" :disabled="disableBusy">Stop telemetry</button>
-                          </td>
-                        </tr>
-                      </template>
-                    </tbody>
-                  </table>
-                </div>
-              </template>
-
-              <!-- Opt-in: plan → approve → apply -->
-              <form @submit.prevent="planTelemetry()" style="margin-top: 8px; display: flex; gap: 8px; align-items: end; flex-wrap: wrap;">
-                <div class="field">
-                  <label for="telemetry-server">Server</label>
-                  <input id="telemetry-server" class="form-input" style="min-width: 140px;" x-model="telemetryForm.server" list="telemetry-servers" autocomplete="off" :disabled="telemetryBusy">
-                  <datalist id="telemetry-servers">
-                    <template x-for="a in [...new Set(fleetApps.map(a => a.server))]" :key="a"><option :value="a"></option></template>
-                  </datalist>
-                </div>
-                <div class="field">
-                  <label for="telemetry-app">App</label>
-                  <input id="telemetry-app" class="form-input" style="min-width: 180px;" x-model="telemetryForm.app" list="telemetry-apps" autocomplete="off" :disabled="telemetryBusy">
-                  <datalist id="telemetry-apps">
-                    <template x-for="a in appSuggestions" :key="a.server + '/' + a.app"><option :value="a.app"></option></template>
-                  </datalist>
-                </div>
-                <button type="submit" class="btn btn-sm" :disabled="telemetryBusy || !telemetryForm.server || !telemetryForm.app"
-                        x-text="telemetryBusy ? 'Planning…' : 'Plan telemetry'"></button>
-                <button type="button" class="btn btn-sm" @click="disconnectObserve()" :disabled="connectBusy" x-text="connectBusy ? 'Working…' : 'Disconnect'"></button>
-              </form>
-
-              <template x-if="telemetryPlanError">
-                <p role="alert" style="color: var(--danger); margin: 8px 0; font-size: 13px;" x-text="telemetryPlanError"></p>
-              </template>
-
-              <!-- The plan: exactly what apply will do. Approving this is
-                   consenting to these writes and the redeploy. -->
-              <template x-if="telemetryPlan">
-                <div role="dialog" aria-label="Telemetry plan" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-top: 10px;">
-                  <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Plan — <span x-text="telemetryPlan.app"></span> <span class="text-muted" x-text="'on ' + telemetryPlan.server"></span></h3>
-                  <ol style="margin: 0 0 8px 0; padding-left: 20px; font-size: 13px;">
-                    <li x-text="telemetryPlan.site_action"></li>
-                    <li>mint the telemetry key “<span class="mono" x-text="telemetryPlan.key_label"></span>” for that site</li>
-                    <li>write these environment variables and secrets:
-                      <table style="width: 100%; font-size: 12px; margin-top: 4px;">
-                        <tbody>
-                          <template x-for="w in telemetryPlan.env" :key="w.key">
-                            <tr>
-                              <td class="mono" style="padding: 1px 8px 1px 0;" x-text="w.key"></td>
-                              <td class="mono" style="padding: 1px 0;" :class="w.secret ? 'text-muted' : ''" x-text="w.value"></td>
-                            </tr>
-                          </template>
-                        </tbody>
-                      </table>
-                    </li>
-                    <li x-text="telemetryPlan.redeploy"></li>
-                  </ol>
-                  <p class="text-muted" style="margin: 0 0 8px 0; font-size: 12px;" x-show="telemetryPlan.rotation"
-                     x-text="telemetryPlan.rotation ? 'This replaces the previous opt-in (key ' + telemetryPlan.rotation.key_id + ') — a NEW key is minted; revoke the old one in Observe if nothing else uses it.' : ''"></p>
-                  <div style="display: flex; gap: 8px;">
-                    <button type="button" class="btn btn-sm btn-primary" @click="applyTelemetry()" :disabled="telemetryBusy"
-                            x-text="telemetryBusy ? 'Applying…' : 'Approve and apply'"></button>
-                    <button type="button" class="btn btn-sm" @click="telemetryPlan = null" :disabled="telemetryBusy">Cancel</button>
-                  </div>
-                </div>
-              </template>
-
-              <template x-if="telemetryApplied">
-                <div role="status" class="stale-banner" style="margin-top: 8px;">
-                  <span x-text="telemetryApplied.note"></span>
-                  <a :href="'/operations/' + (telemetryApplied.operation ? telemetryApplied.operation.id : '')">follow the redeploy</a>
-                </div>
-              </template>
-            </div>
-          </template>
-          <template x-if="!observeConnected">
-            <form @submit.prevent="previewDoc ? connectObserve() : previewObserve()">
-              <h2 class="section-title" style="margin-bottom: 8px;">Connect Observe</h2>
-              <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
-                Create a service token in Observe, then paste it here. <a x-show="observeTokenURL()" :href="observeTokenURL()" target="_blank" rel="noopener">Open the filled-in form in Observe</a><span x-show="!observeTokenURL()">Enter the address below for a link to the filled-in form, or use Settings → Service Tokens with scopes <span class="mono">sites:create</span> and <span class="mono">keys:mint</span>.</span>
-                Dash never sees an Observe admin login, and nothing is written until you confirm this instance's identity.
-                <span x-show="observeHintData && observeHintData.available">A confirmed Observe was found on your servers — its address is prefilled.</span>
-              </p>
-              <div style="display: grid; grid-template-columns: 2fr 2fr auto; gap: 8px; align-items: end;">
-                <div class="field">
-                  <label for="observe-base">Observe address</label>
-                  <input id="observe-base" class="form-input" x-model="connectForm.base_url" placeholder="http://observe.tailnet-host:3000" autocomplete="off" :disabled="connectBusy">
-                </div>
-                <div class="field">
-                  <label for="observe-token">Service token</label>
-                  <input id="observe-token" class="form-input" type="password" x-model="connectForm.token" placeholder="obs_svc_…" autocomplete="off" :disabled="connectBusy || !previewDoc">
-                </div>
-                <div class="field" style="padding-bottom: 6px;">
-                  <label style="display: flex; gap: 6px; align-items: center; font-weight: 400;">
-                    <input type="checkbox" x-model="connectForm.allow_internal"> Allow an internal address
-                  </label>
-                </div>
-              </div>
-              <template x-if="previewError">
-                <p role="alert" class="text-muted" style="color: var(--danger); margin: 8px 0;" x-text="previewError"></p>
-              </template>
-              <template x-if="previewDoc">
-                <div role="status" class="stale-banner" style="margin: 8px 0;">
-                  <p style="margin: 0;">Discovery doc: <strong x-text="previewDoc.product"></strong>
-                    <span x-text="previewDoc.version || ''"></span>,
-                    instance <span class="mono" x-text="previewDoc.instance_id.slice(0, 8) + '…'"></span>
-                    (<span class="mono" x-text="previewDoc.instance_id"></span>)</p>
-                  <p style="margin: 4px 0 0 0;" class="text-muted"
-                     x-text="'dashboard ' + (previewDoc.dashboard_url || 'not published') + ' · ingest ' + (previewDoc.ingest_url || 'not published')"></p>
-                  <p style="margin: 4px 0 0 0;">Confirm this is the Observe you mean, then paste the token and connect.</p>
-                </div>
-              </template>
-              <div style="margin-top: 8px; display: flex; gap: 8px;">
-                <button type="button" class="btn btn-sm" @click="previewObserve()" :disabled="connectBusy || !connectForm.base_url"
-                        x-text="connectBusy ? 'Reading…' : (previewDoc ? 'Re-read' : 'Preview the instance')"></button>
-                <button type="submit" class="btn btn-sm btn-primary" x-show="previewDoc" :disabled="connectBusy || !connectForm.token"
-                        x-text="connectBusy ? 'Connecting…' : 'Connect this instance'"></button>
-              </div>
-            </form>
-          </template>
-        </div>
-      </template>
-
-      <!-- Candidates: one row per (server, product) with the probe verdict.
-           Honest unknowns stay unknown — nothing renders as “no siblings”
-           when a server was only partly read. -->
-      <template x-if="candidates.length > 0">
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Product</th>
-                <th>Probe</th>
-                <th>Where</th>
-                <th>Evidence</th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for="c in candidates" :key="c.server + '/' + c.product">
-                <tr>
-                  <td>
-                    <strong x-text="c.product"></strong>
-                    <span class="text-muted" x-show="c.label_version" x-text="c.label_version"></span>
-                    <div class="text-muted" x-show="!c.recognized" title="The CLI did not recognise this product label; it is shown as reported">unrecognised label</div>
-                  </td>
-                  <td>
-                    <span class="status-dot dot" :class="probeClass(c.state)"></span>
-                    <span x-text="probeLabel(c.state)"></span>
-                    <div class="text-muted" x-text="'probed ' + ageLabel(c.age_seconds)"></div>
-                  </td>
-                  <td>
-                    <div x-text="c.server"></div>
-                    <div class="text-muted mono" style="font-size: 12px;" x-text="(c.addresses || []).join(', ') || 'no published port'"></div>
-                    <div class="text-muted" x-show="c.container_state && c.container_state !== 'running'" x-text="'container ' + c.container_state"></div>
-                  </td>
-                  <td>
-                    <div x-text="probeHint(c)"></div>
-                    <div class="text-muted mono" style="font-size: 12px;" x-show="c.doc && c.doc.dashboard_url"><a :href="c.doc ? c.doc.dashboard_url : null" target="_blank" rel="noopener" x-text="c.doc ? c.doc.dashboard_url : ''"></a></div>
-                    <div class="text-muted" x-show="c.base_url && (!c.doc || !c.doc.dashboard_url)"><a :href="c.base_url" target="_blank" rel="noopener" x-text="c.base_url"></a></div>
-                  </td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
-      </template>
-
-      <!-- Stopping telemetry: the dialog names exactly what goes, and that
-           the site and key live on in Observe until revoked there. -->
-      <div class="dialog-overlay" x-show="confirmDisable" @click.self="confirmDisable = null" @keydown.escape.window="confirmDisable && (confirmDisable = null)" x-cloak>
-        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="observe-disable-title" tabindex="-1" x-effect="confirmDisable && $nextTick(() => $el.focus())">
-          <h2 id="observe-disable-title">Stop telemetry for <span x-text="confirmDisable ? confirmDisable.app : ''"></span>?</h2>
-          <template x-if="confirmDisable">
-            <div>
-              <p>These environment variables and secrets come off the app:</p>
-              <p class="mono text-muted" style="font-size: 12px;" x-text="envDisplay(confirmDisable)"></p>
-              <p class="text-muted">A redeploy is queued so the app restarts without them. The site and the telemetry key stay in Observe — revoke the key there if you want it dead.</p>
-              <div class="dialog-actions">
-                <button type="button" class="btn" @click="confirmDisable = null">Keep it</button>
-                <button type="button" class="btn btn-danger" @click="disableTelemetry()" :disabled="disableBusy" x-text="disableBusy ? 'Stopping…' : 'Stop telemetry'"></button>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-
-      <!-- Per-server read state: which reports are complete, partial or
-           missing, with their age. -->
-      <template x-if="servers.length > 0">
-        <div>
-          <h2 class="section-title" style="margin-top: 24px;">Server reads</h2>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Server</th>
-                  <th>Read</th>
-                  <th>Last report</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="row in servers" :key="row.server">
-                  <tr>
-                    <td x-text="row.server"></td>
-                    <td>
-                      <span class="status-dot dot" :class="serverStateClass(row.state)"></span>
-                      <span x-text="serverStateLabel(row.state)"></span>
-                      <div class="text-muted" x-show="row.error" x-text="row.error"></div>
-                    </td>
-                    <td>
-                      <div x-text="ageLabel(row.age_seconds)"></div>
-                      <div class="text-muted" x-show="!row.checked_at">never completed</div>
-                    </td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </template>
-    </div>
-  </template>
 
   <!-- One component serves the list (/monitors) and a monitor's detail
        (/monitors/:id), so moving between them keeps the loaded list. -->
-  <template x-if="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail'">
+  <template x-if="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' || $store.router.page === 'alerts'">
     <div x-data="monitorsPage">
 
       <!-- Monitor List View (when no monitor is open) -->
-      <template x-if="!detailId">
+      <template x-if="!detailId && $store.router.page === 'monitors'">
         <div>
           <div class="page-header">
             <div>
@@ -3222,11 +2867,39 @@
             </div>
           </template>
 
+          <!-- Empty State -->
+          <template x-if="!loading && !loadFailed && monitors.length === 0">
+            <div class="empty-state">
+              <div class="empty-icon">
+                <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                </svg>
+              </div>
+              <h3>No monitors yet</h3>
+              <p>Add your first uptime monitor to start tracking availability.</p>
+              <button class="btn btn-primary" @click="openCreate()">Add Monitor</button>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Monitoring > Alerts: open incidents, held alerts, silences and
+           delivery history. Channels are configured in Settings. -->
+      <template x-if="$store.router.page === 'alerts'">
+        <div>
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">Alerts</h1>
+              <p class="subtitle">Open incidents, held alerts, silences and what was sent. Where alerts go is set in <a href="/settings?tab=notifications" @click.prevent="$store.router.navigate('settings', { tab: 'notifications' })">Settings &rsaquo; Notifications</a>.</p>
+            </div>
+          </div>
+          <template x-if="loading">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
           <!-- Alerts v2: open incidents, held alerts, silences and the
                recent delivery history (suppressed and dead-lettered too). -->
           <template x-if="!loading">
-            <div x-data="alertsPanel" class="section" style="margin-top: 24px;">
-              <h2>Alerts</h2>
+            <div x-data="alertsPanel">
               <template x-if="error"><div role="alert" class="card-meta" x-text="error"></div></template>
               <div class="table-wrap" style="padding: 12px 16px; margin-bottom: 12px;">
                 <strong>Open incidents</strong>
@@ -3312,19 +2985,6 @@
             </div>
           </template>
 
-          <!-- Empty State -->
-          <template x-if="!loading && !loadFailed && monitors.length === 0">
-            <div class="empty-state">
-              <div class="empty-icon">
-                <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-                </svg>
-              </div>
-              <h3>No monitors yet</h3>
-              <p>Add your first uptime monitor to start tracking availability.</p>
-              <button class="btn btn-primary" @click="openCreate()">Add Monitor</button>
-            </div>
-          </template>
         </div>
       </template>
 
@@ -3594,141 +3254,6 @@
   </template>
 
 
-  <!-- ═══ Restore Tests Page ═══ -->
-  <template x-if="$store.router.page === 'restore-tests'">
-    <div x-data="restoreTestsPage">
-      <div class="page-header">
-        <div>
-          <h1 class="page-title">Restore Tests</h1>
-          <p class="subtitle" x-text="tests.length ? tests.length + ' scheduled verification' + (tests.length !== 1 ? 's' : '') : 'Prove backups restore — on a schedule'"></p>
-        </div>
-        <div class="header-actions">
-          <button class="btn btn-primary" @click="showCreateDialog = true">Add Restore Test</button>
-        </div>
-      </div>
-
-      <template x-if="loading">
-        <div class="loading"><div class="spinner"></div></div>
-      </template>
-
-      <template x-if="!loading && loadFailed && !showingStale">
-        <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="loadTests()">Retry</button></div>
-      </template>
-
-      <template x-if="showingStale">
-        <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
-      </template>
-
-      <template x-if="!loading && tests.length > 0">
-        <div class="monitor-list">
-          <template x-for="t in tests" :key="t.id">
-            <div class="monitor-card">
-              <div class="monitor-header">
-                <div class="monitor-status">
-                  <span class="dot" :class="badgeClass(t)"></span>
-                  <span class="monitor-name" x-text="t.app + '/' + t.accessory"></span>
-                  <span class="monitor-type badge" x-text="t.server"></span>
-                  <span class="badge" x-show="!t.enabled" style="opacity:0.6">disabled</span>
-                </div>
-                <div class="header-actions" style="display:flex; gap:8px;">
-                  <button class="btn" @click="runNow(t)" :disabled="running === t.id">
-                    <span x-text="running === t.id ? 'Running...' : 'Run Now'"></span>
-                  </button>
-                  <button class="btn" @click="toggleEnabled(t)" x-text="t.enabled ? 'Disable' : 'Enable'"></button>
-                  <button class="btn btn-danger" @click="deleteTest(t.id)">Delete</button>
-                </div>
-              </div>
-              <div class="monitor-target">
-                <span x-text="formatInterval(t.interval_hours)"></span>
-              </div>
-              <div class="monitor-meta">
-                <template x-if="t.last_run_at && !t.last_run_at.startsWith('0001')">
-                  <span>
-                    <strong x-text="t.last_ok ? 'OK' : 'FAILED'" :style="t.last_ok ? 'color:var(--green, #2da44e)' : 'color:var(--red, #cf222e)'"></strong>
-                    <span x-show="t.last_date" x-text="' — backup ' + t.last_date"></span>
-                    <span x-show="t.last_metric" x-text="' — ' + t.last_metric"></span>
-                    <span x-show="t.last_duration_ms" x-text="' — ' + (t.last_duration_ms / 1000).toFixed(1) + 's'"></span>
-                    <span x-text="' — ' + formatDate(t.last_run_at)"></span>
-                  </span>
-                </template>
-                <template x-if="!t.last_run_at || t.last_run_at.startsWith('0001')">
-                  <span>Never run</span>
-                </template>
-              </div>
-              <div class="monitor-meta" x-show="!t.last_ok && t.last_detail">
-                <span class="check-msg" x-text="t.last_detail"></span>
-              </div>
-              <!-- D08: a failing alert delivery for this test's verdict warns
-                   at card level, exactly like the monitors list. -->
-              <div class="monitor-meta" x-show="deliveryWarns(t.delivery)">
-                <span class="badge" style="background:var(--red, #cf222e);color:#fff;opacity:0.9"
-                      :title="(t.delivery && t.delivery.last_error) || ''"
-                      x-text="deliveryLabel(t.delivery)"></span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </template>
-
-      <template x-if="!loading && !loadFailed && tests.length === 0">
-        <div class="empty-state">
-          <h3>No restore tests yet</h3>
-          <p>A restore test regularly restores an accessory's latest backup into a scratch container and verifies it's usable — so a backup that can't restore gets caught before you need it.</p>
-          <button class="btn btn-primary" @click="showCreateDialog = true">Add Restore Test</button>
-        </div>
-      </template>
-
-      <!-- Create Restore Test Dialog (focus-trapped, Escape closes — A49/A58). -->
-      <div class="dialog-overlay" x-show="showCreateDialog" @click.self="showCreateDialog = false"
-           @keydown.tab="trapDialogFocus($event)"
-           @keydown.escape.window="showCreateDialog && closeDialog()" x-cloak>
-        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="restore-dialog-title"
-             tabindex="-1" x-effect="showCreateDialog && $nextTick(() => $el.focus())">
-          <h2 id="restore-dialog-title">Add Restore Test</h2>
-          <form @submit.prevent="createTest()">
-            <div class="field">
-              <label for="restore-server">Server</label>
-              <select id="restore-server" x-model="newTest.server" required>
-                <option value="" disabled>Select a server</option>
-                <template x-for="s in servers" :key="s.name">
-                  <option :value="s.name" x-text="s.name + ' (' + s.host + ')'"></option>
-                </template>
-              </select>
-            </div>
-            <div class="field-row">
-              <div class="field">
-                <label for="restore-app">App</label>
-                <input type="text" id="restore-app" x-model="newTest.app" placeholder="myapp" required>
-              </div>
-              <div class="field">
-                <label for="restore-accessory">Accessory</label>
-                <input type="text" id="restore-accessory" x-model="newTest.accessory" placeholder="postgres" required>
-              </div>
-            </div>
-            <p class="card-meta">The backup comes from the server's stored backup target — nothing to configure here.</p>
-            <div class="field">
-              <label for="restore-interval">Run Every</label>
-              <select id="restore-interval" x-model="newTest.interval_hours">
-                <option value="6">6 hours</option>
-                <option value="12">12 hours</option>
-                <option value="24" selected>24 hours</option>
-                <option value="168">7 days</option>
-              </select>
-            </div>
-            <div class="dialog-actions">
-              <button type="button" class="btn" @click="closeDialog()">Cancel</button>
-              <button type="submit" class="btn btn-primary" :disabled="creating">
-                <span x-show="!creating">Create</span>
-                <span x-show="creating">Creating...</span>
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-
-    </div>
-  </template>
-
   <!-- ═══ Servers Page ═══ -->
   <template x-if="$store.router.page === 'servers'">
     <div x-data="serversPage">
@@ -3736,6 +3261,9 @@
         <div>
           <h1 class="page-title">Servers</h1>
           <p class="subtitle">Every server this dash manages. Unreachable hosts stay listed with their last-known state.</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-primary" @click="$store.router.navigate('settings', { tab: 'servers', add: 'server' })">Add server</button>
         </div>
       </div>
 
@@ -3809,6 +3337,7 @@
                @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
             <button class="tab" :class="{ active: tab === 'overview' }" role="tab" id="srv-tab-overview" aria-controls="srv-panel-overview" :aria-selected="(tab === 'overview').toString()" :tabindex="tab === 'overview' ? 0 : -1" @focus="switchTab('overview')">Overview</button>
             <button class="tab" :class="{ active: tab === 'proxy' }" role="tab" id="srv-tab-proxy" aria-controls="srv-panel-proxy" :aria-selected="(tab === 'proxy').toString()" :tabindex="tab === 'proxy' ? 0 : -1" @focus="switchTab('proxy')">Proxy</button>
+            <button class="tab" :class="{ active: tab === 'cleanup' }" role="tab" id="srv-tab-cleanup" aria-controls="srv-panel-cleanup" :aria-selected="(tab === 'cleanup').toString()" :tabindex="tab === 'cleanup' ? 0 : -1" @focus="switchTab('cleanup')">Cleanup</button>
           </div>
 
           <!-- Overview Tab -->
@@ -3945,55 +3474,188 @@
               </template>
             </div>
           </template>
+          <!-- Cleanup Tab: this server's audit report (was /cleanup/:server,
+               which still opens here). -->
+          <template x-if="tab === 'cleanup'">
+            <div role="tabpanel" id="srv-panel-cleanup" aria-labelledby="srv-tab-cleanup" tabindex="-1" x-data="cleanupPage">
+      <!-- One server's report -->
+      <template x-if="routeIdentity()">
+        <div>
+          <div class="page-header">
+            <div>
+              <h2 class="subpage-title">Cleanup</h2>
+              <p class="subtitle" x-text="detail ? auditLabel(detail.state, detailCounts()) + (detail.audited_at ? ' — audited ' + ageLabel(detail.age_seconds) : '') : ''"></p>
+            </div>
+            <div class="header-actions" x-show="detail">
+              <button class="btn btn-sm" @click="load()">Refresh</button>
+              <button class="btn btn-sm btn-primary" @click="runAudit(detail.server)" :disabled="!detail || auditBusy === detail.server || !!detail.live_audit || !cliSupported"
+                      x-text="detail && auditBusy === detail.server ? 'Auditing…' : 'Re-run audit'"></button>
+            </div>
+          </div>
+
+          <template x-if="loading">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
+
+          <template x-if="!loading && loadFailed && !showingStale">
+            <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+          </template>
+
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="'Showing the last report — the refresh failed: ' + loadError"></div>
+          </template>
+
+          <template x-if="!loading && !cliSupported">
+            <div role="status" class="stale-banner" x-text="note"></div>
+          </template>
+
+          <template x-if="detail && detail.state === 'unreachable'">
+            <div role="status" class="stale-banner" x-text="'The server could not be audited' + (detail.error ? ': ' + detail.error : '') + '. Nothing here says it is clean.'"></div>
+          </template>
+
+          <template x-if="detail && detail.state === 'partial'">
+            <div role="status" class="stale-banner">Part of the audit could not read its sources (below); the findings that depend on them are missing, not cleared.</div>
+          </template>
+
+          <template x-if="detail && detail.last_error">
+            <div role="status" class="stale-banner" x-text="detail.last_error + ' — the report below is the last good one.'"></div>
+          </template>
+
+          <template x-if="detail && detail.live_audit">
+            <div role="status" class="stale-banner">An audit is <span x-text="detail.live_audit.status"></span> — <a :href="'/operations/' + detail.live_audit.id">follow it</a>.</div>
+          </template>
+
+          <template x-if="finishedServers.includes(routeIdentity())">
+            <div role="status" class="stale-banner">A remedy finished here. <button class="btn btn-sm" style="margin-left: 8px;" @click="runAudit(routeIdentity())" :disabled="auditBusy === routeIdentity()" x-text="auditBusy === routeIdentity() ? 'Auditing…' : 'Re-audit now'"></button></div>
+          </template>
+
+          <template x-if="detail && detail.state === 'never'">
+            <div class="empty-state">
+              <p>This server has not been audited yet.</p>
+              <button class="btn btn-primary" @click="runAudit(detail.server)" :disabled="auditBusy === detail.server || !cliSupported" x-text="auditBusy === detail.server ? 'Auditing…' : 'Run the first audit'"></button>
+            </div>
+          </template>
+
+          <template x-if="detail && detail.checks && detail.checks.length > 0">
+            <div style="margin-bottom: 20px;">
+              <h3 style="font-size: 15px; margin: 0 0 8px;">Checks</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead>
+                  <tbody>
+                    <template x-for="c in detail.checks" :key="c.name">
+                      <tr>
+                        <td x-text="c.name"></td>
+                        <td><span class="dot" :class="c.status === 'ok' ? 'green' : 'yellow'"></span> <span x-text="c.status === 'ok' ? 'ok' : 'unknown'"></span></td>
+                        <td class="text-muted" x-text="c.detail || (c.status === 'unknown' ? 'could not be read' : '')"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="detail && detail.disk">
+            <div style="margin-bottom: 20px;">
+              <h3 style="font-size: 15px; margin: 0 0 8px;">Disk</h3>
+              <p class="card-meta" x-text="detail.disk.path + ': ' + fmtBytes(detail.disk.available_bytes) + ' available (' + detail.disk.used_percent + '% used)'"></p>
+              <div class="table-wrap" x-show="detail.disk.attribution && detail.disk.attribution.length">
+                <table>
+                  <thead><tr><th>Attribution</th><th>Size</th></tr></thead>
+                  <tbody>
+                    <template x-for="a in (detail.disk.attribution || [])" :key="a.name">
+                      <tr><td x-text="a.name"></td><td x-text="fmtBytes(a.size_bytes)"></td></tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="detail && detail.state !== 'never'">
+            <div>
+              <div class="section-header" style="margin-bottom: 12px;">
+                <h3 style="font-size: 15px; margin: 0;">Findings</h3>
+                <label class="checkbox-label" x-show="dismissedFindings.length > 0"><input type="checkbox" x-model="showDismissed"> Show dismissed (<span x-text="dismissedFindings.length"></span>)</label>
+              </div>
+              <template x-if="visibleFindings.length === 0">
+                <div class="empty-state"><p>No open findings<x-show="dismissedFindings.length"> — <span x-text="dismissedFindings.length"></span> dismissed</x-show>.</p></div>
+              </template>
+              <div class="table-wrap" x-show="visibleFindings.length > 0">
+                <table>
+                  <thead>
+                    <tr><th>Finding</th><th>Evidence</th><th style="width: 280px;"></th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="f in visibleFindings" :key="f.id">
+                      <tr :class="f.dismissed ? 'text-muted' : ''">
+                        <td>
+                          <span class="dot" :class="severityClass(f.severity)"></span>
+                          <strong x-text="kindLabel(f.kind)"></strong>
+                          <div class="mono" style="font-size: 12px;" x-text="f.subject"></div>
+                          <div class="text-muted" x-show="f.size_bytes" x-text="f.size_bytes ? fmtBytes(f.size_bytes) : ''"></div>
+                        </td>
+                        <td>
+                          <span x-text="f.evidence"></span>
+                          <div class="text-muted" style="margin-top: 4px;" x-show="f.related && f.related.length" x-text="'related: ' + (f.related || []).join(', ')"></div>
+                          <div class="text-muted" style="margin-top: 4px;" x-show="f.dismissed" x-text="f.dismissed ? 'dismissed by ' + f.dismissed.actor : ''"></div>
+                        </td>
+                        <td>
+                          <template x-if="f.remedy && f.remedy.runnable">
+                            <button class="btn btn-sm" :class="f.remedy.destructive ? 'btn-danger' : ''" @click="openRemedy(f)" :disabled="remedyBusy"
+                                    :title="remedyLabel(f)" x-text="f.remedy.destructive ? 'Fix (destructive)…' : 'Fix'"></button>
+                          </template>
+                          <template x-if="f.remedy && f.remedy.available && !f.remedy.runnable">
+                            <div>
+                              <span class="badge">report-only here</span>
+                              <div class="text-muted" style="font-size: 12px;" x-text="f.remedy.note"></div>
+                            </div>
+                          </template>
+                          <template x-if="f.remedy && !f.remedy.available">
+                            <span class="text-muted" style="font-size: 12px;">report-only</span>
+                          </template>
+                          <button class="btn btn-sm" style="margin-left: 8px;" @click="f.dismissed ? undismiss(f) : dismiss(f)" x-text="f.dismissed ? 'Un-dismiss' : 'Dismiss'" title="Hide this finding; a fresh audit that proves it cleared retires the dismissal"></button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Destructive remedy confirmation: type the finding's app or subject
+           name. The server enforces the match; this dialog is the prompt. -->
+      <div class="dialog-overlay" x-show="confirmFinding" @click.self="confirmFinding = null" @keydown.escape.window="confirmFinding && (confirmFinding = null)" x-cloak>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="cleanup-remedy-title" tabindex="-1" x-effect="confirmFinding && $nextTick(() => $el.focus())">
+          <h2 id="cleanup-remedy-title">Fix <span x-text="confirmFinding ? kindLabel(confirmFinding.kind) : ''"></span>?</h2>
+          <template x-if="confirmFinding">
+            <form @submit.prevent="confirmRemedy()">
+              <p>This runs <span class="mono" x-text="remedyLabel(confirmFinding)"></span> — the fix the audit named. It is destructive: what it removes does not come back.</p>
+              <p class="text-muted" x-text="confirmFinding.evidence"></p>
+              <div class="field">
+                <label for="cleanup-remedy-confirm">Type <span class="mono" x-text="confirmName(confirmFinding)"></span> to confirm</label>
+                <input id="cleanup-remedy-confirm" type="text" class="form-input" x-model="confirmText" autocomplete="off">
+              </div>
+              <div class="dialog-actions">
+                <button type="button" class="btn" @click="confirmFinding = null">Cancel</button>
+                <button type="submit" class="btn btn-danger" :disabled="remedyBusy || confirmText !== confirmName(confirmFinding)" x-text="remedyBusy ? 'Starting…' : 'Run it'"></button>
+              </div>
+            </form>
+          </template>
+        </div>
+      </div>
+            </div>
+          </template>
         </div>
       </template>
     </div>
   </template>
 
   <!-- ═══ Templates Page ═══ -->
-  <template x-if="$store.router.page === 'sources'">
-    <div x-data="sourcesPage">
-      <div class="page-header">
-        <div>
-          <h1 class="page-title">Git sources</h1>
-          <p class="subtitle">Register a repository so dash can receive and verify its webhook pushes. Provider names select credentials configured by the operator.</p>
-        </div>
-        <div class="header-actions">
-          <button class="btn" @click="load()" :disabled="loading">Refresh</button>
-        </div>
-      </div>
-      <p role="alert" class="stale-banner" x-show="loadError" x-text="loadError"></p>
-      <p role="alert" class="stale-banner" x-show="error" x-text="error"></p>
-      <p class="text-muted" x-show="!loading && !loadError && sources.length === 0">No sources configured.</p>
-      <template x-for="src in sources" :key="src.id">
-        <div class="card source-card">
-          <button class="btn" @click="select(src.id)" :disabled="busy" x-text="src.display_name || src.clone_url"></button>
-          <span x-text="src.credential_verdict"></span><span x-text="src.degrade_reason || ''"></span>
-        </div>
-      </template>
-      <form @submit.prevent="create()" class="card source-form">
-        <h2 class="section-title">Add repository</h2>
-        <label class="field">Forge <select x-model="form.forge"><option>github</option><option>gitlab</option><option>forgejo</option><option>gitea</option><option>generic</option></select></label>
-        <label class="field">Clone URL <input type="url" required x-model="form.clone_url"></label>
-        <label class="field">Watched branch <input x-model="form.default_branch"></label>
-        <label class="field">Provider name <input required x-model="form.credential_ref" autocomplete="off"></label>
-        <label class="field">Display name <input x-model="form.display_name"></label>
-        <button type="submit" class="btn btn-primary" :disabled="busy">Add source</button>
-      </form>
-      <template x-if="selected">
-        <section class="card source-detail">
-          <h2 x-text="selected.display_name || selected.clone_url"></h2>
-          <p>Webhook URL: <code x-text="selected.webhook_url"></code></p>
-          <button class="btn btn-sm" @click="action('verify')" :disabled="busy">Verify credentials</button>
-          <button class="btn btn-sm" @click="action('rotate-secret')" :disabled="busy">Rotate webhook secret</button>
-          <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button class="btn btn-sm" @click="webhookSecret = ''">Hide</button></div>
-          <h3>Recent deliveries</h3>
-          <template x-for="delivery in selected.deliveries || []" :key="delivery.id + delivery.received_at"><p><code x-text="delivery.commit"></code> <span x-text="delivery.disposition"></span> <span x-text="delivery.reason"></span></p></template>
-          <p class="card-meta">Pushes to a repository an app builds from wake that app's server-side poll (which decides what deploys); every authenticated push is recorded here.</p>
-        </section>
-      </template>
-    </div>
-  </template>
 
   <template x-if="$store.router.page === 'templates'">
     <div x-data="templatesPage">
@@ -4243,8 +3905,360 @@
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'users' }" @click="setTab('users')">Users</button>
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'sso' }" @click="setTab('sso')">SSO</button>
         <button class="tab" :class="{ active: tab === 'links' }" @click="setTab('links')">Links</button>
+        <button class="tab" :class="{ active: tab === 'integrations' }" @click="setTab('integrations')">Integrations</button>
+        <button class="tab" :class="{ active: tab === 'git-sources' }" @click="setTab('git-sources')">Git sources</button>
         <button class="tab" :class="{ active: tab === 'account' }" @click="setTab('account')">Account</button>
       </div>
+
+      <!-- Integrations Tab (was the Siblings page; /siblings opens it):
+           Teploy products found on your servers, and the Observe connect flow. -->
+      <template x-if="tab === 'integrations'">
+        <div x-data="siblingsPage">
+
+          <div class="page-header">
+            <div>
+              <h2 class="subpage-title">Integrations</h2>
+              <p class="subtitle">Teploy products running on your servers, found by their labels and probed on their published ports. Nothing is connected until you confirm it.</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-sm" @click="load()">Refresh</button>
+              <button class="btn btn-sm btn-primary" @click="rescan()" :disabled="scanBusy || !cliSupported" x-text="scanBusy ? 'Scanning…' : 'Rescan now'" title="Reads each server's containers and probes the candidates — quick, read-only"></button>
+            </div>
+          </div>
+
+          <template x-if="loading">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
+
+          <template x-if="!loading && loadFailed && !showingStale">
+            <div role="alert" class="empty-state"><p x-text="loadError"></p><button class="btn btn-sm" @click="load()">Retry</button></div>
+          </template>
+
+          <template x-if="showingStale">
+            <div role="status" class="stale-banner" x-text="'Showing the last discovery — the refresh failed: ' + loadError"></div>
+          </template>
+
+          <template x-if="!loading && !cliSupported">
+            <div role="status" class="stale-banner" x-text="note"></div>
+          </template>
+
+          <template x-if="sweepError">
+            <div role="status" class="stale-banner" x-text="'The last sweep did not finish: ' + sweepError"></div>
+          </template>
+
+          <!-- Probing consent: internal addresses (tailnet, LAN) are probed only
+               when an admin allows it. The A13 rule applies: an editor cannot
+               flip this. -->
+          <template x-if="!loading && cliSupported">
+            <div class="info-banner" role="status">
+              <span x-text="allowInternal
+                ? 'Probing reaches internal addresses (tailnet/LAN) — matches where siblings usually run.'
+                : 'Internal addresses (tailnet/LAN) are not probed — candidates there read “Blocked (internal)” until an admin allows it.'"></span>
+              <button class="btn btn-sm" @click="setAllowInternal(!allowInternal)" :disabled="settingsBusy"
+                      x-text="settingsBusy ? 'Saving…' : (allowInternal ? 'Stop probing internal' : 'Allow probing internal')"></button>
+            </div>
+          </template>
+
+          <template x-if="!loading && !loadFailed && servers.length === 0">
+            <div class="empty-state"><p x-text="cliSupported ? 'No servers configured, or the first sweep has not run yet.' : 'Sibling discovery needs teploy ' + minCLI + ' on the dashboard host.'"></p></div>
+          </template>
+
+          <!-- Observe connect: the one sibling with a deep flow. The owner
+               confirms the instance identity from the discovery doc BEFORE any
+               token moves; dash re-checks it on every later write. -->
+          <template x-if="!loading && cliSupported">
+            <div style="border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 16px; margin-bottom: 16px;">
+              <template x-if="observeConnected && observeConnection">
+                <div>
+                  <h2 class="section-title" style="margin-bottom: 8px;">Observe <span class="status-dot dot green"></span> connected</h2>
+                  <p style="margin: 0 0 8px 0;">
+                    <span x-text="observeConnection.base_url"></span>
+                    <span class="text-muted"> — instance <span class="mono" x-text="observeConnection.instance_id.slice(0, 8) + '…'"></span>,
+                      <span x-text="observeConnection.version || 'version unknown'"></span>,
+                      token <span class="mono" x-text="observeConnection.token_fp"></span></span>
+                  </p>
+                  <p class="text-muted" style="margin: 0 0 8px 0; font-size: 13px;">
+                    Per-app telemetry is opt-in, one app at a time, always shown as a plan first.
+                    <a x-show="observeConnection.dashboard_url" :href="observeConnection.dashboard_url" target="_blank" rel="noopener">Open Observe</a>
+                  </p>
+
+                  <!-- Opted-in apps -->
+                  <template x-if="telemetryApps.length > 0">
+                    <div style="margin: 12px 0;">
+                      <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Apps sending telemetry</h3>
+                      <table style="width: 100%; font-size: 13px;">
+                        <tbody>
+                          <template x-for="entry in telemetryApps" :key="entry.server + '/' + entry.app">
+                            <tr>
+                              <td style="padding: 4px 8px 4px 0;"><span x-text="entry.app"></span> <span class="text-muted" x-text="'on ' + entry.server"></span></td>
+                              <td class="text-muted" style="padding: 4px 8px 4px 0;" x-text="envDisplay(entry)"></td>
+                              <td style="padding: 4px 0; text-align: right;">
+                                <button type="button" class="btn btn-sm" @click="openDisable(entry)" :disabled="disableBusy">Stop telemetry</button>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+
+                  <!-- Opt-in: plan → approve → apply -->
+                  <form @submit.prevent="planTelemetry()" style="margin-top: 8px; display: flex; gap: 8px; align-items: end; flex-wrap: wrap;">
+                    <div class="field">
+                      <label for="telemetry-server">Server</label>
+                      <input id="telemetry-server" class="form-input" style="min-width: 140px;" x-model="telemetryForm.server" list="telemetry-servers" autocomplete="off" :disabled="telemetryBusy">
+                      <datalist id="telemetry-servers">
+                        <template x-for="a in [...new Set(fleetApps.map(a => a.server))]" :key="a"><option :value="a"></option></template>
+                      </datalist>
+                    </div>
+                    <div class="field">
+                      <label for="telemetry-app">App</label>
+                      <input id="telemetry-app" class="form-input" style="min-width: 180px;" x-model="telemetryForm.app" list="telemetry-apps" autocomplete="off" :disabled="telemetryBusy">
+                      <datalist id="telemetry-apps">
+                        <template x-for="a in appSuggestions" :key="a.server + '/' + a.app"><option :value="a.app"></option></template>
+                      </datalist>
+                    </div>
+                    <button type="submit" class="btn btn-sm" :disabled="telemetryBusy || !telemetryForm.server || !telemetryForm.app"
+                            x-text="telemetryBusy ? 'Planning…' : 'Plan telemetry'"></button>
+                    <button type="button" class="btn btn-sm" @click="disconnectObserve()" :disabled="connectBusy" x-text="connectBusy ? 'Working…' : 'Disconnect'"></button>
+                  </form>
+
+                  <template x-if="telemetryPlanError">
+                    <p role="alert" style="color: var(--danger); margin: 8px 0; font-size: 13px;" x-text="telemetryPlanError"></p>
+                  </template>
+
+                  <!-- The plan: exactly what apply will do. Approving this is
+                       consenting to these writes and the redeploy. -->
+                  <template x-if="telemetryPlan">
+                    <div role="dialog" aria-label="Telemetry plan" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-top: 10px;">
+                      <h3 class="section-title" style="font-size: 14px; margin-bottom: 6px;">Plan — <span x-text="telemetryPlan.app"></span> <span class="text-muted" x-text="'on ' + telemetryPlan.server"></span></h3>
+                      <ol style="margin: 0 0 8px 0; padding-left: 20px; font-size: 13px;">
+                        <li x-text="telemetryPlan.site_action"></li>
+                        <li>mint the telemetry key “<span class="mono" x-text="telemetryPlan.key_label"></span>” for that site</li>
+                        <li>write these environment variables and secrets:
+                          <table style="width: 100%; font-size: 12px; margin-top: 4px;">
+                            <tbody>
+                              <template x-for="w in telemetryPlan.env" :key="w.key">
+                                <tr>
+                                  <td class="mono" style="padding: 1px 8px 1px 0;" x-text="w.key"></td>
+                                  <td class="mono" style="padding: 1px 0;" :class="w.secret ? 'text-muted' : ''" x-text="w.value"></td>
+                                </tr>
+                              </template>
+                            </tbody>
+                          </table>
+                        </li>
+                        <li x-text="telemetryPlan.redeploy"></li>
+                      </ol>
+                      <p class="text-muted" style="margin: 0 0 8px 0; font-size: 12px;" x-show="telemetryPlan.rotation"
+                         x-text="telemetryPlan.rotation ? 'This replaces the previous opt-in (key ' + telemetryPlan.rotation.key_id + ') — a NEW key is minted; revoke the old one in Observe if nothing else uses it.' : ''"></p>
+                      <div style="display: flex; gap: 8px;">
+                        <button type="button" class="btn btn-sm btn-primary" @click="applyTelemetry()" :disabled="telemetryBusy"
+                                x-text="telemetryBusy ? 'Applying…' : 'Approve and apply'"></button>
+                        <button type="button" class="btn btn-sm" @click="telemetryPlan = null" :disabled="telemetryBusy">Cancel</button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <template x-if="telemetryApplied">
+                    <div role="status" class="stale-banner" style="margin-top: 8px;">
+                      <span x-text="telemetryApplied.note"></span>
+                      <a :href="'/operations/' + (telemetryApplied.operation ? telemetryApplied.operation.id : '')">follow the redeploy</a>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!observeConnected">
+                <form @submit.prevent="previewDoc ? connectObserve() : previewObserve()">
+                  <h2 class="section-title" style="margin-bottom: 8px;">Connect Observe</h2>
+                  <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
+                    Create a service token in Observe, then paste it here. <a x-show="observeTokenURL()" :href="observeTokenURL()" target="_blank" rel="noopener">Open the filled-in form in Observe</a><span x-show="!observeTokenURL()">Enter the address below for a link to the filled-in form, or use Settings → Service Tokens with scopes <span class="mono">sites:create</span> and <span class="mono">keys:mint</span>.</span>
+                    Dash never sees an Observe admin login, and nothing is written until you confirm this instance's identity.
+                    <span x-show="observeHintData && observeHintData.available">A confirmed Observe was found on your servers — its address is prefilled.</span>
+                  </p>
+                  <div style="display: grid; grid-template-columns: 2fr 2fr auto; gap: 8px; align-items: end;">
+                    <div class="field">
+                      <label for="observe-base">Observe address</label>
+                      <input id="observe-base" class="form-input" x-model="connectForm.base_url" placeholder="http://observe.tailnet-host:3000" autocomplete="off" :disabled="connectBusy">
+                    </div>
+                    <div class="field">
+                      <label for="observe-token">Service token</label>
+                      <input id="observe-token" class="form-input" type="password" x-model="connectForm.token" placeholder="obs_svc_…" autocomplete="off" :disabled="connectBusy || !previewDoc">
+                    </div>
+                    <div class="field" style="padding-bottom: 6px;">
+                      <label style="display: flex; gap: 6px; align-items: center; font-weight: 400;">
+                        <input type="checkbox" x-model="connectForm.allow_internal"> Allow an internal address
+                      </label>
+                    </div>
+                  </div>
+                  <template x-if="previewError">
+                    <p role="alert" class="text-muted" style="color: var(--danger); margin: 8px 0;" x-text="previewError"></p>
+                  </template>
+                  <template x-if="previewDoc">
+                    <div role="status" class="stale-banner" style="margin: 8px 0;">
+                      <p style="margin: 0;">Discovery doc: <strong x-text="previewDoc.product"></strong>
+                        <span x-text="previewDoc.version || ''"></span>,
+                        instance <span class="mono" x-text="previewDoc.instance_id.slice(0, 8) + '…'"></span>
+                        (<span class="mono" x-text="previewDoc.instance_id"></span>)</p>
+                      <p style="margin: 4px 0 0 0;" class="text-muted"
+                         x-text="'dashboard ' + (previewDoc.dashboard_url || 'not published') + ' · ingest ' + (previewDoc.ingest_url || 'not published')"></p>
+                      <p style="margin: 4px 0 0 0;">Confirm this is the Observe you mean, then paste the token and connect.</p>
+                    </div>
+                  </template>
+                  <div style="margin-top: 8px; display: flex; gap: 8px;">
+                    <button type="button" class="btn btn-sm" @click="previewObserve()" :disabled="connectBusy || !connectForm.base_url"
+                            x-text="connectBusy ? 'Reading…' : (previewDoc ? 'Re-read' : 'Preview the instance')"></button>
+                    <button type="submit" class="btn btn-sm btn-primary" x-show="previewDoc" :disabled="connectBusy || !connectForm.token"
+                            x-text="connectBusy ? 'Connecting…' : 'Connect this instance'"></button>
+                  </div>
+                </form>
+              </template>
+            </div>
+          </template>
+
+          <!-- Candidates: one row per (server, product) with the probe verdict.
+               Honest unknowns stay unknown — nothing renders as “no siblings”
+               when a server was only partly read. -->
+          <template x-if="candidates.length > 0">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Probe</th>
+                    <th>Where</th>
+                    <th>Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="c in candidates" :key="c.server + '/' + c.product">
+                    <tr>
+                      <td>
+                        <strong x-text="c.product"></strong>
+                        <span class="text-muted" x-show="c.label_version" x-text="c.label_version"></span>
+                        <div class="text-muted" x-show="!c.recognized" title="The CLI did not recognise this product label; it is shown as reported">unrecognised label</div>
+                      </td>
+                      <td>
+                        <span class="status-dot dot" :class="probeClass(c.state)"></span>
+                        <span x-text="probeLabel(c.state)"></span>
+                        <div class="text-muted" x-text="'probed ' + ageLabel(c.age_seconds)"></div>
+                      </td>
+                      <td>
+                        <div x-text="c.server"></div>
+                        <div class="text-muted mono" style="font-size: 12px;" x-text="(c.addresses || []).join(', ') || 'no published port'"></div>
+                        <div class="text-muted" x-show="c.container_state && c.container_state !== 'running'" x-text="'container ' + c.container_state"></div>
+                      </td>
+                      <td>
+                        <div x-text="probeHint(c)"></div>
+                        <div class="text-muted mono" style="font-size: 12px;" x-show="c.doc && c.doc.dashboard_url"><a :href="c.doc ? c.doc.dashboard_url : null" target="_blank" rel="noopener" x-text="c.doc ? c.doc.dashboard_url : ''"></a></div>
+                        <div class="text-muted" x-show="c.base_url && (!c.doc || !c.doc.dashboard_url)"><a :href="c.base_url" target="_blank" rel="noopener" x-text="c.base_url"></a></div>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+
+          <!-- Stopping telemetry: the dialog names exactly what goes, and that
+               the site and key live on in Observe until revoked there. -->
+          <div class="dialog-overlay" x-show="confirmDisable" @click.self="confirmDisable = null" @keydown.escape.window="confirmDisable && (confirmDisable = null)" x-cloak>
+            <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="observe-disable-title" tabindex="-1" x-effect="confirmDisable && $nextTick(() => $el.focus())">
+              <h2 id="observe-disable-title">Stop telemetry for <span x-text="confirmDisable ? confirmDisable.app : ''"></span>?</h2>
+              <template x-if="confirmDisable">
+                <div>
+                  <p>These environment variables and secrets come off the app:</p>
+                  <p class="mono text-muted" style="font-size: 12px;" x-text="envDisplay(confirmDisable)"></p>
+                  <p class="text-muted">A redeploy is queued so the app restarts without them. The site and the telemetry key stay in Observe — revoke the key there if you want it dead.</p>
+                  <div class="dialog-actions">
+                    <button type="button" class="btn" @click="confirmDisable = null">Keep it</button>
+                    <button type="button" class="btn btn-danger" @click="disableTelemetry()" :disabled="disableBusy" x-text="disableBusy ? 'Stopping…' : 'Stop telemetry'"></button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Per-server read state: which reports are complete, partial or
+               missing, with their age. -->
+          <template x-if="servers.length > 0">
+            <div>
+              <h2 class="section-title" style="margin-top: 24px;">Server reads</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Server</th>
+                      <th>Read</th>
+                      <th>Last report</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in servers" :key="row.server">
+                      <tr>
+                        <td x-text="row.server"></td>
+                        <td>
+                          <span class="status-dot dot" :class="serverStateClass(row.state)"></span>
+                          <span x-text="serverStateLabel(row.state)"></span>
+                          <div class="text-muted" x-show="row.error" x-text="row.error"></div>
+                        </td>
+                        <td>
+                          <div x-text="ageLabel(row.age_seconds)"></div>
+                          <div class="text-muted" x-show="!row.checked_at">never completed</div>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Git sources Tab (was the Sources page; /sources opens it). -->
+      <template x-if="tab === 'git-sources'">
+        <div x-data="sourcesPage">
+          <div class="page-header">
+            <div>
+              <h2 class="subpage-title">Git sources</h2>
+              <p class="subtitle">Register a repository so dash can receive and verify its webhook pushes. Provider names select credentials configured by the operator.</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn" @click="load()" :disabled="loading">Refresh</button>
+            </div>
+          </div>
+          <p role="alert" class="stale-banner" x-show="loadError" x-text="loadError"></p>
+          <p role="alert" class="stale-banner" x-show="error" x-text="error"></p>
+          <p class="text-muted" x-show="!loading && !loadError && sources.length === 0">No sources configured.</p>
+          <template x-for="src in sources" :key="src.id">
+            <div class="card source-card">
+              <button class="btn" @click="select(src.id)" :disabled="busy" x-text="src.display_name || src.clone_url"></button>
+              <span x-text="src.credential_verdict"></span><span x-text="src.degrade_reason || ''"></span>
+            </div>
+          </template>
+          <form @submit.prevent="create()" class="card source-form">
+            <h2 class="section-title">Add repository</h2>
+            <label class="field">Forge <select x-model="form.forge"><option>github</option><option>gitlab</option><option>forgejo</option><option>gitea</option><option>generic</option></select></label>
+            <label class="field">Clone URL <input type="url" required x-model="form.clone_url"></label>
+            <label class="field">Watched branch <input x-model="form.default_branch"></label>
+            <label class="field">Provider name <input required x-model="form.credential_ref" autocomplete="off"></label>
+            <label class="field">Display name <input x-model="form.display_name"></label>
+            <button type="submit" class="btn btn-primary" :disabled="busy">Add source</button>
+          </form>
+          <template x-if="selected">
+            <section class="card source-detail">
+              <h2 x-text="selected.display_name || selected.clone_url"></h2>
+              <p>Webhook URL: <code x-text="selected.webhook_url"></code></p>
+              <button class="btn btn-sm" @click="action('verify')" :disabled="busy">Verify credentials</button>
+              <button class="btn btn-sm" @click="action('rotate-secret')" :disabled="busy">Rotate webhook secret</button>
+              <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button class="btn btn-sm" @click="webhookSecret = ''">Hide</button></div>
+              <h3>Recent deliveries</h3>
+              <template x-for="delivery in selected.deliveries || []" :key="delivery.id + delivery.received_at"><p><code x-text="delivery.commit"></code> <span x-text="delivery.disposition"></span> <span x-text="delivery.reason"></span></p></template>
+              <p class="card-meta">Pushes to a repository an app builds from wake that app's server-side poll (which decides what deploys); every authenticated push is recorded here.</p>
+            </section>
+          </template>
+        </div>
+      </template>
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>

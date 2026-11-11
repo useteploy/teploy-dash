@@ -27,9 +27,16 @@ test('the /cleanup route renders the page and the nav names it',async()=>{
   const h=harness('/cleanup');h.stores.router.restore();
   assert.equal(h.stores.router.page,'cleanup');
   const html=h.readHTML();
-  assert.ok(html.includes(`x-if="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail'"`));
-  assert.ok(html.includes('>Cleanup</a>'));
-  assert.ok(html.includes('x-data="cleanupPage"'));
+  assert.ok(html.includes(`x-if="$store.router.page === 'cleanup'"`));
+  // Cleanup is a tab of the Servers section, and a server's report is the
+  // Cleanup tab of its server page (/cleanup/:server still opens it).
+  assert.ok(h.stores.router.hubTabs.some(([page, label]) => page === 'cleanup' && label === 'Cleanup'));
+  assert.equal(h.stores.router.section, 'servers');
+  assert.equal((html.match(/x-data="cleanupPage"/g) || []).length, 2, 'the list page and the server tab');
+  assert.ok(html.includes(`x-if="tab === 'cleanup'"`));
+  const d = harness('/cleanup/prod'); d.stores.router.restore();
+  assert.equal(d.stores.router.page, 'server-detail');
+  assert.deepEqual({ ...d.stores.router.params }, { name: 'prod', tab: 'cleanup' });
 });
 
 test('fleet rows are honest: partial, never and unreachable never read clean',async()=>{

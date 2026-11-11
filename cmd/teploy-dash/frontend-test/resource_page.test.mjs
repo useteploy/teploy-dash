@@ -120,7 +120,7 @@ alpineInitListeners.forEach((fn) => fn());
   // And the templates render both surfaces.
   const html = readFileSync(join(here, '../frontend/index.html'), 'utf8');
   const monStart = html.indexOf('Monitors Page');
-  const monEnd = html.indexOf('Restore Tests Page');
+  const monEnd = html.indexOf('Servers Page');
   const monSection = html.slice(monStart, monEnd);
   assert(monStart !== -1 && monEnd > monStart, 'monitors section not found');
   assert(monSection.includes('deliveryWarns(m.delivery)'), 'monitor list renders the delivery warning chip');

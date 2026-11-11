@@ -341,8 +341,60 @@ function routeTab(params, allowed, fallback) {
   return allowed.includes(t) ? t : fallback;
 }
 const APP_TABS = ['general', 'settings', 'repository', 'env', 'logs', 'deploys', 'releases', 'history', 'backups', 'kv'];
-const SERVER_TABS = ['overview', 'proxy'];
-const SETTINGS_TABS = ['servers', 'groups', 'notifications', 'registry', 'mcp', 'users', 'sso', 'links', 'account'];
+const SERVER_TABS = ['overview', 'proxy', 'cleanup'];
+const SETTINGS_TABS = ['servers', 'groups', 'notifications', 'registry', 'mcp', 'users', 'sso', 'links', 'integrations', 'git-sources', 'account'];
+const BACKUP_TABS = ['coverage', 'setup', 'restore-tests'];
+
+// Header destinations (2026-11 nav rework): Home, Apps, Servers, Monitoring,
+// Backups, Activity, then Settings. Every page belongs to one.
+const NAV_SECTIONS = {
+  'homepage': 'home',
+  'projects': 'apps', 'project-detail': 'apps', 'app-detail': 'apps', 'templates': 'apps',
+  'servers': 'servers', 'server-detail': 'servers', 'cleanup': 'servers',
+  'monitors': 'monitoring', 'monitor-detail': 'monitoring', 'domains': 'monitoring', 'alerts': 'monitoring',
+  'backups': 'backups',
+  'operations': 'activity', 'operation-detail': 'activity',
+  'settings': 'settings',
+};
+// Hub list pages that share a tab strip; each tab is its own page and URL.
+const HUB_APPS = [['projects', 'Apps'], ['templates', 'Templates']];
+const HUB_SERVERS = [['servers', 'Servers'], ['cleanup', 'Cleanup']];
+const HUB_MONITORING = [['monitors', 'Uptime'], ['domains', 'Domains'], ['alerts', 'Alerts']];
+const HUB_TABS = {
+  'projects': HUB_APPS, 'templates': HUB_APPS,
+  'servers': HUB_SERVERS, 'cleanup': HUB_SERVERS,
+  'monitors': HUB_MONITORING, 'domains': HUB_MONITORING, 'alerts': HUB_MONITORING,
+};
+
+// restoreTestRows merges the automatic (dash-owned, from /api/backups) and
+// hand-added (/api/restore-tests) restore tests into one list for the
+// Backups > Restore tests table.
+function restoreTestRows(automatic, manual) {
+  const rows = [];
+  for (const t of automatic || []) {
+    const last = t.last_run;
+    rows.push({
+      key: 'auto:' + t.id, auto: t, manual: null,
+      label: [t.server, t.app || t.accessory, t.database].filter(Boolean).join(' · '),
+      engine: t.engine || '',
+      addedBy: t.adopted ? 'Automatic (adopted)' : 'Automatic',
+      state: !last ? 'never' : last.skipped ? 'skipped' : last.ok ? 'ok' : 'failed',
+      lastText: !last ? 'not yet' : last.skipped ? last.skipped : last.ok ? 'passed' : 'failed',
+    });
+  }
+  for (const t of manual || []) {
+    const ran = t.last_run_at && !String(t.last_run_at).startsWith('0001');
+    rows.push({
+      key: 'manual:' + t.id, auto: null, manual: t,
+      label: [t.server, t.app + '/' + t.accessory].join(' · '),
+      engine: '',
+      addedBy: 'By hand',
+      state: !ran ? 'never' : t.last_ok ? 'ok' : 'failed',
+      lastText: !ran ? 'never run' : t.last_ok ? 'passed' : 'failed',
+    });
+  }
+  return rows;
+}
 
 // ── Alpine.js App ──
 document.addEventListener('alpine:init', () => {
@@ -366,13 +418,10 @@ document.addEventListener('alpine:init', () => {
     { page: 'monitors', path: '/monitors' },
     { page: 'monitor-detail', path: '/monitors/:id' },
     { page: 'domains', path: '/domains' },
+    { page: 'alerts', path: '/alerts' },
     { page: 'cleanup', path: '/cleanup' },
-    { page: 'cleanup-detail', path: '/cleanup/:server' },
-    { page: 'siblings', path: '/siblings' },
     { page: 'backups', path: '/backups' },
-    { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
-    { page: 'sources', path: '/sources' },
     { page: 'servers', path: '/servers' },
     { page: 'server-detail', path: '/servers/:name' },
     { page: 'operations', path: '/operations' },
@@ -385,7 +434,20 @@ document.addEventListener('alpine:init', () => {
     { page: 'server-detail', path: '/fleet/:name' },
     { page: 'operations', path: '/activity' },
     { page: 'operation-detail', path: '/activity/:id' },
+    // Pages that became tabs (2026-11 nav rework): the old URLs open the
+    // page and tab they moved to. `params` are fixed by the route.
+    { page: 'server-detail', path: '/cleanup/:name', params: { tab: 'cleanup' } },
+    { page: 'settings', path: '/siblings', params: { tab: 'integrations' } },
+    { page: 'settings', path: '/sources', params: { tab: 'git-sources' } },
+    { page: 'backups', path: '/restore-tests', params: { tab: 'restore-tests' } },
   ];
+  // Page names from before the rework, still accepted by navigate().
+  const MOVED_PAGES = {
+    'cleanup-detail': (p) => ['server-detail', { name: p.server || p.name, tab: 'cleanup' }],
+    'siblings': (p) => ['settings', { ...p, tab: 'integrations' }],
+    'sources': (p) => ['settings', { ...p, tab: 'git-sources' }],
+    'restore-tests': (p) => ['backups', { ...p, tab: 'restore-tests' }],
+  };
 
   function routeToURL(page, params) {
     const route = ROUTES.find(r => r.page === page);
@@ -425,6 +487,7 @@ document.addEventListener('alpine:init', () => {
         else if (want[i] !== have[i]) { ok = false; break; }
       }
       if (!ok) continue;
+      Object.assign(params, route.params || {});
       // Path-derived identifiers are authoritative: a conflicting query
       // parameter must not retarget the page onto another resource.
       for (const [k, v] of new URLSearchParams(search)) {
@@ -438,7 +501,13 @@ document.addEventListener('alpine:init', () => {
   Alpine.store('router', {
     page: 'homepage',
     params: {},
+    // The header destination the current page belongs to.
+    get section() { return NAV_SECTIONS[this.page] || ''; },
+    // The page-level tabs (each its own URL) shown above a hub's list pages.
+    get hubTabs() { return HUB_TABS[this.page] || null; },
+    url(page, params = {}) { return routeToURL(page, params); },
     navigate(page, params = {}) {
+      if (MOVED_PAGES[page]) [page, params] = MOVED_PAGES[page](params);
       this.page = page;
       this.params = params;
       history.pushState({ page, params }, '', routeToURL(page, params));
@@ -2380,7 +2449,7 @@ document.addEventListener('alpine:init', () => {
     formatWhen(iso) { return iso ? formatObservedAt(iso) : ''; },
 
     openRestoreTests() {
-      Alpine.store('router').navigate('restore-tests');
+      Alpine.store('router').navigate('backups', { tab: 'restore-tests' });
     },
 
     accessoryName(containerName) {
@@ -2901,6 +2970,10 @@ document.addEventListener('alpine:init', () => {
         if (!admin && ['servers', 'notifications', 'registry', 'mcp', 'users', 'sso'].includes(this.tab)) {
           this.setTab('groups');
         }
+        // Servers > Add server lands here with the add form focused.
+        if (admin && this.tab === 'servers' && Alpine.store('router').params.add === 'server') {
+          setTimeout(() => { const el = document.getElementById('new-server-name'); if (el) el.focus(); }, 0);
+        }
       } catch (e) {
         showToast(e.message, 'error');
       }
@@ -3217,6 +3290,7 @@ document.addEventListener('alpine:init', () => {
 
   // ── Templates Page ──
   Alpine.data('sourcesPage', () => withAsyncLoad({
+    loading: true,
     sources: [], selected: null, error: '', busy: false,
     generation: 0, listGeneration: 0, webhookSecret: '', destroyed: false,
     form: {forge: 'github', clone_url: '', default_branch: '', credential_ref: '', display_name: ''},
@@ -4279,6 +4353,7 @@ document.addEventListener('alpine:init', () => {
   // policy). Reads the slow sweep's cached view; Refresh asks for a new one.
   Alpine.data('backupsPage', () => withAsyncLoad({
     ...backupSetupComponent(),
+    tab: 'coverage',
     view: null,
     loading: true,
     refreshInterval: null,
@@ -4309,13 +4384,28 @@ document.addEventListener('alpine:init', () => {
     overrideFor: null,
     override: { cron: '0 3 * * *', keep_last: 0, max_age_days: 0 },
 
+    setTab(t) {
+      this.tab = t;
+      if (Alpine.store('router').page === 'backups') Alpine.store('router').setTab(t, 'coverage');
+    },
+    // The dash-owned tests from /api/backups, for the merged Restore tests table.
+    automaticTests() { return (this.view && this.view.tests) || []; },
+
     async init() {
+      this.tab = routeTab(Alpine.store('router').params, BACKUP_TABS, 'coverage');
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'backups') return;
+        const t = routeTab(r.params, BACKUP_TABS, 'coverage');
+        if (t !== this.tab) this.tab = t;
+      });
       await this.load();
       this.refreshInterval = setInterval(() => this.load(), 60000);
     },
 
     destroy() {
       clearInterval(this.refreshInterval);
+      if (this.tabEffect) Alpine.release(this.tabEffect);
       this._loadGeneration++;
     },
 
@@ -4547,7 +4637,8 @@ document.addEventListener('alpine:init', () => {
     detailId: '',
     _alive: false,
 
-    routeIdentity() { const r = Alpine.store('router'); return r.page === 'cleanup-detail' ? (r.params.server || '') : ''; },
+    // A server's report renders in the Cleanup tab of its server page.
+    routeIdentity() { const r = Alpine.store('router'); return r.page === 'server-detail' && r.params.tab === 'cleanup' ? (r.params.name || '') : ''; },
 
     async init() {
       this._alive = true;
@@ -4609,7 +4700,7 @@ document.addEventListener('alpine:init', () => {
       await this.load();
     },
 
-    openServer(server) { Alpine.store('router').navigate('cleanup-detail', { server }); },
+    openServer(server) { Alpine.store('router').navigate('server-detail', { name: server, tab: 'cleanup' }); },
 
     async runAudit(server) {
       this.auditBusy = server;
