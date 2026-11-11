@@ -230,6 +230,38 @@ func TestCleanupAuditRunHarvestsEnvelope(t *testing.T) {
 	}
 }
 
+// The fleet view carries each server's audited root-disk line (no
+// attribution), and leaves it out when the audit read no disk.
+func TestCleanupFleetRowCarriesDisk(t *testing.T) {
+	env := strings.Replace(auditEnvelopeJSON("ok", findingStaleRoute), `"disk": null`,
+		`"disk": {"path": "/", "available_bytes": 21000000000, "used_percent": 74, "attribution": [{"name": "docker images", "size_bytes": 31000000000}]}`, 1)
+	cs := newCleanupServer(t, env)
+	if op := runAudit(t, cs, "prod"); op.Status != operation.StatusSucceeded {
+		t.Fatalf("audit operation = %s (%s)", op.Status, op.Error)
+	}
+	waitCleanupRecord(t, cs, func(rec *cleanupServerRecord) bool { return rec.Envelope != nil })
+	_, fleet := call(t, cs.Server.handleCleanup, "GET", "/api/cleanup", "")
+	row := fleet["data"].(map[string]any)["servers"].([]any)[0].(map[string]any)
+	disk, ok := row["disk"].(map[string]any)
+	if !ok {
+		t.Fatalf("row has no disk: %v", row)
+	}
+	if disk["path"] != "/" || disk["used_percent"] != float64(74) || disk["available_bytes"] != float64(21000000000) {
+		t.Fatalf("disk = %v", disk)
+	}
+	if _, leaked := disk["attribution"]; leaked {
+		t.Fatalf("the fleet row must not carry the attribution: %v", disk)
+	}
+
+	bare := newCleanupServer(t, auditEnvelopeJSON("ok", findingStaleRoute))
+	runAudit(t, bare, "prod")
+	waitCleanupRecord(t, bare, func(rec *cleanupServerRecord) bool { return rec.Envelope != nil })
+	_, fleet = call(t, bare.Server.handleCleanup, "GET", "/api/cleanup", "")
+	if _, has := fleet["data"].(map[string]any)["servers"].([]any)[0].(map[string]any)["disk"]; has {
+		t.Fatal("an audit without a disk reading must not invent one")
+	}
+}
+
 // A failed re-audit keeps the last report and names the failure — a broken
 // SSH path never clears the page.
 func TestCleanupAuditFailureKeepsLastReport(t *testing.T) {

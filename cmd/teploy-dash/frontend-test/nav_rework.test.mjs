@@ -63,5 +63,16 @@ assert(/\.field input\[type="checkbox"\][^{]*\{[^}]*width: auto/.test(css), 'fie
   assert(html.includes('<h1 class="page-title">Uptime</h1>'), 'monitors page title matches its tab');
 }
 
+// Home is the status page: needs attention, running now, servers, then the
+// shortcut grid; the protect banner is a row of the status, not a banner.
+{
+  const home = html.slice(html.indexOf("x-data=\"homepagePage\""), html.indexOf('Projects Page'));
+  for (const id of ['home-attention-title', 'home-running-title', 'home-servers-title']) assert(home.includes(`id="${id}"`), `home section ${id}`);
+  assert(home.includes('x-data="homeStatus"') && home.includes('>Shortcuts</h2>'), 'home keeps the shortcut grid below the status');
+  assert(home.indexOf('homeStatus') < home.indexOf('>Shortcuts</h2>'), 'status comes before shortcuts');
+  assert(!html.includes('x-data="protectBanner"'), 'the protect banner is a status row now');
+  assert(home.includes('unchecked()') && home.includes('Nothing needs attention'), 'a failed source is named, never read as nothing wrong');
+}
+
 if (failures.length) { console.error(`FAIL (${failures.length}):`); failures.forEach((f) => console.error('  - ' + f)); process.exit(1); }
 console.log('nav_rework.test: all assertions passed');

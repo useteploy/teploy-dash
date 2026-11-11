@@ -469,7 +469,16 @@ type cleanupFleetRow struct {
 	Error         string                `json:"error,omitempty"`
 	ChecksUnknown int                   `json:"checks_unknown"`
 	Counts        cleanupCounts         `json:"counts"`
+	Disk          *cleanupDiskView      `json:"disk,omitempty"`
 	LiveAudit     *cleanupLiveAuditView `json:"live_audit,omitempty"`
+}
+
+// cleanupDiskView is the root-disk line of a server's last audit, so the
+// Home and Servers pages can show disk use without opening each report.
+type cleanupDiskView struct {
+	Path           string `json:"path"`
+	AvailableBytes uint64 `json:"available_bytes"`
+	UsedPercent    int    `json:"used_percent"`
 }
 
 // cleanupStaleAfter: a report older than this reads stale, not current. The
@@ -558,6 +567,9 @@ func (s *Server) cleanupFleetView(ctx context.Context, now time.Time) map[string
 				}
 				row.ChecksUnknown = countUnknownChecks(env)
 				row.Counts, _ = cleanupFleetCounts(env, c.snap.Dismissals[name])
+				if d := env.Disk; d != nil {
+					row.Disk = &cleanupDiskView{Path: d.Path, AvailableBytes: d.AvailableBytes, UsedPercent: d.UsedPercent}
+				}
 			}
 		}
 		rows = append(rows, row)

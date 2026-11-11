@@ -143,7 +143,114 @@
   <template x-if="$store.router.page === 'homepage'">
     <div x-data="homepagePage">
       <div class="page-header">
-        <h1 class="page-title">Home</h1>
+        <div>
+          <h1 class="page-title">Home</h1>
+          <p class="subtitle">What needs you, what is running, and your servers.</p>
+        </div>
+      </div>
+
+      <!-- Status: each part loads on its own; an unchecked source is named,
+           never read as "nothing wrong". -->
+      <div x-data="homeStatus" class="home-status">
+        <template x-for="src in stale()" :key="src.key">
+          <div role="status" class="stale-banner" x-text="'Showing ' + src.label + ' from ' + formatObservedAt(src.loadedAt) + ' — refresh failed: ' + src.error"></div>
+        </template>
+
+        <section class="home-section" aria-labelledby="home-attention-title">
+          <div class="home-section-head">
+            <h2 id="home-attention-title" class="section-title">Needs attention</h2>
+            <span class="text-muted home-asof" x-show="oldestObservation()" :title="'Oldest observation: ' + formatObservedAt(oldestObservation())" x-text="'checked ' + relTime(oldestObservation())"></span>
+          </div>
+          <div class="status-list">
+            <template x-for="item in attention()" :key="item.key">
+              <a class="status-row" :href="item.href" @click="go(item.href, $event)">
+                <span class="dot" :class="item.level === 'bad' ? 'red' : 'yellow'"></span>
+                <span class="status-row-main">
+                  <span class="status-row-title" x-text="item.title"></span>
+                  <span class="status-row-detail" x-show="item.detail" x-text="item.detail"></span>
+                </span>
+                <span class="status-row-meta" x-show="item.at" :title="formatObservedAt(item.at)" x-text="(item.verb ? item.verb + ' ' : '') + relTime(item.at)"></span>
+                <span class="status-row-action" x-show="item.action" x-text="item.action"></span>
+              </a>
+            </template>
+            <template x-for="src in unchecked()" :key="'unchecked:' + src.key">
+              <div class="status-row status-row-static" role="alert">
+                <span class="dot gray"></span>
+                <span class="status-row-main">
+                  <span class="status-row-title" x-text="'Could not check ' + src.label"></span>
+                  <span class="status-row-detail" x-text="src.error"></span>
+                </span>
+                <button class="btn btn-sm" @click="loadOne(src.key)">Retry</button>
+              </div>
+            </template>
+            <template x-if="attention().length === 0 && unchecked().length === 0">
+              <div class="status-row status-row-static status-row-ok">
+                <span class="dot" :class="anyLoading() ? 'gray' : 'green'"></span>
+                <span class="status-row-main">
+                  <span class="status-row-title" x-text="anyLoading() ? 'Checking…' : 'Nothing needs attention'"></span>
+                  <span class="status-row-detail" x-show="!anyLoading() && oldestObservation()" :title="formatObservedAt(oldestObservation())" x-text="'As of ' + relTime(oldestObservation()) + ' (the oldest observation)'"></span>
+                </span>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="home-section" aria-labelledby="home-running-title">
+          <div class="home-section-head">
+            <h2 id="home-running-title" class="section-title">Running now</h2>
+            <a href="/operations" class="home-more" @click="go('/operations', $event)">Activity</a>
+          </div>
+          <div class="status-list">
+            <template x-for="op in running()" :key="op.id">
+              <a class="status-row" :href="'/operations/' + encodeURIComponent(op.id)" @click="go('/operations/' + encodeURIComponent(op.id), $event)">
+                <span class="dot blue pulse"></span>
+                <span class="status-row-main">
+                  <span class="status-row-title" x-text="((op.request && op.request.kind) || 'operation') + ' ' + (op.target || '')"></span>
+                  <span class="status-row-detail" x-text="op.status.replace('_', ' ') + ' — open the live log'"></span>
+                </span>
+                <span class="status-row-meta" :title="formatObservedAt(op.started_at || op.created_at)" x-text="'started ' + relTime(op.started_at || op.created_at)"></span>
+              </a>
+            </template>
+            <template x-if="running().length === 0">
+              <div class="status-row status-row-static">
+                <span class="status-row-main"><span class="status-row-detail" x-text="sources.operations.loading ? 'Checking…' : (sources.operations.error && !sources.operations.data ? 'Operations could not be read.' : 'Nothing running.')"></span></span>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="home-section" aria-labelledby="home-servers-title">
+          <div class="home-section-head">
+            <h2 id="home-servers-title" class="section-title">Servers</h2>
+            <a href="/servers" class="home-more" @click="go('/servers', $event)">All servers</a>
+          </div>
+          <div class="status-list">
+            <template x-for="sv in servers()" :key="sv.name">
+              <a class="status-row" :href="'/servers/' + encodeURIComponent(sv.name)" @click="go('/servers/' + encodeURIComponent(sv.name), $event)">
+                <span class="dot" :class="sv.error ? 'red' : (sv.freshness === 'fresh' ? 'green' : 'gray')"></span>
+                <span class="status-row-main">
+                  <span class="status-row-title" x-text="sv.name"></span>
+                  <span class="status-row-detail" x-text="sv.error ? 'unreachable' : (sv.freshness === 'fresh' ? 'reachable' : 'not read recently')"></span>
+                </span>
+                <span class="status-row-facts">
+                  <span x-text="sv.apps + ' app' + (sv.apps === 1 ? '' : 's')"></span>
+                  <span x-show="sv.audit && sv.audit.disk" :class="{ 'text-warn': sv.audit && sv.audit.disk && sv.audit.disk.used_percent >= 85 }" x-text="sv.audit && sv.audit.disk ? 'disk ' + sv.audit.disk.used_percent + '%' : ''"></span>
+                  <span x-show="!(sv.audit && sv.audit.disk)" class="text-muted" title="Disk use comes from the server's last cleanup audit">disk —</span>
+                </span>
+              </a>
+            </template>
+            <template x-if="servers().length === 0">
+              <div class="status-row status-row-static">
+                <span class="status-row-main"><span class="status-row-detail" x-text="sources.fleet.loading ? 'Checking…' : (sources.fleet.error && !sources.fleet.data ? 'Servers could not be read.' : 'No servers yet — add one in Settings.')"></span></span>
+              </div>
+            </template>
+          </div>
+        </section>
+      </div>
+
+      <!-- Shortcuts: the link grid (add, edit, drag to reorder). -->
+      <div class="home-section-head home-shortcuts-head">
+        <h2 class="section-title">Shortcuts</h2>
         <div style="display:flex;gap:8px;align-items:center;">
           <template x-if="editing">
             <button class="btn btn-primary btn-sm" @click="openAdd()">+ Add</button>
@@ -151,15 +258,6 @@
           <button class="btn btn-sm" @click="editing = !editing; showForm = false"
                   x-text="editing ? 'Done' : 'Edit'"></button>
         </div>
-      </div>
-
-      <div x-data="protectBanner">
-        <template x-if="visible()">
-          <div class="stale-banner" role="status">
-            <strong x-text="setup.headline"></strong>
-            <a href="/backups" @click.prevent="$store.router.navigate('backups')" x-text="setup.state === 'none' ? 'Protect my data' : 'See backups'"></a>
-          </div>
-        </template>
       </div>
 
       <template x-if="loading">

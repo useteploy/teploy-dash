@@ -261,6 +261,26 @@ function formatObservedAt(iso) {
   return isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
 }
 
+// arr: a list from a response field, or empty when the field is missing or
+// not a list (a mis-shaped response must not break the page that reads it).
+function arr(v) { return Array.isArray(v) ? v : []; }
+
+// relTime renders a timestamp as relative time ("5 min ago", "in 3 h");
+// pair it with formatObservedAt in a title attribute for the exact time.
+function relTime(iso) {
+  const t = Date.parse(iso);
+  if (!iso || isNaN(t) || String(iso).startsWith('0001')) return '';
+  const diff = Math.round((Date.now() - t) / 1000);
+  const abs = Math.abs(diff);
+  let text;
+  if (abs < 45) text = 'just now';
+  else if (abs < 3600) text = Math.round(abs / 60) + ' min';
+  else if (abs < 86400) text = Math.round(abs / 3600) + ' h';
+  else text = Math.round(abs / 86400) + ' day' + (Math.round(abs / 86400) === 1 ? '' : 's');
+  if (text === 'just now') return text;
+  return diff >= 0 ? text + ' ago' : 'in ' + text;
+}
+
 // ── Accessibility helpers ──
 // trapDialogFocus keeps Tab/Shift+Tab inside an open dialog (A49/A58).
 // Attach with @keydown.tab on the dialog overlay; focus is kept within the
@@ -4595,15 +4615,135 @@ document.addEventListener('alpine:init', () => {
 
   // The home page's one line about backups. Viewers see it too; the page it links to
   // says what they can do. A failed read shows nothing rather than a false alarm.
-  Alpine.data('protectBanner', () => ({
-    setup: null,
-    async init() {
-      try {
-        const view = await api.get('/api/backups');
-        this.setup = (view && view.setup) || null;
-      } catch (e) { this.setup = null; }
+  // ── Home status (2026-11 rework) ──
+  // What needs attention, what is running, and each server — built only from
+  // the endpoints the other pages already read. Each source loads on its own
+  // and keeps the loading / error / stale conventions: a source that failed
+  // to load is named as unchecked, so a failure never reads as "nothing
+  // wrong", and a failed refresh keeps the earlier data under a stale line.
+  Alpine.data('homeStatus', () => ({
+    sources: {
+      incidents: { url: '/api/alerts/incidents', label: 'alerts', data: null, error: '', loading: true, loadedAt: null },
+      domains: { url: '/api/domains', label: 'domains', data: null, error: '', loading: true, loadedAt: null },
+      backups: { url: '/api/backups', label: 'backups', data: null, error: '', loading: true, loadedAt: null },
+      operations: { url: '/api/operations', label: 'operations', data: null, error: '', loading: true, loadedAt: null },
+      fleet: { url: '/api/fleet', label: 'servers', data: null, error: '', loading: true, loadedAt: null },
+      cleanup: { url: '/api/cleanup', label: 'cleanup reports', data: null, error: '', loading: true, loadedAt: null },
     },
-    visible() { return !!(this.setup && this.setup.supported && this.setup.state !== 'protected'); },
+    refreshTimer: null,
+    _alive: false,
+
+    async init() {
+      this._alive = true;
+      this.refreshTimer = setInterval(() => { if (this._alive) this.loadAll(); }, 60000);
+      await this.loadAll();
+    },
+    destroy() { this._alive = false; clearInterval(this.refreshTimer); },
+    loadAll() { return Promise.all(Object.keys(this.sources).map((k) => this.loadOne(k))); },
+    async loadOne(key) {
+      const src = this.sources[key];
+      if (!src.data) src.loading = true;
+      try {
+        const data = await api.get(src.url);
+        if (!this._alive) return;
+        src.data = data; src.error = ''; src.loadedAt = new Date().toISOString();
+      } catch (e) {
+        if (this._alive) src.error = e.message || String(e);
+      } finally {
+        if (this._alive) src.loading = false;
+      }
+    },
+
+    anyLoading() { return Object.values(this.sources).some((s) => s.loading); },
+    // Sources with no data at all because their load failed: unchecked.
+    unchecked() { return Object.entries(this.sources).filter(([, s]) => !s.loading && s.error && !s.data).map(([key, s]) => ({ key, ...s })); },
+    // Sources showing earlier data because the refresh failed.
+    stale() { return Object.entries(this.sources).filter(([, s]) => s.error && s.data).map(([key, s]) => ({ key, ...s })); },
+
+    // The oldest observation behind what is shown: the server sweep, the
+    // domain sweep, the backup read; live sources count as read when loaded.
+    oldestObservation() {
+      const times = [];
+      const f = this.sources.fleet.data, d = this.sources.domains.data, b = this.sources.backups.data;
+      if (f && f.collected_at && !String(f.collected_at).startsWith('0001')) times.push(f.collected_at);
+      if (d && d.last_sweep_at) times.push(d.last_sweep_at);
+      if (b && b.last_sweep_at) times.push(b.last_sweep_at);
+      for (const k of ['incidents', 'operations']) if (this.sources[k].loadedAt) times.push(this.sources[k].loadedAt);
+      const valid = times.map((t) => Date.parse(t)).filter((t) => !isNaN(t));
+      return valid.length ? new Date(Math.min(...valid)).toISOString() : '';
+    },
+
+    attention() {
+      const rows = [];
+      const inc = this.sources.incidents.data;
+      for (const i of arr(inc && inc.open)) {
+        rows.push({ key: 'inc:' + (i.key || i.id || i.name), level: i.severity === 'critical' ? 'bad' : 'warn',
+          title: i.name + (i.source === 'monitor' || i.source === 'heartbeat' || !i.source ? ' is down' : ''),
+          detail: i.message || 'open incident', at: i.started_at, verb: 'since',
+          href: i.path || '/alerts' });
+      }
+      const fleet = this.sources.fleet.data;
+      for (const sv of arr(fleet && fleet.servers)) {
+        if (!sv.error) continue;
+        rows.push({ key: 'srv:' + sv.server, level: 'bad', title: sv.server + ' is unreachable', detail: sv.error,
+          at: sv.last_success_at && !String(sv.last_success_at).startsWith('0001') ? sv.last_success_at : '', verb: 'last read',
+          href: '/servers/' + encodeURIComponent(sv.server) });
+      }
+      const dom = this.sources.domains.data;
+      for (const r of arr(dom && dom.rows)) {
+        const certWarn = r.cert && (r.cert.state === 'warn' || r.cert.state === 'fail');
+        if (r.overall !== 'fail' && !certWarn) continue;
+        rows.push({ key: 'dom:' + r.host, level: r.overall === 'fail' ? 'bad' : 'warn',
+          title: r.host + (r.overall === 'fail' ? ' is failing' + (r.first_failing ? ' at ' + r.first_failing.toUpperCase() : '') : ': certificate needs attention'),
+          detail: r.evidence || (r.cert && r.cert.detail) || '', at: '', href: '/domains' });
+      }
+      const bk = this.sources.backups.data;
+      const setup = bk && bk.setup;
+      if (setup && setup.supported && setup.state !== 'protected') {
+        rows.push({ key: 'protect', level: setup.state === 'none' ? 'warn' : 'bad', title: setup.headline || 'Your data is not fully protected',
+          detail: '', at: '', href: '/backups', action: setup.state === 'none' ? 'Protect my data' : 'See backups' });
+      }
+      for (const r of arr(bk && bk.rows)) {
+        if (r.state !== 'failing' && r.state !== 'uncovered') continue;
+        rows.push({ key: 'bk:' + r.server + '/' + r.name, level: r.state === 'failing' ? 'bad' : 'warn',
+          title: r.name + (r.state === 'failing' ? ' backup is failing' : ' is not backed up'),
+          detail: r.last_error || (r.app ? r.app + ' on ' + r.server : r.server), at: r.state === 'failing' ? r.last_good : '', verb: 'last good',
+          href: '/backups' });
+      }
+      const ops = this.sources.operations.data;
+      const dayAgo = Date.now() - 86400 * 1000;
+      for (const op of arr(ops)) {
+        if (op.status !== 'failed' && op.status !== 'interrupted') continue;
+        const at = Date.parse(op.finished_at || op.created_at);
+        if (isNaN(at) || at < dayAgo) continue;
+        rows.push({ key: 'op:' + op.id, level: 'bad', title: ((op.request && op.request.kind) || 'operation') + ' ' + (op.target || '') + ' ' + op.status,
+          detail: op.error || '', at: op.finished_at || op.created_at, verb: '', href: '/operations/' + encodeURIComponent(op.id) });
+      }
+      return rows;
+    },
+
+    running() {
+      const live = ['queued', 'running', 'cancel_requested', 'stopping'];
+      return arr(this.sources.operations.data).filter((op) => live.includes(op.status));
+    },
+
+    servers() {
+      const fleet = this.sources.fleet.data;
+      const cleanup = this.sources.cleanup.data;
+      const audits = {};
+      for (const row of arr(cleanup && cleanup.servers)) audits[row.server] = row;
+      return arr(fleet && fleet.servers).map((sv) => ({
+        name: sv.server, host: sv.host, error: sv.error || '', freshness: sv.freshness,
+        apps: arr(sv.apps).length, audit: audits[sv.server] || null,
+      }));
+    },
+
+    go(href, e) {
+      if (e && (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1)) return;
+      if (e) e.preventDefault();
+      history.pushState({}, '', href);
+      Alpine.store('router').restore();
+    },
   }));
 
   // ── Cleanup Page (Slice 6) ──
