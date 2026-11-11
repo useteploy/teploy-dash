@@ -326,6 +326,16 @@ function authCaps(me) {
   return Array.isArray(caps) ? caps : [];
 }
 
+// routeTab reads the ?tab= of a route's params: one of the page's tab names,
+// else the page's default tab.
+function routeTab(params, allowed, fallback) {
+  const t = params && params.tab;
+  return allowed.includes(t) ? t : fallback;
+}
+const APP_TABS = ['general', 'settings', 'repository', 'env', 'logs', 'deploys', 'releases', 'activity', 'backups', 'kv'];
+const SERVER_TABS = ['overview', 'proxy'];
+const SETTINGS_TABS = ['servers', 'groups', 'notifications', 'registry', 'mcp', 'users', 'sso', 'links', 'account'];
+
 // ── Alpine.js App ──
 document.addEventListener('alpine:init', () => {
   // ── Router Store ──
@@ -428,6 +438,18 @@ document.addEventListener('alpine:init', () => {
       const { page, params } = matchURL(location.pathname, location.search);
       this.page = page;
       this.params = params;
+    },
+    // Tabs live in the URL as ?tab=<name> (the default tab is left out so
+    // canonical URLs stay clean). A tab change replaces the current history
+    // entry rather than pushing one: reload and shared links land on the tab,
+    // Back leaves the page, and arrow-keying across a tab strip does not fill
+    // the history.
+    setTab(tab, fallback) {
+      const params = { ...this.params };
+      if (!tab || tab === fallback) delete params.tab; else params.tab = tab;
+      if ((this.params.tab || '') === (params.tab || '')) return;
+      this.params = params;
+      history.replaceState({ page: this.page, params }, '', routeToURL(this.page, params));
     },
   });
   Alpine.store('router').restore();
@@ -1136,6 +1158,13 @@ document.addEventListener('alpine:init', () => {
           this.reload();
         }
       });
+      // The tab follows the URL (reload, links, Back into the page).
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'app-detail' || !this.resource) return;
+        const t = routeTab(r.params, APP_TABS, 'general');
+        if (t !== this.tab) queueMicrotask(() => this.switchTab(t));
+      });
       await this.reload();
     },
 
@@ -1194,6 +1223,7 @@ document.addEventListener('alpine:init', () => {
 
     // F059: scrub secret-bearing state when the component unmounts.
     destroy() {
+      if (this.tabEffect) Alpine.release(this.tabEffect);
       this.kvValues = {};
       this.newEnvValue = '';
       this.newKvValue = '';
@@ -2182,6 +2212,7 @@ document.addEventListener('alpine:init', () => {
 
     async switchTab(t) {
       this.tab = t;
+      if (Alpine.store('router').page === 'app-detail') Alpine.store('router').setTab(t, 'general');
       if (t === 'env') await this.loadEnv();
       if (t === 'deploys') await this.loadLog();
       if (t === 'general') await this.loadAccessories();
@@ -2731,9 +2762,15 @@ document.addEventListener('alpine:init', () => {
         const identity = this.routeIdentity();
         if (identity !== this.boundIdentity) { this.boundIdentity = identity; this.bindRoute(); }
       });
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'server-detail' || !this.name) return;
+        const t = routeTab(r.params, SERVER_TABS, 'overview');
+        if (t !== this.tab) queueMicrotask(() => this.switchTab(t));
+      });
       await initialLoad;
     },
-    destroy() { this.destroyed = true; this.generation++; if (this.routeEffect) Alpine.release(this.routeEffect); this.status = null; this.proxy = null; },
+    destroy() { this.destroyed = true; this.generation++; if (this.routeEffect) Alpine.release(this.routeEffect); if (this.tabEffect) Alpine.release(this.tabEffect); this.status = null; this.proxy = null; },
     async bindRoute() {
       if (this.destroyed) return;
       this.generation++; this.name = this.routeIdentity(); this.status = null; this.proxy = null; this.tab = 'overview';
@@ -2753,6 +2790,7 @@ document.addEventListener('alpine:init', () => {
     async switchTab(t) {
       if (!this.current(this.generation)) return;
       this.tab = t;
+      Alpine.store('router').setTab(t, 'overview');
       if (t === 'proxy' && !this.proxy) await this.loadProxy();
     },
     async loadProxy() {
@@ -2808,9 +2846,22 @@ document.addEventListener('alpine:init', () => {
 
     isAdmin() { return (this.me && this.me.role) === 'admin'; },
 
+    setTab(t) {
+      this.tab = t;
+      if (Alpine.store('router').page === 'settings') Alpine.store('router').setTab(t, 'servers');
+    },
+
     async init() {
+      this.tab = routeTab(Alpine.store('router').params, SETTINGS_TABS, 'servers');
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'settings') return;
+        const t = routeTab(r.params, SETTINGS_TABS, 'servers');
+        if (t !== this.tab) this.tab = t;
+      });
       await this.loadAll();
     },
+    destroy() { if (this.tabEffect) Alpine.release(this.tabEffect); },
 
     async loadAll() {
       this.loading = true;
@@ -2839,7 +2890,7 @@ document.addEventListener('alpine:init', () => {
         // A non-admin can't see the admin tabs; if the default landed on one,
         // move to a tab they can use.
         if (!admin && ['servers', 'notifications', 'registry', 'mcp', 'users', 'sso'].includes(this.tab)) {
-          this.tab = 'groups';
+          this.setTab('groups');
         }
       } catch (e) {
         showToast(e.message, 'error');

@@ -4235,15 +4235,15 @@
       </div>
 
       <div class="tabs">
-        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'servers' }" @click="tab = 'servers'">Servers</button>
-        <button class="tab" :class="{ active: tab === 'groups' }" @click="tab = 'groups'">Groups</button>
-        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'notifications' }" @click="tab = 'notifications'">Notifications</button>
-        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'registry' }" @click="tab = 'registry'">Registry</button>
-        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'">MCP</button>
-        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'users' }" @click="tab = 'users'">Users</button>
-        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'sso' }" @click="tab = 'sso'">SSO</button>
-        <button class="tab" :class="{ active: tab === 'links' }" @click="tab = 'links'">Links</button>
-        <button class="tab" :class="{ active: tab === 'account' }" @click="tab = 'account'">Account</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'servers' }" @click="setTab('servers')">Servers</button>
+        <button class="tab" :class="{ active: tab === 'groups' }" @click="setTab('groups')">Groups</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'notifications' }" @click="setTab('notifications')">Notifications</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'registry' }" @click="setTab('registry')">Registry</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'mcp' }" @click="setTab('mcp')">MCP</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'users' }" @click="setTab('users')">Users</button>
+        <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'sso' }" @click="setTab('sso')">SSO</button>
+        <button class="tab" :class="{ active: tab === 'links' }" @click="setTab('links')">Links</button>
+        <button class="tab" :class="{ active: tab === 'account' }" @click="setTab('account')">Account</button>
       </div>
 
       <template x-if="loading">
