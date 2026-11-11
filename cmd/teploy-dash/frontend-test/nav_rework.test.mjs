@@ -39,5 +39,29 @@ assert(!/:href="c\.doc\.dashboard_url"/.test(html), 'sibling dashboard_url read 
 // Checkboxes inside form fields are not stretched into text-input boxes.
 assert(/\.field input\[type="checkbox"\][^{]*\{[^}]*width: auto/.test(css), 'field checkboxes keep their natural size');
 
+// Labels: common intervals read as words; an ok cleanup audit says Audited.
+{
+  const listeners = [];
+  globalThis.document = { addEventListener: (t, fn) => { if (t === 'alpine:init') listeners.push(fn); }, getElementById: () => null, documentElement: { setAttribute() {}, getAttribute: () => 'dark' } };
+  globalThis.window = { addEventListener() {}, dispatchEvent() {} };
+  globalThis.localStorage = { getItem: () => null, setItem() {} };
+  globalThis.history = { pushState() {}, replaceState() {} };
+  globalThis.location = { pathname: '/', search: '' };
+  globalThis.CustomEvent = class {};
+  const comps = {}, stores = {};
+  globalThis.Alpine = { data: (n, f) => { comps[n] = f; }, store: (n, d) => { if (d !== undefined) stores[n] = d; return stores[n]; }, effect() {} };
+  new Function(js + '\n;globalThis.__fi = formatInterval;')();
+  listeners.forEach((fn) => fn());
+  const fi = globalThis.__fi;
+  assert(fi(1) === 'hourly' && fi(24) === 'daily' && fi(168) === 'weekly' && fi(6) === 'every 6 h' && fi(48) === 'every 2 days', 'formatInterval names common intervals');
+  assert(!html.includes("'every ' + t.interval_hours + 'h'"), 'restore tests use formatInterval');
+  const cleanup = comps.cleanupPage();
+  assert(cleanup.auditLabel('ok', { warning: 2 }) === 'Audited — 2 warnings', 'ok audit with warnings says Audited and the count');
+  assert(cleanup.auditLabel('ok', {}) === 'Audited — no warnings', 'ok audit without warnings');
+  assert(!js.includes('Clean bill'), 'no "Clean bill" label');
+  assert(html.includes('>History</button>') && html.includes('id="app-panel-history"'), 'the app tab reads History');
+  assert(html.includes('<h1 class="page-title">Uptime</h1>'), 'monitors page title matches its tab');
+}
+
 if (failures.length) { console.error(`FAIL (${failures.length}):`); failures.forEach((f) => console.error('  - ' + f)); process.exit(1); }
 console.log('nav_rework.test: all assertions passed');

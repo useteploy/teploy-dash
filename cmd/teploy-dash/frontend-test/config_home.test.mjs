@@ -263,7 +263,7 @@ function newPage() {
     `x-show="hasFeature('config_home')"`,
     `x-show="hasFeature('events')"`,
     'id="app-panel-settings"',
-    'id="app-panel-activity"',
+    'id="app-panel-history"',
     'Make editable here',
     'Deploy pending changes',
     'Settings edited in',

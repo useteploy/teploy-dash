@@ -239,7 +239,7 @@ function requestsFor(method, urlPart) {
   const html = readFileSync(join(here, '../frontend/index.html'), 'utf8');
   const tabStart = html.indexOf('id="app-tab-repository"');
   const panelStart = html.indexOf('id="app-panel-repository"');
-  const panelEnd = html.indexOf('id="app-panel-activity"');
+  const panelEnd = html.indexOf('id="app-panel-history"');
   assert(tabStart !== -1 && panelStart !== -1 && panelEnd > panelStart, 'repository tab/panel not found in index.html');
   const tabButton = html.slice(tabStart - 400, tabStart + 300);
   assert(tabButton.includes("hasFeature('git_source') && teployHome()"), 'tab must hide without the git-source token or on non-Teploy homes');

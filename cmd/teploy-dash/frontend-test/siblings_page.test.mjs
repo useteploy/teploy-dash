@@ -34,7 +34,7 @@ test('the /siblings route renders the page and the nav names it', async () => {
   assert.equal(h.stores.router.page, 'siblings');
   const html = h.readHTML();
   assert.ok(html.includes(`x-if="$store.router.page === 'siblings'"`));
-  assert.ok(html.includes('>Siblings</a>'));
+  assert.ok(html.includes('>Integrations</a>'));
   assert.ok(html.includes('x-data="siblingsPage"'));
 });
 

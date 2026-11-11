@@ -326,13 +326,21 @@ function authCaps(me) {
   return Array.isArray(caps) ? caps : [];
 }
 
+// formatInterval names common check intervals (hourly, daily, weekly) and
+// falls back to "every N h".
+function formatInterval(hours) {
+  const h = Number(hours);
+  if (!Number.isFinite(h) || h <= 0) return '';
+  return { 1: 'hourly', 24: 'daily', 168: 'weekly' }[h] || (h % 24 === 0 ? `every ${h / 24} days` : `every ${h} h`);
+}
+
 // routeTab reads the ?tab= of a route's params: one of the page's tab names,
 // else the page's default tab.
 function routeTab(params, allowed, fallback) {
   const t = params && params.tab;
   return allowed.includes(t) ? t : fallback;
 }
-const APP_TABS = ['general', 'settings', 'repository', 'env', 'logs', 'deploys', 'releases', 'activity', 'backups', 'kv'];
+const APP_TABS = ['general', 'settings', 'repository', 'env', 'logs', 'deploys', 'releases', 'history', 'backups', 'kv'];
 const SERVER_TABS = ['overview', 'proxy'];
 const SETTINGS_TABS = ['servers', 'groups', 'notifications', 'registry', 'mcp', 'users', 'sso', 'links', 'account'];
 
@@ -372,6 +380,7 @@ document.addEventListener('alpine:init', () => {
     { page: 'settings', path: '/settings' },
     // Task-named aliases (D07): same pages, task-meaningful paths.
     { page: 'projects', path: '/projects' },
+    { page: 'projects', path: '/apps' },
     { page: 'servers', path: '/fleet' },
     { page: 'server-detail', path: '/fleet/:name' },
     { page: 'operations', path: '/activity' },
@@ -2218,7 +2227,7 @@ document.addEventListener('alpine:init', () => {
       if (t === 'general') await this.loadAccessories();
       if (t === 'settings') await this.loadSettings();
       if (t === 'repository') await this.loadGitSource();
-      if (t === 'activity') await this.loadEvents();
+      if (t === 'history') await this.loadEvents();
       if (t === 'releases') await this.loadReleases();
       if (t === 'backups') await this.loadBackups();
       if (t === 'env' && this.hasFeature('secrets')) await this.loadSecrets();
@@ -4672,8 +4681,22 @@ document.addEventListener('alpine:init', () => {
       return findings.filter(f => f.dismissed);
     },
 
+    // An ok state means the audit completed, not that nothing was found:
+    // it reads "Audited" with the open warning count.
+    auditLabel(state, counts) {
+      if (state !== 'ok') return this.stateLabel(state);
+      const n = ((counts && counts.critical) || 0) + ((counts && counts.warning) || 0);
+      return n ? `Audited — ${n} warning${n === 1 ? '' : 's'}` : 'Audited — no warnings';
+    },
+    detailCounts() {
+      const counts = { critical: 0, warning: 0 };
+      for (const f of (this.detail && this.detail.findings) || []) {
+        if (!f.dismissed && (f.severity === 'critical' || f.severity === 'warning')) counts[f.severity]++;
+      }
+      return counts;
+    },
     stateLabel(state) {
-      return { ok: 'Clean bill', partial: 'Partially audited', unreachable: 'Unreachable', never: 'Not audited yet', stale: 'Report is stale' }[state] || state;
+      return { ok: 'Audited', partial: 'Partially audited', unreachable: 'Unreachable', never: 'Not audited yet', stale: 'Report is stale' }[state] || state;
     },
     stateClass(state) {
       return { ok: 'green', partial: 'yellow', unreachable: 'red', never: 'gray', stale: 'gray' }[state] || 'gray';

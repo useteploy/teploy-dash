@@ -72,6 +72,7 @@ assert(!!router, 'router store was not registered');
     ['/operations/abc', 'operation-detail'],
     // task-named aliases deep-link to the same pages, with params.
     ['/projects', 'projects'],
+    ['/apps', 'projects'],
     ['/fleet', 'servers'],
     ['/fleet/prod', 'server-detail'],
     ['/activity', 'operations'],
@@ -124,21 +125,22 @@ assert(!!router, 'router store was not registered');
 //    semantics; page titles renamed.
 {
   const html = readFileSync(join(here, '../frontend/index.html'), 'utf8');
-  for (const label of ['>Projects</a>', '>Fleet</a>', '>Activity</a>', '>Monitors</a>', '>Domains</a>', '>Restore Tests</a>', '>Templates</a>', '>Settings</a>']) {
+  for (const label of ['>Apps</a>', '>Servers</a>', '>Activity</a>', '>Monitors</a>', '>Domains</a>', '>Restore Tests</a>', '>Templates</a>', '>Integrations</a>', '>Git sources</a>', '>Settings</a>']) {
     assert(html.includes(label), `nav must render ${label}`);
   }
   assert(!html.includes('>Deployments</a>'), 'nav must not render the old Deployments label');
   const seps = (html.match(/class="nav-sep"/g) || []).length;
   assert(seps === 2, `nav must render two group separators (found ${seps})`);
-  assert(html.includes('title="Groups, projects, and the apps deployed to them"'), 'Projects nav link must carry its task title');
-  assert(html.includes('title="Every server this dash manages'), 'Fleet nav link must carry its task title');
+  assert(html.includes('title="Groups, projects, and the apps deployed to them"'), 'Apps nav link must carry its task title');
+  assert(html.includes('title="Every server this dash manages'), 'Servers nav link must carry its task title');
   assert(html.includes('title="Operations started through dash'), 'Activity nav link must carry its task title');
   // Page titles follow the nav names.
-  assert(html.includes('<h1 class="page-title">Projects</h1>'), 'projects page title');
-  assert(html.includes('<h1 class="page-title">Fleet</h1>'), 'fleet page title');
+  assert(html.includes('<h1 class="page-title">Apps</h1>'), 'apps page title');
+  assert(html.includes('<h1 class="page-title">Servers</h1>'), 'servers page title');
+  assert(!/>(Projects|Fleet|Siblings|Sources)<\/(a|h1)>/.test(html), 'old labels Projects, Fleet, Siblings, Sources are gone');
   assert(html.includes('<h1 class="page-title">Activity</h1>'), 'activity page title');
   assert(!html.includes('&larr; Deployments</a>'), 'back-links must say Projects, not Deployments');
-  assert(html.includes('&larr; Projects</a>') && html.includes('&larr; Fleet</a>') && html.includes('&larr; Activity</a>'), 'back-links renamed');
+  assert(html.includes('&larr; Apps</a>') && html.includes('&larr; Servers</a>') && html.includes('&larr; Activity</a>'), 'back-links renamed');
   // Tab semantics on the resource page (app) and the server page.
   assert(html.includes('role="tablist"'), 'tabs render tablist semantics');
   const tabs = (html.match(/role="tab"/g) || []).length;

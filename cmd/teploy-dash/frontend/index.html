@@ -70,18 +70,18 @@
       </div>
     </li>
     <li><a href="#" :class="{ active: $store.router.page === 'homepage' }" :aria-current="$store.router.page === 'homepage' ? 'page' : null" @click.prevent="$store.router.navigate('homepage')">Home</a></li>
-    <li><a href="#" title="Groups, projects, and the apps deployed to them" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" :aria-current="['projects', 'project-detail', 'app-detail'].includes($store.router.page) ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Projects</a></li>
-    <li><a href="#" title="Every server this dash manages — health, host detail, routes" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" :aria-current="$store.router.page === 'servers' || $store.router.page === 'server-detail' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Fleet</a></li>
+    <li><a href="#" title="Groups, projects, and the apps deployed to them" :class="{ active: ['projects', 'project-detail', 'app-detail'].includes($store.router.page) }" :aria-current="['projects', 'project-detail', 'app-detail'].includes($store.router.page) ? 'page' : null" @click.prevent="$store.router.navigate('projects')">Apps</a></li>
+    <li><a href="#" title="Every server this dash manages — health, host detail, routes" :class="{ active: $store.router.page === 'servers' || $store.router.page === 'server-detail' }" :aria-current="$store.router.page === 'servers' || $store.router.page === 'server-detail' ? 'page' : null" @click.prevent="$store.router.navigate('servers')">Servers</a></li>
     <li><a href="#" title="Operations started through dash — deploys, rollbacks, removals, with live logs" :class="{ active: $store.router.page === 'operations' || $store.router.page === 'operation-detail' }" :aria-current="$store.router.page === 'operations' || $store.router.page === 'operation-detail' ? 'page' : null" @click.prevent="$store.router.navigate('operations')">Activity</a></li>
     <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'monitors' || $store.router.page === 'monitor-detail' }" :aria-current="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' ? 'page' : null" @click.prevent="$store.router.navigate('monitors')">Monitors</a></li>
     <li><a href="#" title="DNS, route, certificate and HTTP health for every domain" :class="{ active: $store.router.page === 'domains' }" :aria-current="$store.router.page === 'domains' ? 'page' : null" @click.prevent="$store.router.navigate('domains')">Domains</a></li>
     <li><a href="#" title="What is left over on each server — stale routes, old versions, reclaimable space — with the fix where one exists" :class="{ active: $store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' }" :aria-current="$store.router.page === 'cleanup' || $store.router.page === 'cleanup-detail' ? 'page' : null" @click.prevent="$store.router.navigate('cleanup')">Cleanup</a></li>
-    <li><a href="#" title="Teploy products on your servers — discovered, probed, and connected where you allow it" :class="{ active: $store.router.page === 'siblings' }" :aria-current="$store.router.page === 'siblings' ? 'page' : null" @click.prevent="$store.router.navigate('siblings')">Siblings</a></li>
-    <li><a href="#" title="Every database and volume across the fleet — coverage, encryption, restore tests" :class="{ active: $store.router.page === 'backups' }" :aria-current="$store.router.page === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
+    <li><a href="#" title="Teploy products on your servers — discovered, probed, and connected where you allow it" :class="{ active: $store.router.page === 'siblings' }" :aria-current="$store.router.page === 'siblings' ? 'page' : null" @click.prevent="$store.router.navigate('siblings')">Integrations</a></li>
+    <li><a href="#" title="Every database and volume across your servers — coverage, encryption, restore tests" :class="{ active: $store.router.page === 'backups' }" :aria-current="$store.router.page === 'backups' ? 'page' : null" @click.prevent="$store.router.navigate('backups')">Backups</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'restore-tests' }" :aria-current="$store.router.page === 'restore-tests' ? 'page' : null" @click.prevent="$store.router.navigate('restore-tests')">Restore Tests</a></li>
     <li><a href="#" :class="{ active: $store.router.page === 'templates' }" :aria-current="$store.router.page === 'templates' ? 'page' : null" @click.prevent="$store.router.navigate('templates')">Templates</a></li>
-    <li><a href="#" :class="{ active: $store.router.page === 'sources' }" @click.prevent="$store.router.navigate('sources')">Sources</a></li>
+    <li><a href="#" :class="{ active: $store.router.page === 'sources' }" @click.prevent="$store.router.navigate('sources')">Git sources</a></li>
     <li class="nav-sep" aria-hidden="true"></li>
     <li><a href="#" :class="{ active: $store.router.page === 'settings' }" :aria-current="$store.router.page === 'settings' ? 'page' : null" @click.prevent="$store.router.navigate('settings')">Settings</a></li>
   </ul>
@@ -252,7 +252,7 @@
     <div x-data="projectsPage">
       <div class="page-header">
         <div>
-          <h1 class="page-title">Projects</h1>
+          <h1 class="page-title">Apps</h1>
           <p class="subtitle">Groups organize projects; projects hold the apps you deploy.</p>
           <p class="subtitle" x-show="!loading && fleetAge()" x-text="'Server state observed ' + fleetAge()"></p>
         </div>
@@ -445,7 +445,7 @@
   <!-- ═══ Project Detail Page ═══ -->
   <template x-if="$store.router.page === 'project-detail'">
     <div x-data="projectDetailPage">
-      <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Projects</a>
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Apps</a>
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
@@ -562,7 +562,7 @@
         <a href="#" class="back-link" @click.prevent="$store.router.navigate('project-detail', { group: $store.router.params.fromGroup, project: $store.router.params.fromProject })">&larr; <span x-text="$store.router.params.fromProject"></span></a>
       </template>
       <template x-if="!$store.router.params.fromProject">
-        <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Projects</a>
+        <a href="#" class="back-link" @click.prevent="$store.router.navigate('projects')">&larr; Apps</a>
       </template>
 
       <template x-if="loading">
@@ -596,7 +596,7 @@
             <button class="tab" :class="{ active: tab === 'logs' }" role="tab" id="app-tab-logs" aria-controls="app-panel-logs" :aria-selected="(tab === 'logs').toString()" :tabindex="tab === 'logs' ? 0 : -1" @focus="switchTab('logs')">Logs</button>
             <button class="tab" :class="{ active: tab === 'deploys' }" role="tab" id="app-tab-deploys" aria-controls="app-panel-deploys" :aria-selected="(tab === 'deploys').toString()" :tabindex="tab === 'deploys' ? 0 : -1" @focus="switchTab('deploys')">Deploys</button>
             <button class="tab" x-show="hasFeature('releases')" :class="{ active: tab === 'releases' }" role="tab" id="app-tab-releases" aria-controls="app-panel-releases" :aria-selected="(tab === 'releases').toString()" :tabindex="tab === 'releases' ? 0 : -1" @focus="switchTab('releases')">Releases</button>
-            <button class="tab" x-show="hasFeature('events')" :class="{ active: tab === 'activity' }" role="tab" id="app-tab-activity" aria-controls="app-panel-activity" :aria-selected="(tab === 'activity').toString()" :tabindex="tab === 'activity' ? 0 : -1" @focus="switchTab('activity')">Activity</button>
+            <button class="tab" x-show="hasFeature('events')" :class="{ active: tab === 'history' }" role="tab" id="app-tab-history" aria-controls="app-panel-history" :aria-selected="(tab === 'history').toString()" :tabindex="tab === 'history' ? 0 : -1" @focus="switchTab('history')">History</button>
             <button class="tab" x-show="hasFeature('backups')" :class="{ active: tab === 'backups' }" role="tab" id="app-tab-backups" aria-controls="app-panel-backups" :aria-selected="(tab === 'backups').toString()" :tabindex="tab === 'backups' ? 0 : -1" @focus="switchTab('backups')">Backups</button>
             <button class="tab" :class="{ active: tab === 'kv' }" role="tab" id="app-tab-kv" aria-controls="app-panel-kv" :aria-selected="(tab === 'kv').toString()" :tabindex="tab === 'kv' ? 0 : -1" @focus="switchTab('kv')">KV</button>
           </div>
@@ -1352,8 +1352,8 @@
           <!-- Activity Tab (server-authority P2): the app's server event
                history. Every client writes it — laptop CLI, CI, this
                dashboard — so a deploy from anywhere shows here. -->
-          <template x-if="tab === 'activity'">
-            <div role="tabpanel" id="app-panel-activity" aria-labelledby="app-tab-activity" tabindex="-1">
+          <template x-if="tab === 'history'">
+            <div role="tabpanel" id="app-panel-history" aria-labelledby="app-tab-history" tabindex="-1">
               <div class="section-header" style="margin-bottom: 12px;">
                 <span class="card-meta">Everything done to this app, from any client.</span>
                 <button class="btn btn-sm" @click="loadEvents()" :disabled="eventsLoading" x-text="eventsLoading ? 'Loading…' : 'Refresh'"></button>
@@ -1794,7 +1794,7 @@
           <h1 class="page-title">Backups</h1>
           <p class="subtitle" x-text="rows.length
             ? rows.length + ' target' + (rows.length !== 1 ? 's' : '') + ': ' + (countBy('covered') + countBy('adopted')) + ' covered, ' + countBy('failing') + ' failing, ' + countBy('stale') + ' stale, ' + countBy('uncovered') + ' uncovered'
-            : 'Every database and volume across the fleet — storage, encryption, restore tests'"></p>
+            : 'Every database and volume across your servers — storage, encryption, restore tests'"></p>
         </div>
         <div class="header-actions">
           <button class="btn btn-sm" @click="refresh()" x-text="'Read servers now'"></button>
@@ -1818,7 +1818,7 @@
       </template>
 
       <template x-if="!loading && view && view.sweep_error">
-        <div role="status" class="stale-banner" x-text="'The last fleet read did not finish: ' + view.sweep_error"></div>
+        <div role="status" class="stale-banner" x-text="'The last read of your servers did not finish: ' + view.sweep_error"></div>
       </template>
 
       <!-- Protect my data: where things stand, then the flow. Never forced, and the
@@ -2426,7 +2426,7 @@
               <span class="card-meta" x-text="'projected ' + bytesLabel(view.projected_bytes) + ' of storage at steady state'"></span>
             </div>
             <template x-if="rows.length === 0">
-              <div class="empty-state"><p x-text="view.last_sweep_at ? 'No databases or volumes found on your servers yet.' : 'The first fleet read has not finished; it runs shortly after Dash starts.'"></p></div>
+              <div class="empty-state"><p x-text="view.last_sweep_at ? 'No databases or volumes found on your servers yet.' : 'The first read of your servers has not finished; it runs shortly after Dash starts.'"></p></div>
             </template>
             <template x-if="rows.length > 0">
               <div class="table-wrap">
@@ -2654,7 +2654,7 @@
                       <td>
                         <span class="status-dot dot" :class="stateClass(row.state)"></span>
                         <a :href="'/cleanup/' + encodeURIComponent(row.server)" @click.prevent="openServer(row.server)" x-text="row.server"></a>
-                        <div class="text-muted" x-text="stateLabel(row.state) + (row.configured === false ? ' — no longer configured' : '')"></div>
+                        <div class="text-muted" x-text="auditLabel(row.state, row.counts) + (row.configured === false ? ' — no longer configured' : '')"></div>
                         <div class="text-muted" x-show="row.error" x-text="row.error"></div>
                       </td>
                       <td>
@@ -2688,7 +2688,7 @@
           <div class="page-header">
             <div>
               <h1 class="page-title" x-text="detail ? detail.server : routeIdentity()"></h1>
-              <p class="subtitle" x-text="detail ? stateLabel(detail.state) + (detail.audited_at ? ' — audited ' + ageLabel(detail.age_seconds) : '') : ''"></p>
+              <p class="subtitle" x-text="detail ? auditLabel(detail.state, detailCounts()) + (detail.audited_at ? ' — audited ' + ageLabel(detail.age_seconds) : '') : ''"></p>
             </div>
             <div class="header-actions" x-show="detail">
               <button class="btn btn-sm" @click="load()">Refresh</button>
@@ -2862,7 +2862,7 @@
 
       <div class="page-header">
         <div>
-          <h1 class="page-title">Siblings</h1>
+          <h1 class="page-title">Integrations</h1>
           <p class="subtitle">Teploy products running on your servers, found by their labels and probed on their published ports. Nothing is connected until you confirm it.</p>
         </div>
         <div class="header-actions">
@@ -3018,7 +3018,7 @@
               <p class="text-muted" style="margin: 0 0 12px 0; font-size: 13px;">
                 Create a service token in Observe, then paste it here. <a x-show="observeTokenURL()" :href="observeTokenURL()" target="_blank" rel="noopener">Open the filled-in form in Observe</a><span x-show="!observeTokenURL()">Enter the address below for a link to the filled-in form, or use Settings → Service Tokens with scopes <span class="mono">sites:create</span> and <span class="mono">keys:mint</span>.</span>
                 Dash never sees an Observe admin login, and nothing is written until you confirm this instance's identity.
-                <span x-show="observeHintData && observeHintData.available">A confirmed Observe was found on the fleet — its address is prefilled.</span>
+                <span x-show="observeHintData && observeHintData.available">A confirmed Observe was found on your servers — its address is prefilled.</span>
               </p>
               <div style="display: grid; grid-template-columns: 2fr 2fr auto; gap: 8px; align-items: end;">
                 <div class="field">
@@ -3170,7 +3170,7 @@
         <div>
           <div class="page-header">
             <div>
-              <h1 class="page-title">Uptime Monitors</h1>
+              <h1 class="page-title">Uptime</h1>
               <p class="subtitle" x-text="monitors.length ? monitors.length + ' monitor' + (monitors.length !== 1 ? 's' : '') : 'No monitors configured'"></p>
             </div>
             <div class="header-actions">
@@ -3639,7 +3639,7 @@
                 </div>
               </div>
               <div class="monitor-target">
-                <span x-text="'every ' + t.interval_hours + 'h'"></span>
+                <span x-text="formatInterval(t.interval_hours)"></span>
               </div>
               <div class="monitor-meta">
                 <template x-if="t.last_run_at && !t.last_run_at.startsWith('0001')">
@@ -3734,7 +3734,7 @@
     <div x-data="serversPage">
       <div class="page-header">
         <div>
-          <h1 class="page-title">Fleet</h1>
+          <h1 class="page-title">Servers</h1>
           <p class="subtitle">Every server this dash manages. Unreachable hosts stay listed with their last-known state.</p>
         </div>
       </div>
@@ -3786,7 +3786,7 @@
   <!-- ═══ Server Detail Page ═══ -->
   <template x-if="$store.router.page === 'server-detail'">
     <div x-data="serverDetailPage">
-      <a href="#" class="back-link" @click.prevent="$store.router.navigate('servers')">&larr; Fleet</a>
+      <a href="#" class="back-link" @click.prevent="$store.router.navigate('servers')">&larr; Servers</a>
 
       <template x-if="loading">
         <div class="loading"><div class="spinner"></div></div>
@@ -3955,7 +3955,7 @@
     <div x-data="sourcesPage">
       <div class="page-header">
         <div>
-          <h1 class="page-title">Sources</h1>
+          <h1 class="page-title">Git sources</h1>
           <p class="subtitle">Register a repository so dash can receive and verify its webhook pushes. Provider names select credentials configured by the operator.</p>
         </div>
         <div class="header-actions">
@@ -4642,7 +4642,7 @@
           <div class="card" style="padding: 24px; margin-bottom: 16px;">
             <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">MCP access tokens</h3>
             <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
-              Let AI clients (Claude Code, Cursor, any MCP client) read fleet state and run deploy
+              Let AI clients (Claude Code, Cursor, any MCP client) read server and app state and run deploy
               actions through this dashboard. Every action goes through the teploy CLI — the same
               path as the buttons here — so there is no second source of truth. Endpoint:
               <code style="font-family: var(--mono);">POST /api/mcp</code> with the token as a Bearer header.
