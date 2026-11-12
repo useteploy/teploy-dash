@@ -493,3 +493,37 @@ test('no emoji in the page, and the layout holds at phone width', () => {
   const css = readFileSync(join(root, 'css/style.css'), 'utf8');
   assert.ok(css.includes('.setup-step input:not([type="checkbox"]):not([type="radio"]), .setup-step select { width: 100%; max-width: 100%; }'));
 });
+
+test('the home list stays a glance: one row before setup, grouped after, capped', async () => {
+  const h = harness('/');
+  const rows = [];
+  for (let i = 0; i < 12; i++) rows.push({ server: i < 9 ? 'a' : 'b', name: 'app' + i + '/volumes', state: 'uncovered' });
+  rows.push({ server: 'a', name: 'ship/postgres', state: 'failing', last_error: 'upload failed' });
+  const open = rows.map((r) => ({ key: 'backup:' + r.server + ':uncovered:' + r.name, source: 'backup', name: r.name + ' on ' + r.server + ' is not covered', severity: 'warning' }));
+  open.push({ key: 'm1', source: 'monitor', name: 'Shop', severity: 'critical' });
+  let view = baseView({}, { rows });
+  h.respond((url) => url === '/api/backups' ? response(view) : url === '/api/alerts/incidents' ? response({ open }) : response({}));
+  const home = h.components.homeStatus();
+  await home.init();
+  let keys = home.attention().map((r) => r.key);
+  assert.deepEqual(keys, ['inc:m1', 'protect', 'bk:a/ship/postgres'], 'before setup: the monitor, one protect row, and the failing backup');
+  view = baseView({ state: 'partial', headline: 'One of two servers is protected.' }, { rows });
+  await home.loadOne('backups');
+  const att = home.attention();
+  keys = att.map((r) => r.key);
+  assert.deepEqual(keys, ['inc:m1', 'protect', 'bk:a/ship/postgres', 'bk-uncovered:a', 'bk-uncovered:b'], 'after setup: uncovered targets are one row per server');
+  assert.equal(att[3].title, '9 targets on a are not backed up');
+  assert.equal(att[3].detail, 'app0/volumes, app1/volumes, app2/volumes and 6 more');
+  // A failed backups read keeps the backup incidents, so nothing goes unsaid.
+  const fresh = h.components.homeStatus();
+  h.respond((url) => url === '/api/backups' ? response({}, { status: 500 }) : url === '/api/alerts/incidents' ? response({ open }) : response({}));
+  await fresh.init();
+  assert.equal(fresh.attention().length, open.length);
+  assert.equal(fresh.attentionShown().length, 8);
+  assert.equal(fresh.attentionHidden(), open.length - 8);
+  fresh.showAllAttention = true;
+  assert.equal(fresh.attentionShown().length, open.length);
+  home.destroy(); fresh.destroy();
+  const html = h.readHTML();
+  assert.ok(html.includes('attentionShown()') && html.includes("'Show ' + attentionHidden() + ' more'"));
+});

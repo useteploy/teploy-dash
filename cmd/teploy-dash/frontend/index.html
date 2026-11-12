@@ -162,16 +162,22 @@
             <span class="text-muted home-asof" x-show="oldestObservation()" :title="'Oldest observation: ' + formatObservedAt(oldestObservation())" x-text="'checked ' + relTime(oldestObservation())"></span>
           </div>
           <div class="status-list">
-            <template x-for="item in attention()" :key="item.key">
+            <template x-for="item in attentionShown()" :key="item.key">
               <a class="status-row" :href="item.href" @click="go(item.href, $event)">
                 <span class="dot" :class="item.level === 'bad' ? 'red' : 'yellow'"></span>
                 <span class="status-row-main">
                   <span class="status-row-title" x-text="item.title"></span>
-                  <span class="status-row-detail" x-show="item.detail" x-text="item.detail"></span>
+                  <span class="status-row-detail" x-show="item.detail" :title="item.detail" x-text="item.detail"></span>
                 </span>
                 <span class="status-row-meta" x-show="item.at" :title="formatObservedAt(item.at)" x-text="(item.verb ? item.verb + ' ' : '') + relTime(item.at)"></span>
                 <span class="status-row-action" x-show="item.action" x-text="item.action"></span>
               </a>
+            </template>
+            <template x-if="attentionHidden() > 0">
+              <button type="button" class="status-row status-row-more" @click="showAllAttention = true" x-text="'Show ' + attentionHidden() + ' more'"></button>
+            </template>
+            <template x-if="showAllAttention && attention().length > attentionLimit">
+              <button type="button" class="status-row status-row-more" @click="showAllAttention = false">Show fewer</button>
             </template>
             <template x-for="src in unchecked()" :key="'unchecked:' + src.key">
               <div class="status-row status-row-static" role="alert">

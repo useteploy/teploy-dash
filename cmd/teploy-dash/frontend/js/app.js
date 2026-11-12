@@ -4895,7 +4895,11 @@ document.addEventListener('alpine:init', () => {
     attention() {
       const rows = [];
       const inc = this.sources.incidents.data;
+      const bk = this.sources.backups.data;
       for (const i of arr(inc && inc.open)) {
+        // Backup incidents repeat what the backup rows below say, target by
+        // target; they only stand in when the backup read itself is missing.
+        if (i.source === 'backup' && bk) continue;
         rows.push({ key: 'inc:' + (i.key || i.id || i.name), level: i.severity === 'critical' ? 'bad' : 'warn',
           title: i.name + (i.source === 'monitor' || i.source === 'heartbeat' || !i.source ? ' is down' : ''),
           detail: i.message || 'open incident', at: i.started_at, verb: 'since',
@@ -4916,18 +4920,29 @@ document.addEventListener('alpine:init', () => {
           title: r.host + (r.overall === 'fail' ? ' is failing' + (r.first_failing ? ' at ' + r.first_failing.toUpperCase() : '') : ': certificate needs attention'),
           detail: r.evidence || (r.cert && r.cert.detail) || '', at: '', href: '/domains' });
       }
-      const bk = this.sources.backups.data;
       const setup = bk && bk.setup;
-      if (setup && setup.supported && setup.state !== 'protected') {
+      const unprotected = setup && setup.supported && setup.state !== 'protected';
+      if (unprotected) {
         rows.push({ key: 'protect', level: setup.state === 'none' ? 'warn' : 'bad', title: setup.headline || 'Your data is not fully protected',
           detail: '', at: '', href: '/backups', action: setup.state === 'none' ? 'Protect my data' : 'See backups' });
       }
+      // Before backups are set up at all, every target is uncovered: the one
+      // row above says so. After that, failing backups are named one by one
+      // and uncovered targets are counted per server.
+      const uncovered = {};
       for (const r of arr(bk && bk.rows)) {
-        if (r.state !== 'failing' && r.state !== 'uncovered') continue;
-        rows.push({ key: 'bk:' + r.server + '/' + r.name, level: r.state === 'failing' ? 'bad' : 'warn',
-          title: r.name + (r.state === 'failing' ? ' backup is failing' : ' is not backed up'),
-          detail: r.last_error || (r.app ? r.app + ' on ' + r.server : r.server), at: r.state === 'failing' ? r.last_good : '', verb: 'last good',
-          href: '/backups' });
+        if (r.state === 'failing') {
+          rows.push({ key: 'bk:' + r.server + '/' + r.name, level: 'bad', title: r.name + ' backup is failing',
+            detail: r.last_error || (r.app ? r.app + ' on ' + r.server : r.server), at: r.last_good, verb: 'last good', href: '/backups' });
+        } else if (r.state === 'uncovered' && !(unprotected && setup.state === 'none')) {
+          (uncovered[r.server] = uncovered[r.server] || []).push(r.name);
+        }
+      }
+      for (const [server, names] of Object.entries(uncovered)) {
+        rows.push({ key: 'bk-uncovered:' + server, level: 'warn',
+          title: names.length === 1 ? names[0] + ' on ' + server + ' is not backed up' : names.length + ' targets on ' + server + ' are not backed up',
+          detail: names.length === 1 ? '' : names.slice(0, 3).join(', ') + (names.length > 3 ? ' and ' + (names.length - 3) + ' more' : ''),
+          at: '', href: '/backups' });
       }
       const ops = this.sources.operations.data;
       const dayAgo = Date.now() - 86400 * 1000;
@@ -4940,6 +4955,15 @@ document.addEventListener('alpine:init', () => {
       }
       return rows;
     },
+
+    // Home stays a glance: the first rows, then a count behind one button.
+    attentionLimit: 8,
+    showAllAttention: false,
+    attentionShown() {
+      const rows = this.attention();
+      return this.showAllAttention || rows.length <= this.attentionLimit ? rows : rows.slice(0, this.attentionLimit);
+    },
+    attentionHidden() { return this.showAllAttention ? 0 : Math.max(0, this.attention().length - this.attentionLimit); },
 
     running() {
       const live = ['queued', 'running', 'cancel_requested', 'stopping'];
