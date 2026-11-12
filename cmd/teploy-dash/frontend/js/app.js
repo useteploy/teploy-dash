@@ -261,24 +261,40 @@ function formatObservedAt(iso) {
   return isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
 }
 
+// opDotClass colours an operation's status dot: in progress is a pulsing
+// blue (never the green of a finished success), succeeded green, failed or
+// interrupted red, canceled or otherwise settled grey.
+function opDotClass(status) {
+  if (['queued', 'running', 'cancel_requested', 'stopping'].includes(status)) return 'active';
+  if (status === 'succeeded') return 'running';
+  if (status === 'failed' || status === 'interrupted') return 'stopped';
+  return 'idle';
+}
+
 // arr: a list from a response field, or empty when the field is missing or
 // not a list (a mis-shaped response must not break the page that reads it).
 function arr(v) { return Array.isArray(v) ? v : []; }
 
-// relTime renders a timestamp as relative time ("5 min ago", "in 3 h");
-// pair it with formatObservedAt in a title attribute for the exact time.
-function relTime(iso) {
-  const t = Date.parse(iso);
-  if (!iso || isNaN(t) || String(iso).startsWith('0001')) return '';
-  const diff = Math.round((Date.now() - t) / 1000);
-  const abs = Math.abs(diff);
+// The one date helper (2026-11 rework). Times read as relative text ("5 min
+// ago", "in 3 h") with the exact local time in a title attribute: in
+// templates, x-time="<iso>" does both; relTime / ageText give the text where
+// a time is part of a longer sentence.
+function ageText(seconds) {
+  const future = seconds < 0;
+  const abs = Math.abs(seconds);
+  if (abs < 90) return 'just now';
+  const minutes = Math.round(abs / 60);
   let text;
-  if (abs < 45) text = 'just now';
-  else if (abs < 3600) text = Math.round(abs / 60) + ' min';
-  else if (abs < 86400) text = Math.round(abs / 3600) + ' h';
-  else text = Math.round(abs / 86400) + ' day' + (Math.round(abs / 86400) === 1 ? '' : 's');
-  if (text === 'just now') return text;
-  return diff >= 0 ? text + ' ago' : 'in ' + text;
+  if (minutes < 120) text = `${minutes} min`;
+  else if (minutes / 60 < 48) text = `${Math.round(minutes / 60)} h`;
+  else text = `${Math.round(minutes / 1440)} days`;
+  return future ? 'in ' + text : text + ' ago';
+}
+function relTime(iso) {
+  if (!iso || String(iso).startsWith('0001')) return '';
+  const t = Date.parse(iso);
+  if (isNaN(t)) return String(iso);
+  return ageText(Math.round((Date.now() - t) / 1000));
 }
 
 // ── Confirm dialog (2026-11 rework) ──
@@ -581,6 +597,17 @@ document.addEventListener('alpine:init', () => {
   });
   Alpine.store('router').restore();
   window.addEventListener('popstate', () => Alpine.store('router').restore());
+
+  // x-time="<iso>": relative text, exact time on hover (the one date helper).
+  if (Alpine.directive) {
+    Alpine.directive('time', (el, { expression }, { effect, evaluateLater }) => {
+      const read = evaluateLater(expression);
+      effect(() => read((iso) => {
+        el.textContent = relTime(iso) || '—';
+        if (iso && !String(iso).startsWith('0001')) el.title = formatObservedAt(iso); else el.removeAttribute('title');
+      }));
+    });
+  }
 
   Alpine.store('dialog', {
     current: null,
@@ -2548,7 +2575,7 @@ document.addEventListener('alpine:init', () => {
       return h ? String(h).slice(0, 12) : '';
     },
 
-    formatWhen(iso) { return iso ? formatObservedAt(iso) : ''; },
+    formatWhen(iso) { return relTime(iso); },
 
     openRestoreTests() {
       Alpine.store('router').navigate('backups', { tab: 'restore-tests' });
@@ -2825,9 +2852,7 @@ document.addEventListener('alpine:init', () => {
       };
     },
 
-    formatDate(d) {
-      return new Date(d).toLocaleString();
-    },
+    formatDate(d) { return relTime(d); },
   }));
 
   // ── Servers Page ──
@@ -3195,7 +3220,7 @@ document.addEventListener('alpine:init', () => {
 
     fmtDate(d) {
       if (!d || String(d).startsWith('0001')) return 'never';
-      return new Date(d).toLocaleString();
+      return relTime(d);
     },
 
     async createMcpToken() {
@@ -3609,7 +3634,7 @@ document.addEventListener('alpine:init', () => {
     urlHelp(t) { return (CHANNEL_TYPES[t] || {}).help || ''; },
     credentialURL(t) { return t === 'slack' || t === 'discord'; },
     kindLabel(k) { return { incident_opened: 'opened', incident_repeat: 'reminders', incident_recovered: 'recovered' }[k] || k; },
-    formatDate(d) { return d ? new Date(d).toLocaleString() : ''; },
+    formatDate(d) { return relTime(d); },
 
     channelHealthText(ch) {
       const h = ch.health;
@@ -3787,7 +3812,7 @@ document.addEventListener('alpine:init', () => {
     },
     kindText(k) { return { incident_opened: 'Opened', incident_repeat: 'Reminder', incident_recovered: 'Recovered', summary: 'Summary', test: 'Test' }[k] || k; },
     deliveryClass(st) { return { delivered: 'green', pending: 'yellow', dead_lettered: 'red' }[st] || ''; },
-    formatDate(d) { return d ? new Date(d).toLocaleString() : ''; },
+    formatDate(d) { return relTime(d); },
 
     async addSilence() {
       const body = { scope: this.draft.scope, target: this.draft.scope === 'all' ? '' : (this.draft.target || '').trim(),
@@ -3883,13 +3908,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'not checked';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'not checked' : ageText(seconds);
     },
 
     serverProblem(s) {
@@ -4566,13 +4585,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'never';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'never' : ageText(seconds);
     },
 
     bytesLabel(bytes) {
@@ -5045,13 +5058,7 @@ document.addEventListener('alpine:init', () => {
       return `${v >= 10 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
     },
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'never';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'never' : ageText(seconds);
     },
     countsSummary(row) {
       const c = row.counts || {};
@@ -5332,19 +5339,16 @@ document.addEventListener('alpine:init', () => {
       return candidate.error || '';
     },
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'never';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'never' : ageText(seconds);
     },
   }));
 
   // ── Monitors Page ──
   Alpine.data('monitorsPage', () => withAsyncLoad({
     monitors: [],
+    // Rule ids of monitors with an open incident (Alerts v2). Null when the
+    // incidents could not be read: the dot then falls back to the last check.
+    openIncidents: null,
     selectedMonitor: null,
     showCreateDialog: false,
     creating: false,
@@ -5442,9 +5446,13 @@ document.addEventListener('alpine:init', () => {
     async loadMonitors() {
       const generation = ++this._loadGeneration;
       try {
-        const data = await rawFetch.get('/api/monitors');
+        const [data, incidents] = await Promise.all([
+          rawFetch.get('/api/monitors'),
+          api.get('/api/alerts/incidents').catch(() => null),
+        ]);
         if (!this._alive || generation !== this._loadGeneration) return;
         this.monitors = data || [];
+        this.openIncidents = incidents ? arr(incidents.open).filter((i) => !i.source || i.source === 'monitor' || i.source === 'heartbeat').map((i) => i.rule_id) : null;
         this.loadError = null;
         this.loadedAt = new Date().toISOString();
       } catch (e) {
@@ -5632,9 +5640,23 @@ document.addEventListener('alpine:init', () => {
       return text + '.';
     },
 
+    // The dot is the CURRENT state: red while an incident is open or the
+    // newest check failed, green when the newest check passed, grey when
+    // paused or not checked yet. The 24h uptime stays as text beside it.
+    monitorState(m) {
+      if (m.enabled === false) return 'paused';
+      if (this.openIncidents && this.openIncidents.includes(m.id)) return 'down';
+      const c = m.last_check;
+      if (!c) return 'unknown';
+      return c.status === 'up' ? 'up' : 'down';
+    },
     getMonitorDot(m) {
-      if (!m.stats || m.stats.total_checks === 0) return 'gray';
-      return m.stats.uptime_percent >= 99 ? 'green' : m.stats.uptime_percent >= 95 ? 'yellow' : 'red';
+      return { up: 'green', down: 'red', paused: 'gray', unknown: 'gray' }[this.monitorState(m)];
+    },
+    monitorStateLabel(m) {
+      const c = m.last_check;
+      const when = c ? ' (checked ' + relTime(c.checked_at) + ')' : '';
+      return { up: 'Up now', down: 'Down now', paused: 'Paused', unknown: 'Not checked yet' }[this.monitorState(m)] + (this.monitorState(m) === 'paused' ? '' : when);
     },
 
     // ── Alert delivery status (D08) ──
@@ -5671,9 +5693,7 @@ document.addEventListener('alpine:init', () => {
       return Math.round(ns / 1000000) + 'ms';
     },
 
-    formatDate(d) {
-      return new Date(d).toLocaleString();
-    },
+    formatDate(d) { return relTime(d); },
   }));
 
   // ── Homepage ──

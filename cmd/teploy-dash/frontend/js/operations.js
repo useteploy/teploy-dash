@@ -11,11 +11,11 @@ function opDuration(op) {
   return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
 }
 
+// Operation times use the one date helper (relTime in app.js): relative
+// text here, the exact time in the title the templates set.
 function opWhen(iso) {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString('en-US', {
-    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  });
+  return relTime(iso);
 }
 
 document.addEventListener('alpine:init', () => {

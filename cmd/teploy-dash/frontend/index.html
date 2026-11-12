@@ -886,7 +886,7 @@
                         </tr>
                         <tr x-show="health.observed_at">
                           <td>Checked</td>
-                          <td class="card-meta" style="margin:0;" x-text="new Date(health.observed_at).toLocaleString()"></td>
+                          <td class="card-meta" style="margin:0;" x-time="health.observed_at"></td>
                         </tr>
                       </tbody>
                     </table>
@@ -1281,7 +1281,7 @@
                                 <span class="badge" x-show="c.commit === settings.applied_commit">running</span>
                                 <div class="card-meta" x-text="c.message"></div>
                               </td>
-                              <td x-text="formatWhen(c.date)"></td>
+                              <td x-time="c.date"></td>
                               <td x-text="c.author"></td>
                               <td>
                                 <button class="btn btn-sm" @click="viewSettingsAt(c.commit)">View</button>
@@ -1513,7 +1513,7 @@
                       <template x-for="ev in events" :key="ev.id || ev.seq">
                         <tr>
                           <td class="mono" x-text="ev.kind"></td>
-                          <td x-text="formatWhen(ev.ts)"></td>
+                          <td x-time="ev.ts"></td>
                           <td>
                             <span class="status-dot" :class="eventOutcomeClass(ev)" style="margin-right: 6px;"></span>
                             <span x-text="ev.outcome"></span>
@@ -1574,7 +1574,7 @@
                     <tbody>
                       <template x-for="entry in deployLog" :key="entry.ts">
                         <tr>
-                          <td x-text="new Date(entry.ts).toLocaleString()"></td>
+                          <td x-time="entry.ts"></td>
                           <td x-text="entry.type"></td>
                           <td style="font-family: var(--mono); font-size: 12px;" x-text="entry.hash || '-'"></td>
                           <td>
@@ -1631,7 +1631,7 @@
                             <span class="badge green" x-show="rel.current">current</span>
                             <div class="card-meta" x-show="!rel.current && !rel.rollback_available && rel.reason" x-text="rel.reason"></div>
                           </td>
-                          <td x-text="rel.deployed_at ? new Date(rel.deployed_at).toLocaleString() : '-'"></td>
+                          <td x-time="rel.deployed_at"></td>
                           <td style="font-family: var(--mono); font-size: 12px;" x-text="rel.image || '-'"></td>
                           <td class="card-meta" x-text="rel.actor || '-'"></td>
                           <td>
@@ -1703,7 +1703,7 @@
                             <td style="font-family: var(--mono); font-size: 12px;" x-text="b.id"></td>
                             <td x-text="backupKindLabel(b)"></td>
                             <td x-text="formatBytes(b.size_bytes)"></td>
-                            <td x-text="new Date(b.created_at).toLocaleString()"></td>
+                            <td x-time="b.created_at"></td>
                             <td>
                               <button x-show="canRestoreData() && b.restorable" class="btn btn-sm btn-danger" @click="openBackupRestore(b)">Restore</button>
                             </td>
@@ -1913,7 +1913,7 @@
                     <strong x-show="firstFailingLabel(row)" x-text="firstFailingLabel(row) + ': '"></strong>
                     <span x-text="row.evidence || ''"></span>
                   </td>
-                  <td class="text-muted" x-text="ageLabel(row.age_seconds)"></td>
+                  <td class="text-muted" data-label="Checked" x-text="ageLabel(row.age_seconds)"></td>
                 </tr>
               </template>
             </tbody>
@@ -2749,7 +2749,7 @@
                           <div class="text-muted" x-text="'history ' + row.auto.history"></div>
                         </template>
                         <template x-if="row.manual && row.state !== 'never'">
-                          <div class="text-muted" x-text="[row.manual.last_date ? 'backup ' + row.manual.last_date : '', row.manual.last_metric, row.manual.last_duration_ms ? (row.manual.last_duration_ms / 1000).toFixed(1) + 's' : '', formatDate(row.manual.last_run_at)].filter(Boolean).join(' · ')"></div>
+                          <div class="text-muted" x-text="[row.manual.last_date ? 'backup ' + row.manual.last_date : '', row.manual.last_metric, row.manual.last_duration_ms ? (row.manual.last_duration_ms / 1000).toFixed(1) + 's' : '', formatDate(row.manual.last_run_at)].filter(Boolean).join(' · ')" :title="formatObservedAt(row.manual.last_run_at)"></div>
                         </template>
                         <template x-if="row.manual && !row.manual.last_ok && row.manual.last_detail">
                           <div class="check-msg" x-text="row.manual.last_detail"></div>
@@ -2967,7 +2967,7 @@
                 <a class="monitor-card" :href="'/monitors/' + encodeURIComponent(m.id)" @click.prevent="selectMonitor(m.id)">
                   <div class="monitor-header">
                 <div class="monitor-status">
-                  <span class="dot" :class="getMonitorDot(m)"></span>
+                  <span class="dot" :class="getMonitorDot(m)" role="img" :aria-label="monitorStateLabel(m)" :title="monitorStateLabel(m)"></span>
                   <span class="monitor-name" x-text="m.name"></span>
                   <span class="monitor-type badge" x-text="m.type"></span>
                   <!-- D08: a failing alert delivery warns at list level. -->
@@ -3032,7 +3032,7 @@
                   <div style="margin-top: 6px; font-size: 13px;">
                     <span class="badge" :class="inc.severity === 'critical' ? 'red' : 'yellow'" x-text="inc.source"></span>
                     <span x-text="inc.name"></span>
-                    <span class="card-meta" x-text="' since ' + formatDate(inc.started_at) + (inc.notified ? '' : ' (not announced: no channel was configured)')"></span>
+                    <span class="card-meta" x-text="' since ' + formatDate(inc.started_at) + (inc.notified ? '' : ' (not announced: no channel was configured)')" :title="formatObservedAt(inc.started_at)"></span>
                     <div class="card-meta" style="margin: 2px 0 0; font-family: var(--mono);" x-show="inc.message" x-text="inc.message"></div>
                   </div>
                 </template>
@@ -3052,7 +3052,7 @@
                 <template x-for="sl in silences" :key="sl.id">
                   <div style="display: flex; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 4px;">
                     <span x-text="silenceLabel(sl)"></span>
-                    <span class="card-meta" style="margin: 0;" x-text="'until ' + formatDate(sl.expires_at) + (sl.reason ? ' - ' + sl.reason : '') + (sl.created_by ? ' (' + sl.created_by + ')' : '')"></span>
+                    <span class="card-meta" style="margin: 0;" x-text="'ends ' + formatDate(sl.expires_at) + (sl.reason ? ' - ' + sl.reason : '') + (sl.created_by ? ' (' + sl.created_by + ')' : '')" :title="formatObservedAt(sl.expires_at)"></span>
                     <button class="btn btn-sm" @click="removeSilence(sl.id)">End</button>
                   </div>
                 </template>
@@ -3100,7 +3100,7 @@
                   <div style="margin-top: 6px; font-size: 13px;">
                     <span class="badge" :class="deliveryClass(d.status)" x-text="d.status"></span>
                     <span x-text="kindText(d.kind) + ': ' + (d.rule_name || d.rule_id)"></span>
-                    <span class="card-meta" x-text="' ' + formatDate(d.created_at)"></span>
+                    <span class="card-meta" x-text="' ' + formatDate(d.created_at)" :title="formatObservedAt(d.created_at)"></span>
                     <div class="card-meta" style="margin: 2px 0 0;" x-show="d.note" x-text="d.note"></div>
                     <div class="card-meta" style="margin: 2px 0 0; font-family: var(--mono); word-break: break-word;" x-show="d.status !== 'delivered' && d.last_error" x-text="d.last_error"></div>
                   </div>
@@ -3211,17 +3211,17 @@
                         x-text="selectedMonitor.delivery.status"></span>
                   <span x-text="'attempt ' + (selectedMonitor.delivery.attempts || 0)"></span>
                   <span class="card-meta" style="margin: 0;"
-                        x-text="'event: ' + selectedMonitor.delivery.event_status + ' at ' + formatDate(selectedMonitor.delivery.occurred_at)"></span>
+                        x-text="'event: ' + selectedMonitor.delivery.event_status + ', ' + formatDate(selectedMonitor.delivery.occurred_at)" :title="formatObservedAt(selectedMonitor.delivery.occurred_at)"></span>
                   <span class="card-meta" style="margin: 0;"
                         x-show="selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at"
-                        x-text="'next retry: ' + formatDate(selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at)"></span>
+                        x-text="'next retry: ' + formatDate(selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at)" :title="formatObservedAt(selectedMonitor.delivery.next_retry_at || selectedMonitor.delivery.next_attempt_at)"></span>
                 </div>
                 <p x-show="selectedMonitor.delivery.last_error"
                    style="margin: 10px 0 0; color: var(--red); font-size: 12px; font-family: var(--mono); word-break: break-word;"
                    x-text="'last failure: ' + selectedMonitor.delivery.last_error"></p>
                 <p x-show="selectedMonitor.delivery.last_attempt_at"
                    class="card-meta" style="margin: 4px 0 0;"
-                   x-text="'last attempt: ' + formatDate(selectedMonitor.delivery.last_attempt_at)"></p>
+                   x-text="'last attempt: ' + formatDate(selectedMonitor.delivery.last_attempt_at)" :title="formatObservedAt(selectedMonitor.delivery.last_attempt_at)"></p>
               </div>
             </div>
           </template>
@@ -3236,7 +3236,7 @@
                   <span class="check-status" x-text="check.status"></span>
                   <span class="check-code" x-show="check.status_code" x-text="check.status_code"></span>
                   <span class="check-time" x-text="fmtMs(check.response_time)"></span>
-                  <span class="check-date" x-text="formatDate(check.checked_at)"></span>
+                  <span class="check-date" x-time="check.checked_at"></span>
                   <span class="check-msg" x-show="check.message" x-text="check.message"></span>
                 </div>
               </template>
@@ -3930,13 +3930,13 @@
               <template x-for="op in ops" :key="op.id">
                 <tr style="cursor:pointer;" @click="open(op)">
                   <td>
-                    <span class="status-dot" :class="{ running: op.status === 'running' || op.status === 'succeeded', stopped: op.status === 'failed' || op.status === 'interrupted', unknown: op.status === 'queued' || op.status === 'canceled' }"></span>
+                    <span class="status-dot" :class="opDotClass(op.status)"></span>
                     <span x-text="op.status"></span>
                   </td>
                   <td style="font-family: var(--mono); font-size: 12px;" x-text="op.request.kind"></td>
                   <td x-text="op.target"></td>
                   <td x-text="op.attempt"></td>
-                  <td x-text="when(op.started_at || op.created_at)"></td>
+                  <td x-text="when(op.started_at || op.created_at)" :title="formatObservedAt(op.started_at || op.created_at)"></td>
                   <td x-text="duration(op)"></td>
                 </tr>
               </template>
@@ -3974,13 +3974,13 @@
             <div class="card">
               <div class="card-meta">Status</div>
               <div class="card-title">
-                <span class="status-dot" :class="{ running: op.status === 'running' || op.status === 'succeeded', stopped: op.status === 'failed' || op.status === 'interrupted', unknown: op.status === 'queued' || op.status === 'canceled' }"></span>
+                <span class="status-dot" :class="opDotClass(op.status)"></span>
                 <span x-text="op.status"></span>
               </div>
             </div>
             <div class="card">
               <div class="card-meta">Started</div>
-              <div class="card-title" style="font-size: 13px;" x-text="when(op.started_at)"></div>
+              <div class="card-title" style="font-size: 13px;" x-text="when(op.started_at)" :title="op.started_at ? formatObservedAt(op.started_at) : null"></div>
             </div>
             <div class="card">
               <div class="card-meta">Duration</div>
@@ -4686,7 +4686,7 @@
                       <td class="card-meta" x-text="hb.url_hint"></td>
                       <td>
                         <span class="badge" :class="hb.last ? (hb.last.ok ? 'green' : 'red') : ''" x-text="hb.last ? (hb.last.ok ? 'ok' : 'failed') : 'not yet'"></span>
-                        <div class="card-meta" style="margin: 2px 0 0;" x-show="hb.last" x-text="hb.last ? (formatDate(hb.last.at) + (hb.last.error ? ' - ' + hb.last.error : '')) : ''"></div>
+                        <div class="card-meta" style="margin: 2px 0 0;" x-show="hb.last" x-text="hb.last ? (formatDate(hb.last.at) + (hb.last.error ? ' - ' + hb.last.error : '')) : ''" :title="hb.last ? formatObservedAt(hb.last.at) : null"></div>
                       </td>
                       <td style="display: flex; gap: 6px; justify-content: flex-end;">
                         <button class="btn btn-sm" @click="testHeartbeat(hb.id)">Ping now</button>
@@ -4818,8 +4818,8 @@
                       <tr>
                         <td x-text="t.name"></td>
                         <td x-text="t.read_only ? 'Read-only' : 'Read + actions'"></td>
-                        <td style="font-size: 12px;" x-text="new Date(t.created_at).toLocaleDateString()"></td>
-                        <td style="font-size: 12px;" x-text="t.last_used && !t.last_used.startsWith('0001') ? new Date(t.last_used).toLocaleString() : 'never'"></td>
+                        <td style="font-size: 12px;" x-time="t.created_at"></td>
+                        <td style="font-size: 12px;" x-text="t.last_used && !t.last_used.startsWith('0001') ? relTime(t.last_used) : 'never'" :title="t.last_used && !t.last_used.startsWith('0001') ? formatObservedAt(t.last_used) : null"></td>
                         <td style="text-align: right;">
                           <button class="btn btn-sm btn-danger" @click="deleteMcpToken(t.id)">Revoke</button>
                         </td>
@@ -4976,7 +4976,7 @@
                                :title="p.subject" x-text="p.email || ssoSubjectTail(p.subject)"></div>
                         </td>
                         <td x-text="p.role"></td>
-                        <td style="font-size: 12px;" x-text="fmtDate(p.last_sign_in)"></td>
+                        <td style="font-size: 12px;" x-text="fmtDate(p.last_sign_in)" :title="p.last_sign_in && !String(p.last_sign_in).startsWith('0001') ? formatObservedAt(p.last_sign_in) : null"></td>
                         <td style="text-align: right;">
                           <button class="btn btn-sm btn-danger" @click="revokeSSO(p)">Revoke sessions</button>
                         </td>

@@ -112,6 +112,23 @@ assert(/\.field input\[type="checkbox"\][^{]*\{[^}]*width: auto/.test(css), 'fie
   });
 }
 
+// One date helper: no locale date strings in templates; times go through
+// x-time or relTime with the exact time in a title.
+{
+  assert(!/toLocale(Date)?String\(\)/.test(html), 'templates format no dates by hand');
+  assert(js.includes("Alpine.directive('time'"), 'the x-time directive exists');
+  assert(!/new Date\(d\)\.toLocaleString\(\)/.test(js), 'components delegate formatDate to relTime');
+  const ageCopies = (js.match(/ageLabel\(seconds\) \{\n\s+return seconds === undefined \|\| seconds === null \? '(never|not checked)' : ageText\(seconds\);/g) || []).length;
+  assert(ageCopies === 4, 'every ageLabel delegates to ageText (' + ageCopies + ')');
+}
+
+// Monitor and operation dots show the current state.
+{
+  assert(js.includes('monitorState(m)') && js.includes("c.status === 'up' ? 'up' : 'down'"), 'the monitor dot reads the newest check');
+  assert(!/uptime_percent >= 99 \? 'green'/.test(js), 'the dot no longer derives from 24h uptime');
+  assert(!html.includes("running: op.status === 'running' || op.status === 'succeeded'"), 'a running operation is not painted like a succeeded one');
+}
+
 function finish() {
 if (failures.length) { console.error(`FAIL (${failures.length}):`); failures.forEach((f) => console.error('  - ' + f)); process.exit(1); }
 console.log('nav_rework.test: all assertions passed');
