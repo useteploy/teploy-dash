@@ -6,6 +6,7 @@
 // gated on the CLI capability that provides it.
 //
 // Run: node cmd/teploy-dash/frontend-test/config_home.test.mjs
+import { bridgeDialogs } from './dialog_bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -61,6 +62,7 @@ globalThis.fetch = async (url, init = {}) => {
 
 new Function(readFileSync(join(here, '../frontend/js/app.js'), 'utf8'))();
 alpineInitListeners.forEach((fn) => fn());
+bridgeDialogs(stores);
 // app.js registers its own router store; record navigations on it.
 stores.router.params = { server: 'prod', name: 'web' };
 stores.router.navigate = (page, params) => navigations.push([page, params]);

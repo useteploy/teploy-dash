@@ -8,6 +8,7 @@
 // API responses.
 //
 // Run: node cmd/teploy-dash/frontend-test/db_actions.test.mjs
+import { bridgeDialogs } from './dialog_bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -55,9 +56,11 @@ globalThis.fetch = async (url, init) => {
 };
 
 const components = {};
+const dialogStore = {};
+bridgeDialogs({ dialog: dialogStore });
 globalThis.Alpine = {
   data: (name, factory) => { components[name] = factory; },
-  store: () => ({ navigate() {}, restore() {}, params: { server: 'prod', name: 'web' }, page: 'app-detail' }),
+  store: (name) => name === 'dialog' ? dialogStore : ({ navigate() {}, restore() {}, params: { server: 'prod', name: 'web' }, page: 'app-detail' }),
   effect: (fn) => fn(),
 };
 

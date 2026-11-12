@@ -292,6 +292,11 @@ a.status-row:hover { background: var(--bg-card-hover); }
 .dialog { width: 100%; max-width: 470px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
 .dialog h2 { margin-bottom: 18px; font-size: 16px; font-weight: 600; }
 .dialog-actions { display: flex; margin-top: 20px; justify-content: flex-end; gap: 8px; }
+.danger-zone { margin-top: 32px; }
+.danger-zone .section-title { margin-bottom: 8px; color: var(--red); }
+.danger-row { display: flex; padding: 14px 16px; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; border: 1px solid var(--red); border-radius: var(--radius); background: var(--bg-card); }
+.danger-row .card-meta { max-width: 60ch; }
+.dialog-message { margin-bottom: 14px; color: var(--text-secondary); white-space: pre-line; overflow-wrap: anywhere; }
 .toast-container { position: fixed; right: 20px; bottom: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
 .toast { min-width: 220px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--text); font-size: 12px; }
 .toast.success { border-color: var(--green); color: var(--green); }
@@ -563,6 +568,9 @@ code { overflow-wrap: anywhere; }
 }
 .menu-item:hover, .menu-item:focus-visible { background: var(--bg-card-hover); }
 .menu-item.danger { color: var(--red); }
+.card-menu { position: absolute; top: 6px; right: 6px; }
+.card-menu-btn { width: 28px; height: 28px; color: var(--text-muted); }
+.card-menu .menu { min-width: 180px; }
 .menu-note { color: var(--text-muted); font-size: 11px; }
 
 .btn-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }

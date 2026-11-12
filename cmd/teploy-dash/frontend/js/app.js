@@ -281,6 +281,35 @@ function relTime(iso) {
   return diff >= 0 ? text + ' ago' : 'in ' + text;
 }
 
+// ── Confirm dialog (2026-11 rework) ──
+// One dialog for every confirmation and every question that used to be a
+// browser confirm() or prompt(). askConfirm resolves true/false; a `typed`
+// name must be typed exactly before the confirm button enables. askForm
+// shows labelled fields and resolves their values, or null when cancelled.
+//   askConfirm({ title, message, confirmLabel, danger, typed })
+//   askForm({ title, message, confirmLabel, danger, typed, fields: [{ key, label, value, type, placeholder, hint, required, minLength }] })
+function askConfirm(opts) {
+  if (typeof opts === 'string') opts = questionDialog(opts);
+  return Alpine.store('dialog').open({ ...opts, kind: 'confirm' });
+}
+// questionDialog turns a one-string question ("Remove x?\n\nWhat happens.")
+// into dialog options: the question is the title, the rest the message, and
+// the confirm button is named by the question's verb.
+function questionDialog(text) {
+  let title = String(text), message = '';
+  const para = title.indexOf('\n\n');
+  if (para > 0) { message = title.slice(para + 2); title = title.slice(0, para); }
+  else {
+    const q = title.indexOf('? ');
+    if (q > 0) { message = title.slice(q + 2); title = title.slice(0, q + 1); }
+  }
+  const verb = (title.match(/^(Sign out|Roll back|[A-Z][a-z]+)/) || [''])[0];
+  const labels = { Roll: 'Roll back', Edit: 'Switch', Poll: 'Poll now', Put: 'Start maintenance', Restore: 'Restore settings' };
+  const danger = /^(Delete|Remove|Revoke|Stop|Roll|Sign out|Restart|Reset)\b/.test(title);
+  return { title, message, confirmLabel: labels[verb] || verb || 'Confirm', danger };
+}
+function askForm(opts) { return Alpine.store('dialog').open({ ...opts, kind: 'form' }); }
+
 // ── Accessibility helpers ──
 // trapDialogFocus keeps Tab/Shift+Tab inside an open dialog (A49/A58).
 // Attach with @keydown.tab on the dialog overlay; focus is kept within the
@@ -552,6 +581,49 @@ document.addEventListener('alpine:init', () => {
   });
   Alpine.store('router').restore();
   window.addEventListener('popstate', () => Alpine.store('router').restore());
+
+  Alpine.store('dialog', {
+    current: null,
+    values: {},
+    typedValue: '',
+    _resolve: null,
+    _returnFocus: null,
+    open(opts) {
+      if (this._resolve) this._finish(false);
+      this.current = { title: '', message: '', confirmLabel: 'Confirm', danger: false, typed: '', fields: [], ...opts };
+      this.values = {};
+      for (const f of this.current.fields) this.values[f.key] = f.value ?? '';
+      this.typedValue = '';
+      this._returnFocus = typeof document !== 'undefined' ? document.activeElement : null;
+      return new Promise((resolve) => { this._resolve = resolve; });
+    },
+    canSubmit() {
+      const c = this.current;
+      if (!c) return false;
+      if (c.typed && this.typedValue !== c.typed) return false;
+      for (const f of c.fields) {
+        const v = String(this.values[f.key] ?? '');
+        if (f.required && !v.trim()) return false;
+        if (f.minLength && v.length < f.minLength) return false;
+      }
+      return true;
+    },
+    submit() {
+      if (!this.canSubmit()) return;
+      this._finish(true);
+    },
+    cancel() { this._finish(false); },
+    _finish(ok) {
+      const c = this.current, resolve = this._resolve;
+      const result = c && c.kind === 'form' ? (ok ? { ...this.values } : null) : !!ok;
+      this.current = null;
+      this._resolve = null;
+      const back = this._returnFocus;
+      this._returnFocus = null;
+      if (back && typeof back.focus === 'function') setTimeout(() => back.focus(), 0);
+      if (resolve) resolve(result);
+    },
+  });
 
   // ── Service-link icons ──
   // Built-in monochrome glyphs, drawn in the current text colour so they flip
@@ -895,7 +967,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async createProject(groupName) {
-      const name = prompt('Project name:');
+      const form = await askForm({ title: 'New project in ' + groupName, confirmLabel: 'Create project',
+        fields: [{ key: 'name', label: 'Project name', required: true, placeholder: 'storefront' }] });
+      const name = form && form.name.trim();
       if (!name) return;
       try {
         await api.post(`/api/groups/${encodeURIComponent(groupName)}/projects`, { name });
@@ -907,7 +981,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async createGroup() {
-      const name = prompt('Group name:');
+      const form = await askForm({ title: 'New group', confirmLabel: 'Create group',
+        fields: [{ key: 'name', label: 'Group name', required: true, placeholder: 'Shop', hint: 'Groups hold projects, and projects hold apps.' }] });
+      const name = form && form.name.trim();
       if (!name) return;
       try {
         await api.post('/api/groups', { name });
@@ -919,7 +995,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteProject(groupName, projectName) {
-      if (!confirm(`Delete project "${projectName}"? Apps inside remain in the group.`)) return;
+      if (!(await askConfirm(`Delete project "${projectName}"? Apps inside remain in the group.`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`);
         showToast('Project deleted', 'success');
@@ -935,7 +1011,7 @@ document.addEventListener('alpine:init', () => {
       const refs = (group?.server_apps || []).filter(ref => ref.app === appName);
       const scoped = refs.some(ref => ref.server_id === app.server_id);
       const query = scoped ? `?server_id=${encodeURIComponent(app.server_id)}` : '?legacy=1';
-      if (!confirm(`Remove "${appName}" from group "${groupName}"?`)) return;
+      if (!(await askConfirm(`Remove "${appName}" from group "${groupName}"?`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/apps/${encodeURIComponent(appName)}${query}`);
         showToast('App removed from group', 'success');
@@ -1028,7 +1104,7 @@ document.addEventListener('alpine:init', () => {
       const project = (group?.projects || []).find(p => p.name === this.projectName);
       const scoped = (project?.server_apps || []).some(ref => ref.app === appName && ref.server_id === app.server_id);
       const query = scoped ? `?server_id=${encodeURIComponent(app.server_id)}` : '?legacy=1';
-      if (!confirm(`Remove "${appName}" from project "${this.projectName}"?`)) return;
+      if (!(await askConfirm(`Remove "${appName}" from project "${this.projectName}"?`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}/apps/${encodeURIComponent(appName)}${query}`);
         if (!this.current(generation)) return;
@@ -1042,7 +1118,7 @@ document.addEventListener('alpine:init', () => {
     async deleteThisProject() {
       const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
       if (!this.current(generation)) return;
-      if (!confirm(`Delete project "${this.projectName}"? Apps remain in the group.`)) return;
+      if (!(await askConfirm(`Delete project "${this.projectName}"? Apps remain in the group.`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`);
         if (!this.current(generation)) return;
@@ -1056,7 +1132,9 @@ document.addEventListener('alpine:init', () => {
     async renameThisProject() {
       const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
       if (!this.current(generation)) return;
-      const name = prompt('Project name:', this.projectName);
+      const form = await askForm({ title: 'Rename project', confirmLabel: 'Rename',
+        fields: [{ key: 'name', label: 'Project name', value: this.projectName, required: true }] });
+      const name = form && form.name.trim();
       if (!name || name === this.projectName) return;
       try {
         await api.put(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`, { name });
@@ -1485,7 +1563,7 @@ document.addEventListener('alpine:init', () => {
 
     async restoreSettings(commit) {
       const target = this.resource;
-      if (!confirm(`Restore the settings from ${this.shortHash(commit)}?\n\nThey become the current settings as a new change; nothing is deployed until you deploy.`)) return;
+      if (!(await askConfirm(`Restore the settings from ${this.shortHash(commit)}?\n\nThey become the current settings as a new change; nothing is deployed until you deploy.`))) return;
       try {
         await api.post(`${this.appPath()}/config/restore`, { commit });
         if (this.resource !== target) return;
@@ -1498,7 +1576,7 @@ document.addEventListener('alpine:init', () => {
 
     async deployPending() {
       const target = this.resource;
-      if (!confirm(`Deploy ${target.name} on ${target.server} with its current settings?`)) return;
+      if (!(await askConfirm(`Deploy ${target.name} on ${target.server} with its current settings?`))) return;
       this.actionLoading = true;
       try {
         const op = await api.post(`${this.appPath()}/deploy`);
@@ -1514,7 +1592,7 @@ document.addEventListener('alpine:init', () => {
     // cannot, its refusal names the way forward.
     async makeEditableHere() {
       const target = this.resource;
-      if (!confirm(`Edit ${target.name}'s settings in Teploy from now on?\n\nTeploy rebuilds them from what is running, and only switches if that matches exactly. After this, deploys from the app's folder are refused until you switch back.`)) return;
+      if (!(await askConfirm(`Edit ${target.name}'s settings in Teploy from now on?\n\nTeploy rebuilds them from what is running, and only switches if that matches exactly. After this, deploys from the app's folder are refused until you switch back.`))) return;
       this.settingsSaving = true;
       try {
         await api.post(`${this.appPath()}/config/home`, { home: 'teploy' });
@@ -1531,7 +1609,7 @@ document.addEventListener('alpine:init', () => {
     // content offered as a teploy.yml download for the app's folder.
     async moveSettingsToFolder() {
       const target = this.resource;
-      if (!confirm(`Edit ${target.name}'s settings in a folder again?\n\nThe Teploy settings are kept in history and downloaded as teploy.yml; deploy from the folder that holds it from now on.`)) return;
+      if (!(await askConfirm(`Edit ${target.name}'s settings in a folder again?\n\nThe Teploy settings are kept in history and downloaded as teploy.yml; deploy from the folder that holds it from now on.`))) return;
       this.settingsSaving = true;
       try {
         const res = await api.post(`${this.appPath()}/config/home`, { home: 'folder' });
@@ -1618,7 +1696,7 @@ document.addEventListener('alpine:init', () => {
 
     async rollbackTo(rel) {
       const target = this.resource;
-      if (!confirm(`Roll ${target.name} on ${target.server} back to ${this.shortHash(rel.release)}?\n\nIt was deployed ${rel.deployed_at ? new Date(rel.deployed_at).toLocaleString() : '(date unknown)'}${rel.image ? ' from ' + rel.image : ''}. The running release is replaced by it.`)) return;
+      if (!(await askConfirm(`Roll ${target.name} on ${target.server} back to ${this.shortHash(rel.release)}?\n\nIt was deployed ${rel.deployed_at ? new Date(rel.deployed_at).toLocaleString() : '(date unknown)'}${rel.image ? ' from ' + rel.image : ''}. The running release is replaced by it.`))) return;
       this.actionLoading = true;
       try {
         const op = await api.post(`${this.appPath()}/rollback`, { to: rel.release });
@@ -1659,7 +1737,7 @@ document.addEventListener('alpine:init', () => {
 
     async deleteSecret(key) {
       const target = this.resource;
-      if (!confirm(`Remove secret ${key}?\n\nContainers keep the old value in their environment until the app is redeployed.`)) return;
+      if (!(await askConfirm(`Remove secret ${key}?\n\nContainers keep the old value in their environment until the app is redeployed.`))) return;
       try {
         await api.del(`${this.appPath()}/secrets/${encodeURIComponent(key)}`);
         if (this.resource !== target) return;
@@ -2049,7 +2127,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async delKv(key) {
-      if (!confirm(`Delete ${key}?\n\nThis KV store is shared — anything else using this accessory loses the key too.`)) return;
+      if (!(await askConfirm(`Delete ${key}?\n\nThis KV store is shared — anything else using this accessory loses the key too.`))) return;
       try {
         await api.del(`${this.appPath()}/kv${this.kvQuery({ key })}`);
         showToast('Key removed', 'success');
@@ -2238,7 +2316,7 @@ document.addEventListener('alpine:init', () => {
     async gitConfirmHostKeys() {
       const fingerprints = (this.gitHostKeys && this.gitHostKeys.host_key_fingerprints) || [];
       const question = `The forge's host keys are pinned:\n\n${fingerprints.join('\n')}\n\nVerify they match the fingerprints your forge publishes, then confirm to finish the connection.`;
-      if (!confirm(question)) return;
+      if (!(await askConfirm({ title: 'Check the forge host keys', message: question, confirmLabel: 'They match' }))) return;
       const target = this.resource;
       this.gitBusy = true;
       this.gitError = '';
@@ -2270,7 +2348,7 @@ document.addEventListener('alpine:init', () => {
     // polls immediately.
     async gitRetry() {
       const target = this.resource;
-      if (!confirm(`Poll ${target.name} now? A commit that exhausted its retry budget is polled again.`)) return;
+      if (!(await askConfirm(`Poll ${target.name} now? A commit that exhausted its retry budget is polled again.`))) return;
       this.gitBusy = true;
       this.gitError = '';
       try {
@@ -2289,11 +2367,10 @@ document.addEventListener('alpine:init', () => {
     async gitResetWatermark() {
       const ref = (this.gitShow && this.gitShow.trigger && this.gitShow.trigger.ref) || '';
       if (!ref) return;
-      const typed = prompt(`Reset the watermark for ${ref}?\n\nThe next poll admits the CURRENT head even if it does not descend from the last admitted commit (needed after a force-push). Type the ref to confirm:`, '');
-      if (typed === null || typed.trim() !== ref) {
-        if (typed !== null) showToast('Type the ref exactly to confirm', 'error');
-        return;
-      }
+      const ok = await askConfirm({ title: `Reset the watermark for ${ref}?`, typed: ref, danger: true, confirmLabel: 'Reset watermark',
+        message: 'The next poll admits the CURRENT head even if it does not descend from the last admitted commit (needed after a force-push).' });
+      if (!ok) return;
+      const typed = ref;
       const target = this.resource;
       this.gitBusy = true;
       this.gitError = '';
@@ -2349,7 +2426,7 @@ document.addEventListener('alpine:init', () => {
       // the page is displaying.
       if (!target || !this.app || this.app.name !== target.name || this.app.server !== target.server) return;
       const question = this.actionConfirmation(action);
-      if (question && !confirm(question)) return;
+      if (question && !(await askConfirm(question))) return;
       this.actionLoading = true;
       try {
         const result = await api.post(`${this.appPath()}/${action}`);
@@ -2374,9 +2451,14 @@ document.addEventListener('alpine:init', () => {
       // has not (yet) loaded, or no longer matches the route, must not
       // submit anything (A49).
       if (!this.app || this.app.name !== target.name || this.app.server !== target.server) return;
-      if (!confirm(`Remove ${target.name} from ${target.server}?\n\nThis stops and removes its containers, removes its route, and deletes its deploy state. Volumes and accessory data are preserved.`)) return;
-      const redirect = prompt('Optional: leave a permanent redirect to this URL (blank for none):', '');
-      if (redirect === null) return; // cancelled
+      const form = await askForm({
+        title: `Remove ${target.name} from ${target.server}?`,
+        message: 'This stops and removes its containers, removes its route, and deletes its deploy state. Volumes and accessory data are preserved.',
+        fields: [{ key: 'redirect', label: 'Redirect (optional)', type: 'url', placeholder: 'https://example.com', hint: 'Leave a permanent redirect to this URL in place of the app. Blank for none.' }],
+        typed: target.name, danger: true, confirmLabel: 'Remove app',
+      });
+      if (!form) return; // cancelled
+      const redirect = form.redirect || '';
       this.actionLoading = true;
       try {
         const op = await api.post(`/api/apps/${encodeURIComponent(target.server)}/${encodeURIComponent(target.name)}/remove`, { redirect: redirect.trim() });
@@ -2413,7 +2495,7 @@ document.addEventListener('alpine:init', () => {
 
     async deleteEnvVar(key) {
       if (this.envKeyLocked(key)) return; // read-only: owned by the source or the app's settings
-      if (!confirm(`Delete ${key}?`)) return;
+      if (!(await askConfirm(`Delete ${key}?`))) return;
       try {
         await api.del(`${this.appPath()}/env/${key}`);
         showToast('Env var removed', 'success');
@@ -2484,9 +2566,9 @@ document.addEventListener('alpine:init', () => {
     async accessoryAction(accessory, action) {
       const name = this.accessoryName(accessory.name);
       if (action === 'stop') {
-        if (!confirm(`Stop database ${name} on ${this.resource.server}?\n\nApps using ${name} lose their data connection until it is started again. In-flight queries abort. Persisted data is untouched.`)) return;
+        if (!(await askConfirm(`Stop database ${name} on ${this.resource.server}?\n\nApps using ${name} lose their data connection until it is started again. In-flight queries abort. Persisted data is untouched.`))) return;
       } else if (action === 'start') {
-        if (!confirm(`Start database ${name} on ${this.resource.server}?\n\nIt comes back empty-memory: connection pools and caches warm up from scratch. No data is changed.`)) return;
+        if (!(await askConfirm(`Start database ${name} on ${this.resource.server}?\n\nIt comes back empty-memory: connection pools and caches warm up from scratch. No data is changed.`))) return;
       }
       this.actionLoading = true;
       try {
@@ -2704,7 +2786,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteTest(id) {
-      if (!confirm('Delete this restore test?')) return;
+      if (!(await askConfirm('Delete this restore test?'))) return;
       try {
         await rawFetch.del('/api/restore-tests/' + id);
         await this.loadTests();
@@ -3028,7 +3110,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async resetUserPassword(username) {
-      const pw = prompt(`New password for ${username} (at least 8 characters):`);
+      const form = await askForm({ title: `New password for ${username}`, confirmLabel: 'Set password',
+        fields: [{ key: 'password', label: 'Password', type: 'password', required: true, minLength: 8, hint: 'At least 8 characters.' }] });
+      const pw = form && form.password;
       if (!pw) return;
       try {
         await api.post(`/api/users/${encodeURIComponent(username)}/password`, { password: pw });
@@ -3039,7 +3123,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteUser(username) {
-      if (!confirm(`Remove user ${username}? Any active sessions are ended immediately.`)) return;
+      if (!(await askConfirm(`Remove user ${username}? Any active sessions are ended immediately.`))) return;
       try {
         await api.del(`/api/users/${encodeURIComponent(username)}`);
         showToast('User removed', 'success');
@@ -3052,7 +3136,7 @@ document.addEventListener('alpine:init', () => {
     // A02 surface: durable session revocation — the epoch bump retires every
     // live session on its next request; the user simply signs in again.
     async revokeUserSessions(username) {
-      if (!confirm(`Sign out ${username} everywhere? Active sessions end on their next request.`)) return;
+      if (!(await askConfirm(`Sign out ${username} everywhere? Active sessions end on their next request.`))) return;
       try {
         await api.post(`/api/users/${encodeURIComponent(username)}/revoke-sessions`);
         showToast(`Sessions for ${username} revoked`, 'success');
@@ -3065,7 +3149,7 @@ document.addEventListener('alpine:init', () => {
     // pre-matrix permissions with its role's preset. The confirm is the
     // explicit act; the server applies it to live sessions immediately.
     async narrowToPreset(username) {
-      if (!confirm(`Narrow ${username} to its role's preset?\n\nPre-matrix permissions (including any env/KV value reads the old role allowed) are replaced by the preset for its current role. Active sessions pick up the change on their next request.`)) return;
+      if (!(await askConfirm(`Narrow ${username} to its role's preset?\n\nPre-matrix permissions (including any env/KV value reads the old role allowed) are replaced by the preset for its current role. Active sessions pick up the change on their next request.`))) return;
       try {
         await api.post(`/api/users/${encodeURIComponent(username)}/narrow-to-preset`);
         showToast(`${username} narrowed to preset`, 'success');
@@ -3093,7 +3177,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async revokeSSO(p) {
-      if (!confirm(`Sign out ${p.username || p.subject} everywhere? Active sessions end on their next request.`)) return;
+      if (!(await askConfirm(`Sign out ${p.username || p.subject} everywhere? Active sessions end on their next request.`))) return;
       try {
         await api.post('/api/sso/revoke', { subject: p.subject });
         showToast('SSO sessions revoked', 'success');
@@ -3130,7 +3214,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteMcpToken(id) {
-      if (!confirm('Revoke this token? Clients using it will lose access immediately.')) return;
+      if (!(await askConfirm('Revoke this token? Clients using it will lose access immediately.'))) return;
       try {
         await api.del(`/api/mcp-tokens/${encodeURIComponent(id)}`);
         this.createdMcpToken = '';
@@ -3158,7 +3242,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteServer(name) {
-      if (!confirm(`Remove server ${name}?`)) return;
+      if (!(await askConfirm({ title: `Remove server ${name}?`, typed: name, danger: true, confirmLabel: 'Remove server',
+        message: "This runs teploy server remove: the server leaves teploy's server list and Dash stops showing it." }))) return;
       try {
         await api.del(`/api/config/servers/${name}`);
         showToast('Server removed', 'success');
@@ -3181,7 +3266,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteGroup(name) {
-      if (!confirm(`Delete group ${name}?`)) return;
+      if (!(await askConfirm(`Delete group ${name}?`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(name)}`);
         showToast('Group deleted', 'success');
@@ -3192,7 +3277,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async renameGroup(oldName) {
-      const newName = prompt('New group name:', oldName);
+      const form = await askForm({ title: 'Rename group', confirmLabel: 'Rename',
+        fields: [{ key: 'name', label: 'Group name', value: oldName, required: true }] });
+      const newName = form && form.name.trim();
       if (!newName || newName === oldName) return;
       try {
         await api.put(`/api/groups/${encodeURIComponent(oldName)}`, { name: newName });
@@ -3267,7 +3354,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteRegistry(server) {
-      if (!confirm(`Remove registry ${server}?`)) return;
+      if (!(await askConfirm(`Remove registry ${server}?`))) return;
       try {
         await api.del(`/api/registries/${encodeURIComponent(server)}`);
         showToast('Registry removed', 'success');
@@ -3605,7 +3692,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteChannel(id) {
-      if (!confirm('Delete this alert channel?')) return;
+      if (!(await askConfirm('Delete this alert channel?'))) return;
       try {
         await api.del(`/api/notifications/channels/${encodeURIComponent(id)}`);
         showToast('Channel deleted', 'success');
@@ -3650,7 +3737,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteHeartbeat(id) {
-      if (!confirm('Remove this heartbeat receiver? It will alert when the pings stop, so pause or delete the check there too.')) return;
+      if (!(await askConfirm('Remove this heartbeat receiver? It will alert when the pings stop, so pause or delete the check there too.'))) return;
       try {
         await api.del(`/api/notifications/heartbeats/${encodeURIComponent(id)}`);
         await this.load();
@@ -3926,10 +4013,10 @@ document.addEventListener('alpine:init', () => {
         this.setupError = '';
         this.setupStep = step;
       },
-      closeSetup() {
+      async closeSetup() {
         // A key made and not saved opens nothing: its file must not be kept by mistake.
-        if (this.recoveryGen && typeof confirm === 'function' &&
-            !confirm('This recovery key was not saved to Dash, so no backup will use it. If you downloaded the file, it is no use: delete it. Close anyway?')) {
+        if (this.recoveryGen && !(await askConfirm({ title: 'Close without saving the recovery key?', danger: true, confirmLabel: 'Close anyway',
+          message: 'This recovery key was not saved to Dash, so no backup will use it. If you downloaded the file, it is no use: delete it.' }))) {
           return;
         }
         this.setupOpen = false;
@@ -5426,7 +5513,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteMonitor(id) {
-      if (!confirm('Delete this monitor?')) return;
+      if (!(await askConfirm('Delete this monitor?'))) return;
       try {
         await rawFetch.del('/api/monitors/' + id);
         if (this.detailId === id) this.openList();

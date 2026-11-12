@@ -74,5 +74,45 @@ assert(/\.field input\[type="checkbox"\][^{]*\{[^}]*width: auto/.test(css), 'fie
   assert(home.includes('unchecked()') && home.includes('Nothing needs attention'), 'a failed source is named, never read as nothing wrong');
 }
 
+// One confirm dialog: no browser confirm() or prompt() is left.
+{
+  const strip = (src) => src.replace(/\/\/.*$/gm, '').replace(/<!--[\s\S]*?-->/g, '');
+  for (const [name, src] of [['js/app.js', js], ['index.html', html], ['js/operations.js', read('js/operations.js')]]) {
+    assert(!/(^|[^\w.$])confirm\(/.test(strip(src)), `${name} still calls confirm()`);
+    assert(!/(^|[^\w.$])prompt\(/.test(strip(src)), `${name} still calls prompt()`);
+  }
+  assert(html.includes('aria-labelledby="confirm-dialog-title"') && html.includes('$store.dialog.canSubmit()'), 'the shared dialog is rendered once');
+  const general = html.slice(html.indexOf('id="app-panel-general"'), html.indexOf('id="app-panel-env"'));
+  const buttons = general.slice(general.indexOf('class="btn-group"'), general.indexOf('</div>', general.indexOf('class="btn-group"')));
+  assert(!buttons.includes('removeApp()'), 'Remove is not beside Restart');
+  assert(general.includes('class="danger-zone"') && general.lastIndexOf('removeApp()') > general.indexOf('class="danger-zone"'), 'Remove sits in the Danger section');
+  for (const m of html.matchAll(/<button[^>]*>&times;<\/button>/g)) assert(m[0].includes(':aria-label='), 'every x button is named: ' + m[0].slice(0, 80));
+  assert((html.match(/:aria-label="'Actions for ' \+/g) || []).length === 3, 'card action menus are named');
+
+  const listeners = [];
+  globalThis.document = { addEventListener: (t, fn) => { if (t === 'alpine:init') listeners.push(fn); }, getElementById: () => null, documentElement: { setAttribute() {}, getAttribute: () => 'dark' } };
+  const stores = {};
+  globalThis.Alpine = { data() {}, store: (n, d) => { if (d !== undefined) stores[n] = d; return stores[n]; }, effect() {} };
+  new Function(js + '\n;globalThis.__q = questionDialog; globalThis.__ask = askConfirm; globalThis.__form = askForm;')();
+  listeners.forEach((fn) => fn());
+  const q = globalThis.__q('Remove secret K?\n\nContainers keep it.');
+  assert(q.title === 'Remove secret K?' && q.message === 'Containers keep it.' && q.danger && q.confirmLabel === 'Remove', 'a question splits into title, message and a verb label');
+  const d = stores.dialog;
+  const typed = globalThis.__ask({ title: 'Remove server x?', typed: 'x' });
+  assert(!d.canSubmit(), 'a typed-name dialog starts disabled');
+  d.typedValue = 'y'; assert(!d.canSubmit(), 'the wrong name keeps it disabled');
+  d.typedValue = 'x'; d.submit();
+  const form = globalThis.__form({ title: 'Rename', fields: [{ key: 'name', label: 'Name', value: 'a', required: true }] });
+  d.values.name = 'b'; d.submit();
+  const cancelled = globalThis.__ask('Delete it?');
+  d.cancel();
+  Promise.all([typed, form, cancelled]).then(([t, f, c]) => {
+    assert(t === true && f && f.name === 'b' && c === false, 'dialogs resolve confirm, form values and cancel');
+    finish();
+  });
+}
+
+function finish() {
 if (failures.length) { console.error(`FAIL (${failures.length}):`); failures.forEach((f) => console.error('  - ' + f)); process.exit(1); }
 console.log('nav_rework.test: all assertions passed');
+}

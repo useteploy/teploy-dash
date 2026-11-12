@@ -206,11 +206,11 @@ test('closing with an unsaved key warns that its file is no use', async () => {
   p.recoveryGen = { publicKey: 'age1x', fileText: 'x', fileName: 'y' };
   const seen = [];
   globalThis.confirm = text => { seen.push(text); return false; };
-  p.closeSetup();
+  await p.closeSetup();
   assert.equal(p.setupOpen, true);
   assert.match(seen[0], /delete it/);
   globalThis.confirm = () => true;
-  p.closeSetup();
+  await p.closeSetup();
   assert.equal(p.setupOpen, false);
   assert.equal(p.recoveryGen, null);
   delete globalThis.confirm;
