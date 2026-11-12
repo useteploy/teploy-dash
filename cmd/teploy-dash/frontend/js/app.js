@@ -1240,6 +1240,7 @@ document.addEventListener('alpine:init', () => {
   // ── App Detail Page ──
   Alpine.data('appDetailPage', () => withAsyncLoad({
     tab: 'general',
+    related: { loaded: false, monitor: null, domain: null },
     // resource is the IMMUTABLE identity this page was opened for (A49).
     // Every path and destructive action reads it — never the live router
     // params, which already point at the NEXT app the moment the user
@@ -1396,6 +1397,7 @@ document.addEventListener('alpine:init', () => {
     activateResource(params) {
       this.resource = Object.freeze({server: params.server, name: params.name});
       this.tab = 'general';
+      this.related = { loaded: false, monitor: null, domain: null };
       this.app = null;
       this.envVars = [];
       this.configAuthority = null;
@@ -1458,6 +1460,34 @@ document.addEventListener('alpine:init', () => {
       this.loadDrift();
       this.loadStats();
       this.loadConfigAuthority();
+      this.loadRelated();
+    },
+
+    // The app's monitor and domain-health row (cached reads, no SSH), for
+    // the links on the General tab. A failed read just leaves the plain
+    // page links; it never claims the app is healthy.
+    async loadRelated() {
+      const target = this.resource;
+      if (!target) return;
+      const [monitors, domains] = await Promise.all([
+        rawFetch.get('/api/monitors').catch(() => null),
+        api.get('/api/domains').catch(() => null),
+      ]);
+      if (this.resource !== target) return;
+      const monitor = arr(monitors).find((m) => m.app === target.name && (!m.server || m.server === target.server)) || null;
+      const domain = arr(domains && domains.rows).find((r) => r.app === target.name && (!r.server || r.server === target.server)) || null;
+      this.related = { loaded: true, monitor, domain, monitorsRead: !!monitors, domainsRead: !!domains };
+    },
+    // Running / stopped / unknown, from the observed status.
+    appState() {
+      const st = (this.app && this.app.status) || '';
+      if (st === 'running') return { cls: 'running', label: 'Running' };
+      if (['stopped', 'exited', 'dead', 'created'].includes(st)) return { cls: 'stopped', label: 'Stopped' };
+      return { cls: 'idle', label: st ? st.charAt(0).toUpperCase() + st.slice(1) : 'State unknown' };
+    },
+    domainURL() {
+      const d = this.app && this.app.domain;
+      return d ? (/^https?:\/\//.test(d) ? d : 'https://' + d) : '';
     },
 
     // The CLI's config-home answer for this app.
@@ -2567,17 +2597,13 @@ document.addEventListener('alpine:init', () => {
       if (!at || String(at).startsWith('0001')) return '';
       const ms = Date.now() - new Date(at).getTime();
       if (isNaN(ms) || ms < 0) return '';
-      const s = Math.floor(ms / 1000);
-      if (s < 60) return s + 's ago';
-      if (s < 3600) return Math.floor(s / 60) + 'm ago';
-      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-      return Math.floor(s / 86400) + 'd ago';
+      return relTime(at);
     },
 
     observedWhen() {
       const at = this.app?.observed_at;
       if (!at || String(at).startsWith('0001')) return 'unknown';
-      return formatObservedAt(at);
+      return relTime(at);
     },
 
     // The most recent change line: when this release landed and what it
@@ -2586,7 +2612,7 @@ document.addEventListener('alpine:init', () => {
     lastChangeWhen() {
       const at = this.app?.deployed_at;
       if (!at || String(at).startsWith('0001')) return 'not recorded';
-      return formatObservedAt(at);
+      return relTime(at);
     },
 
     shortHash(h) {
@@ -2882,6 +2908,7 @@ document.addEventListener('alpine:init', () => {
   // cards render exactly as before, and /api/apps consumers are untouched.
   Alpine.data('serversPage', () => withAsyncLoad({
     servers: [],
+    audits: {},
     loading: true,
 
     async init() {
@@ -2900,7 +2927,11 @@ document.addEventListener('alpine:init', () => {
         // The fleet envelopes carry each server's truth; a failure here must
         // not take the page down (additive switch — D01): cards render
         // without freshness chrome instead.
-        const fleet = await api.get('/api/fleet').catch(() => null);
+        const [fleet, cleanup] = await Promise.all([
+          api.get('/api/fleet').catch(() => null),
+          api.get('/api/cleanup').catch(() => null),
+        ]);
+        this.audits = Object.fromEntries(arr(cleanup && cleanup.servers).map((row) => [row.server, row]));
         const observed = new Map(((fleet && fleet.servers) || []).map(env => [env.server, env]));
         const merged = (Array.isArray(raw) ? raw : Object.entries(raw).map(([name, s]) => ({ name, ...s })))
           .map(s => withObservation(s, observed.get(s.name)));
@@ -2925,6 +2956,20 @@ document.addEventListener('alpine:init', () => {
     freshnessLabel(s) {
       return ({ fresh: 'Fresh', stale: 'Stale', unknown: 'Unknown' })[s.freshness] || '';
     },
+    // The card's cleanup line, from the server's last cached audit.
+    cleanupLine(s) {
+      const a = (this.audits || {})[s.name];
+      if (!a) return '';
+      if (a.state === 'never') return 'Cleanup: not audited yet';
+      if (a.state === 'unreachable') return 'Cleanup: last audit could not reach it';
+      const n = ((a.counts && a.counts.critical) || 0) + ((a.counts && a.counts.warning) || 0);
+      const head = a.state === 'ok' ? 'Audited' : a.state === 'stale' ? 'Audit is stale' : 'Partly audited';
+      return 'Cleanup: ' + head + (n ? ', ' + n + ' warning' + (n === 1 ? '' : 's') : ', no warnings') + (a.age_seconds != null ? ' (' + ageText(a.age_seconds) + ')' : '');
+    },
+    diskOf(s) {
+      const a = (this.audits || {})[s.name];
+      return a && a.disk ? a.disk : null;
+    },
 
     // The dot reflects observation truth when the fleet answered, and the
     // legacy online flag otherwise.
@@ -2942,7 +2987,7 @@ document.addEventListener('alpine:init', () => {
       if (s.appCount !== null && s.appCount !== undefined) {
         parts.push(`${s.appCount} app${s.appCount === 1 ? '' : 's'} (last known)`);
       }
-      if (s.lastSuccessAt) parts.push(`last successful observation ${formatObservedAt(s.lastSuccessAt)}`);
+      if (s.lastSuccessAt) parts.push(`last successful observation ${relTime(s.lastSuccessAt)}`);
       else parts.push('never observed successfully');
       return parts.join(' — ');
     },
@@ -2974,6 +3019,8 @@ document.addEventListener('alpine:init', () => {
     proxy: null,
     tab: 'overview',
     loading: true,
+    apps: null,
+    appsError: '',
 
     name: '', generation: 0, destroyed: false,
     routeIdentity() { const r = Alpine.store('router'); return r.page === 'server-detail' ? r.params.name : ''; },
@@ -2999,10 +3046,23 @@ document.addEventListener('alpine:init', () => {
       this.generation++; this.name = this.routeIdentity(); this.status = null; this.proxy = null; this.tab = 'overview';
       if (this.name) await this.reload();
     },
+    // The apps the last fleet sweep saw on this server (cached, no SSH), for
+    // the "On this server" links. Null until read; a failed read says so.
+    async loadApps() {
+      const generation = this.generation, name = this.name;
+      try {
+        const fleet = await api.get('/api/fleet');
+        if (!this.current(generation)) return;
+        const env = arr(fleet && fleet.servers).find((e) => e.server === name);
+        this.apps = env ? arr(env.apps).map((a) => ({ name: a.app || a.name, status: a.status, domain: a.domain })) : [];
+        this.appsError = '';
+      } catch (e) { if (this.current(generation)) this.appsError = e.message; }
+    },
     async reload() {
       const generation = this.generation, name = this.name;
       if (!this.current(generation)) return;
       this.loading = true;
+      this.loadApps();
       try {
         const status = await api.get(`/api/servers/${encodeURIComponent(name)}/status`);
         if (!this.current(generation)) return;

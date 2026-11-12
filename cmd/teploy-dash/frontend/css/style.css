@@ -585,6 +585,19 @@ code { overflow-wrap: anywhere; }
 .btn-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .row-actions { text-align: right; white-space: nowrap; }
 
+/* App header: state beside the name, server and domain as links. */
+.app-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.state-pill { display: inline-flex; padding: 2px 9px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); font-size: 12px; }
+.app-where a, .app-related a, .card-link, .quiet-link { color: var(--accent); text-decoration: none; }
+.app-where a:hover, .app-related a:hover, .card-link:hover, .quiet-link:hover { text-decoration: underline; }
+.app-where .mono { overflow-wrap: anywhere; }
+.app-facts { display: flex; margin: -12px 0 14px; flex-wrap: wrap; gap: 6px 18px; color: var(--text-secondary); font-size: 12px; }
+.app-facts a { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); text-decoration: none; }
+.app-related { margin-top: 0; }
+.section .app-facts { margin: 0 0 12px; }
+.card-facts { display: flex; margin-top: 6px; gap: 12px; color: var(--text-secondary); font-size: 12px; }
+.card-link { display: inline-block; margin-top: 6px; font-size: 12px; }
+
 /* Hub tabs: the page-level tab strip of Apps, Servers and Monitoring. */
 .hub-tabs { display: flex; margin: -8px 0 22px; gap: 4px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
 .hub-tabs::-webkit-scrollbar { display: none; }

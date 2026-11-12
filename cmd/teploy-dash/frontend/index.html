@@ -708,9 +708,19 @@
           <template x-if="showingStale">
             <div role="status" class="stale-banner" x-text="staleBannerText()"></div>
           </template>
-          <div class="page-header">
-            <h1 class="page-title" x-text="app.name"></h1>
-            <span class="card-meta" x-text="app.server"></span>
+          <div class="page-header app-header">
+            <div>
+              <div class="app-title-row">
+                <h1 class="page-title" x-text="app.name"></h1>
+                <span class="state-pill" :class="appState().cls"><span class="status-dot" :class="appState().cls"></span><span x-text="appState().label"></span></span>
+              </div>
+              <p class="subtitle app-where">
+                <span>on <a :href="'/servers/' + encodeURIComponent(app.server)" @click.prevent="$store.router.navigate('server-detail', { name: app.server })" x-text="app.server"></a></span>
+                <template x-if="app.domain">
+                  <span> · <a :href="domainURL()" target="_blank" rel="noopener" class="mono" x-text="app.domain"></a></span>
+                </template>
+              </p>
+            </div>
           </div>
 
           <!-- Tabs. role=tablist/tab + aria-selected give screen readers the
@@ -753,28 +763,12 @@
                 </div>
                 <div class="status-item">
                   <div class="status-label">Deployed</div>
-                  <div class="status-value" style="font-size: 13px;" x-text="lastChangeWhen()"></div>
+                  <div class="status-value" style="font-size: 13px;" x-text="lastChangeWhen()" :title="app.deployed_at && !String(app.deployed_at).startsWith('0001') ? formatObservedAt(app.deployed_at) : null"></div>
                   <div class="card-meta" style="margin-top:4px;" x-text="observedAge() ? 'observed ' + observedAge() : 'observation age unknown'"></div>
-                </div>
-                <div class="status-item">
-                  <div class="status-label">Port</div>
-                  <div class="status-value mono" x-text="app.port || 'N/A'"></div>
                 </div>
                 <div class="status-item">
                   <div class="status-label">Containers</div>
                   <div class="status-value" x-text="containerCount()"></div>
-                </div>
-                <div class="status-item">
-                  <div class="status-label">Locked</div>
-                  <div class="status-value" x-text="app.locked ? 'Yes' : 'No'"></div>
-                </div>
-                <div class="status-item">
-                  <div class="status-label">Maintenance</div>
-                  <div class="status-value" x-text="app.maintenance ? 'On' : 'Off'"></div>
-                </div>
-                <div class="status-item">
-                  <div class="status-label">Domain</div>
-                  <div class="status-value mono" x-text="app.domain || 'N/A'"></div>
                 </div>
                 <!-- "Settings edited in" (spec §2.1): where this app's
                      configuration is changed. Only with a CLI that knows
@@ -787,13 +781,43 @@
                 </div>
               </div>
 
+              <!-- The minor facts on one line; the release and deploy above. -->
+              <p class="app-facts">
+                <span>Port <span class="mono" x-text="app.port || 'none'"></span></span>
+                <span :class="{ 'text-warn': app.locked }" x-text="app.locked ? 'Locked: deploys refused' : 'Not locked'"></span>
+                <span :class="{ 'text-warn': app.maintenance }" x-text="app.maintenance ? 'In maintenance' : 'Maintenance off'"></span>
+              </p>
+
+              <!-- Where else this app shows up: its uptime monitor and its
+                   domain-health row. -->
+              <p class="app-facts app-related">
+                <template x-if="related.monitor">
+                  <a :href="'/monitors/' + encodeURIComponent(related.monitor.id)" @click.prevent="$store.router.navigate('monitor-detail', { id: related.monitor.id })">
+                    <span class="dot" :class="related.monitor.last_check ? (related.monitor.last_check.status === 'up' ? 'green' : 'red') : 'gray'"></span>
+                    <span x-text="'Monitor: ' + (related.monitor.last_check ? (related.monitor.last_check.status === 'up' ? 'up' : 'down') : 'not checked yet')"></span>
+                  </a>
+                </template>
+                <template x-if="related.loaded && !related.monitor">
+                  <a href="/monitors" @click.prevent="$store.router.navigate('monitors')" x-text="related.monitorsRead ? 'No uptime monitor' : 'Uptime monitors'"></a>
+                </template>
+                <template x-if="related.domain">
+                  <a href="/domains" @click.prevent="$store.router.navigate('domains')">
+                    <span class="dot" :class="{ ok: 'green', warn: 'yellow', fail: 'red' }[related.domain.overall] || 'gray'"></span>
+                    <span x-text="'Domain health: ' + ({ ok: 'OK', warn: 'warning', fail: 'failing', unknown: 'unknown' }[related.domain.overall] || related.domain.overall)"></span>
+                  </a>
+                </template>
+                <template x-if="related.loaded && !related.domain && app.domain">
+                  <a href="/domains" @click.prevent="$store.router.navigate('domains')">Domain health</a>
+                </template>
+              </p>
+
               <!-- Partial observation errors (D07 misleading states): the
                    status payload carries per-scope errors (e.g. container
                    listing failed while routes read fine). They were dropped
                    entirely — a partially-blind read painted as complete. -->
               <template x-if="app.errors && app.errors.length > 0">
                 <div role="alert" class="stale-banner" style="margin-bottom: 20px;">
-                  <strong>Partial observation</strong> — status read at <span x-text="observedWhen()"></span> with errors:
+                  <strong>Partial observation</strong> — status read <span x-text="observedWhen()" :title="app.observed_at ? formatObservedAt(app.observed_at) : null"></span> with errors:
                   <ul style="margin: 6px 0 0 16px;">
                     <template x-for="(err, i) in app.errors" :key="i">
                       <li><span class="mono" style="font-size: 12px;" x-text="err.scope"></span>: <span x-text="err.message"></span></li>
@@ -804,8 +828,9 @@
 
               <div class="btn-group" style="margin-bottom: 8px;">
                 <button class="btn" x-show="app.port" @click="doAction('restart')" :disabled="actionLoading">Restart</button>
-                <button class="btn" x-show="app.port" @click="doAction('stop')" :disabled="actionLoading">Stop</button>
-                <button class="btn" x-show="app.port" @click="doAction('start')" :disabled="actionLoading">Start</button>
+                <!-- Start or Stop by state; both when the state is unknown. -->
+                <button class="btn" x-show="app.port && appState().cls !== 'stopped'" @click="doAction('stop')" :disabled="actionLoading">Stop</button>
+                <button class="btn" x-show="app.port && appState().cls !== 'running'" @click="doAction('start')" :disabled="actionLoading">Start</button>
                 <button class="btn" @click="doAction('rollback')" :disabled="actionLoading">Rollback</button>
                 <!-- D5: redeploy the current release with env re-resolved —
                      how a secret or env edit reaches containers. -->
@@ -1903,7 +1928,11 @@
                   <td class="stack-lead">
                     <span class="status-dot dot" :class="dotClass(row.overall)"></span>
                     <span class="mono" x-text="row.host"></span>
-                    <div class="text-muted" x-show="row.app || row.server" x-text="[row.app, row.server].filter(Boolean).join(' on ')"></div>
+                    <div class="text-muted" x-show="row.app || row.server">
+                      <template x-if="row.app && row.server"><a class="quiet-link" :href="'/deployments/' + encodeURIComponent(row.server) + '/' + encodeURIComponent(row.app)" @click.prevent="$store.router.navigate('app-detail', { server: row.server, name: row.app })" x-text="row.app"></a></template>
+                      <template x-if="!(row.app && row.server)"><span x-text="row.app"></span></template>
+                      <span x-show="row.server" x-text="(row.app ? ' on ' : '') + row.server"></span>
+                    </div>
                   </td>
                   <td class="stack-inline" data-label="DNS" :title="row.dns.detail" x-text="layerLabel(row.dns)"></td>
                   <td class="stack-inline" data-label="Route" :title="row.route.detail" x-text="layerLabel(row.route)"></td>
@@ -2982,6 +3011,7 @@
                     </div>
                   </div>
                   <div class="monitor-target" x-text="m.target"></div>
+                  <div class="monitor-meta" x-show="m.app"><span x-text="'app ' + m.app + (m.server ? ' on ' + m.server : '')"></span></div>
                   <div class="monitor-meta">
                     <span x-text="'Every ' + formatInterval(m.interval)"></span>
                     <span x-show="m.stats" x-text="m.stats ? 'Avg ' + fmtMs(m.stats.avg_response) : ''"></span>
@@ -3130,9 +3160,16 @@
         <div>
           <div class="page-header">
             <div>
-              <a href="/monitors" class="back-link" @click.prevent="openList()">&larr; Monitors</a>
+              <a href="/monitors" class="back-link" @click.prevent="openList()">&larr; Uptime</a>
               <h1 class="page-title" x-text="selectedMonitor?.monitor?.name"></h1>
               <p class="subtitle" x-text="selectedMonitor?.monitor?.target"></p>
+              <template x-if="selectedMonitor?.monitor?.app">
+                <p class="subtitle">Watches
+                  <a x-show="selectedMonitor.monitor.server" :href="'/deployments/' + encodeURIComponent(selectedMonitor.monitor.server || '') + '/' + encodeURIComponent(selectedMonitor.monitor.app)" @click.prevent="$store.router.navigate('app-detail', { server: selectedMonitor.monitor.server, name: selectedMonitor.monitor.app })" x-text="selectedMonitor.monitor.app"></a>
+                  <span x-show="!selectedMonitor.monitor.server" x-text="selectedMonitor.monitor.app"></span>
+                  <span x-show="selectedMonitor.monitor.server" x-text="'on ' + selectedMonitor.monitor.server"></span>
+                </p>
+              </template>
             </div>
             <div class="header-actions" style="display: flex; gap: 8px; align-items: center;">
               <label style="display: flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer;">
@@ -3418,8 +3455,13 @@
                      fleet envelope is unavailable (s.freshness null). -->
                 <span class="freshness-chip" :class="s.freshness" x-show="s.freshness" x-text="freshnessLabel(s)"></span>
               </div>
-              <div class="card-meta" x-text="s.host"></div>
-              <div class="card-hash" x-text="s.role === 'lb' ? 'Load Balancer' : 'Standard'"></div>
+              <div class="card-meta" x-text="s.host + (s.role === 'lb' ? ' · load balancer' : '')"></div>
+              <div class="card-facts">
+                <span x-show="s.appCount !== null" x-text="s.appCount + ' app' + (s.appCount === 1 ? '' : 's')"></span>
+                <span x-show="diskOf(s)" :class="{ 'text-warn': diskOf(s) && diskOf(s).used_percent >= 85 }" x-text="diskOf(s) ? 'disk ' + diskOf(s).used_percent + '%' : ''"></span>
+              </div>
+              <a class="card-link" x-show="cleanupLine(s)" :href="'/servers/' + encodeURIComponent(s.name) + '?tab=cleanup'"
+                 @click.prevent.stop="$store.router.navigate('server-detail', { name: s.name, tab: 'cleanup' })" x-text="cleanupLine(s)"></a>
               <!-- D01: an unreachable server stays visible with its exact
                    error and its last-known state. -->
               <template x-if="s.error">
@@ -3478,6 +3520,7 @@
                 </div>
               </div>
 
+
               <!-- Memory -->
               <div style="margin-bottom: 16px;">
                 <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
@@ -3534,6 +3577,31 @@
               <template x-if="!status.containers || status.containers.length === 0">
                 <div class="empty-state"><p>No containers running on this server.</p></div>
               </template>
+
+              <!-- On this server: its apps, and the cross-cutting pages
+                   filtered to it. -->
+              <div class="section" style="margin-top: 28px;">
+                <h2>On this server</h2>
+                <p class="app-facts">
+                  <a :href="'/servers/' + encodeURIComponent(name) + '?tab=cleanup'" @click.prevent="switchTab('cleanup')">Cleanup report</a>
+                  <a href="/backups" @click.prevent="$store.router.navigate('backups')">Backups</a>
+                  <a href="/domains" @click.prevent="$store.router.navigate('domains')">Domains</a>
+                </p>
+                <template x-if="apps === null && !appsError"><p class="card-meta">Reading apps…</p></template>
+                <template x-if="appsError"><p class="card-meta" x-text="'Apps could not be read: ' + appsError"></p></template>
+                <template x-if="apps && apps.length === 0"><p class="card-meta">No apps on this server yet.</p></template>
+                <template x-if="apps && apps.length > 0">
+                  <div class="status-list">
+                    <template x-for="a in apps" :key="a.name">
+                      <a class="status-row" :href="'/deployments/' + encodeURIComponent(name) + '/' + encodeURIComponent(a.name)" @click.prevent="$store.router.navigate('app-detail', { server: name, name: a.name })">
+                        <span class="status-dot" :class="a.status === 'running' ? 'running' : (a.status === 'stopped' ? 'stopped' : 'idle')"></span>
+                        <span class="status-row-main"><span class="status-row-title" x-text="a.name"></span><span class="status-row-detail mono" x-show="a.domain" x-text="a.domain"></span></span>
+                        <span class="status-row-meta" x-text="a.status || ''"></span>
+                      </a>
+                    </template>
+                  </div>
+                </template>
+              </div>
             </div>
           </template>
 

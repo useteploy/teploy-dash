@@ -142,6 +142,22 @@ assert(/\.field input\[type="checkbox"\][^{]*\{[^}]*width: auto/.test(css), 'fie
   assert(js.includes("Alpine.directive('scroll-hint'") && css.includes('.more-right {'), 'the scroll hint fades the hidden side');
 }
 
+// App General: state beside the name, links out, Start or Stop by state,
+// minor facts on one line. Servers, domains and monitors link both ways.
+{
+  const page = html.slice(html.indexOf("x-data=\"appDetailPage\""), html.indexOf('id="app-panel-env"'));
+  assert(page.includes('appState().label') && page.includes('class="state-pill"'), 'the app state sits beside its name');
+  assert(page.includes(':href="domainURL()"') && page.includes("navigate('server-detail', { name: app.server })"), 'domain and server are links');
+  assert(page.includes("appState().cls !== 'stopped'") && page.includes("appState().cls !== 'running'"), 'Start or Stop by state');
+  for (const label of ['<div class="status-label">Port</div>', '<div class="status-label">Locked</div>', '<div class="status-label">Maintenance</div>']) assert(!page.includes(label), 'folded into the facts line: ' + label);
+  assert(page.includes('related.monitor') && page.includes('related.domain'), 'links to the app monitor and domain row');
+  const servers = html.slice(html.indexOf('x-data="serversPage"'), html.indexOf('x-data="serverDetailPage"'));
+  assert(servers.includes('cleanupLine(s)') && servers.includes('diskOf(s)') && servers.includes('s.appCount'), 'server cards show apps, disk and cleanup');
+  assert(html.includes('<h2>On this server</h2>'), 'server detail links to its apps, cleanup, backups and domains');
+  assert(html.includes("navigate('app-detail', { server: row.server, name: row.app })"), 'domain rows link to the app');
+  assert(html.includes("navigate('app-detail', { server: selectedMonitor.monitor.server, name: selectedMonitor.monitor.app })"), 'a monitor links to its app');
+}
+
 function finish() {
 if (failures.length) { console.error(`FAIL (${failures.length}):`); failures.forEach((f) => console.error('  - ' + f)); process.exit(1); }
 console.log('nav_rework.test: all assertions passed');
