@@ -4,6 +4,34 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-11-11
+
+### Changed
+
+- **Navigation:** the header has seven destinations instead of thirteen: Home,
+  Apps, Servers, Monitoring, Backups, Activity, Settings. Domains and Alerts are
+  tabs under Monitoring; Restore tests (both lists merged) is a tab under
+  Backups; Cleanup is under Servers; Templates under Apps; Integrations (was
+  Siblings) and Git sources (was Sources) under Settings. Fleet is now Servers
+  and Projects is now Apps. Every old URL still opens the right page and tab.
+- **Home** is a status page: what needs attention, what is running, and one row
+  per server, with the shortcuts below. Uncovered backups are counted per
+  server and the list shows eight rows before a "Show more" button.
+- Tabs on app, server, Settings and Backups pages are in the URL.
+- One confirm dialog replaces every browser confirm and prompt. Removing an app
+  or a server asks for its name; Remove app moved to a Danger section.
+- A monitor's dot shows whether it is down now, not its 24-hour uptime.
+- Git sources is a table with a delete action.
+- `/api/cleanup` rows carry each server's disk line; `/api/monitors` carries
+  each monitor's `last_check`.
+
+### Fixed
+
+- Console errors on the Cleanup and Siblings pages, chips that were near-white
+  on the dark theme, and phone tables that cut off the column that mattered.
+- Placeholder and help text no longer carries a private address or the
+  author's own domain names.
+
 ## [0.1.26] - 2026-11-11
 
 ### Fixed
