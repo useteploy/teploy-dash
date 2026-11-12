@@ -129,6 +129,19 @@ assert(/\.field input\[type="checkbox"\][^{]*\{[^}]*width: auto/.test(css), 'fie
   assert(!html.includes("running: op.status === 'running' || op.status === 'succeeded'"), 'a running operation is not painted like a succeeded one');
 }
 
+// Phone layout: wide tables stack, status cards stay two-up, tab strips hint.
+{
+  assert(/@media \(max-width: 640px\) \{\s*\.table-wrap > table\.stack-table \{ display: block;/.test(css), 'stack-table rows become blocks on phones');
+  for (const marker of ['<th>What is wrong</th>', '<h2>Every target</h2>', '<!-- Accessories Table -->', '<th>Added by</th>']) {
+    const at = html.indexOf(marker);
+    assert(/<table class="stack-table"/.test(html.slice(Math.max(0, at - 1500), at + 1500)), `the table near ${marker} stacks on phones`);
+  }
+  assert(html.includes('class="stack-problem"') && html.includes("'stack-empty'"), 'the problem text leads a stacked row and empty ones drop');
+  assert(!/@media \(max-width: 400px\) \{\s*\.stats-grid, \.status-grid/.test(css), 'status cards stay two columns at phone width');
+  assert((html.match(/class="tabs[^"]*" x-scroll-hint/g) || []).length >= 4 && html.includes('class="hub-tabs" aria-label="Section pages" x-scroll-hint'), 'tab strips carry the scroll hint');
+  assert(js.includes("Alpine.directive('scroll-hint'") && css.includes('.more-right {'), 'the scroll hint fades the hidden side');
+}
+
 function finish() {
 if (failures.length) { console.error(`FAIL (${failures.length}):`); failures.forEach((f) => console.error('  - ' + f)); process.exit(1); }
 console.log('nav_rework.test: all assertions passed');

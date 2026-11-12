@@ -198,7 +198,14 @@ th { padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--tex
 td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--bg-card-hover); }
-.tabs { display: flex; margin: -4px 0 22px; gap: 4px; border-bottom: 1px solid var(--border); }
+.tabs { display: flex; margin: -4px 0 22px; gap: 4px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: 0 0 auto; white-space: nowrap; }
+/* Scroll hint (x-scroll-hint): a tab strip that runs past its edge fades
+   out on that side, so hidden tabs read as "more this way". */
+.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent); }
+.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 48px), transparent); }
+.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 48px), transparent); }
 .tab { padding: 7px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px; }
 .tab:hover { color: var(--text); }
 .tab.active { border-bottom-color: var(--accent); color: var(--text); }
@@ -614,3 +621,28 @@ code { overflow-wrap: anywhere; }
 .preflight-check.check-fail.sev-warning .check-result { color: var(--yellow); }
 .preflight-check.check-unknown { border-left-color: var(--yellow); }
 .preflight-check.check-unknown .check-result { color: var(--yellow); }
+
+/* Phone tables (2026-11 rework): a .stack-table becomes one block per row.
+   The lead cell (what the row is) and the problem cell (what is wrong) come
+   first; other cells follow with their column name; .stack-inline cells sit
+   side by side; an empty problem cell is dropped. */
+@media (max-width: 640px) {
+  .table-wrap > table.stack-table { display: block; min-width: 0; }
+  .stack-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .stack-table tbody { display: block; }
+  .stack-table tr { display: flex; padding: 12px 14px; flex-wrap: wrap; gap: 4px 14px; border-top: 1px solid var(--border); }
+  .stack-table tbody tr:first-child { border-top: 0; }
+  .table-wrap > table.stack-table td, .table-wrap > table.stack-table td:first-child {
+    position: static; display: block; padding: 0; flex: 1 1 100%; min-width: 0;
+    min-width: 0; max-width: none; border: 0; box-shadow: none; background: none; white-space: normal; overflow-wrap: anywhere;
+  }
+  .table-wrap > table.stack-table tbody tr:hover td:first-child { background: none; }
+  .stack-table td[data-label]::before { content: attr(data-label) " "; color: var(--text-muted); font-size: 11px; }
+  .table-wrap > table.stack-table td.stack-inline { flex: 0 0 auto; }
+  .stack-table td.stack-lead { order: -2; }
+  .stack-table td.stack-lead > .mono:first-of-type, .stack-table td.stack-lead.mono { font-weight: 600; }
+  .stack-table td.stack-problem { order: -1; color: var(--text); }
+  .stack-table td.stack-empty { display: none; }
+  .table-wrap > table.stack-table td.row-actions { text-align: left; }
+  .stack-table .btn-row { justify-content: flex-start; }
+}

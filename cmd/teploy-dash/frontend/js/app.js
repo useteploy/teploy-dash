@@ -598,6 +598,24 @@ document.addEventListener('alpine:init', () => {
   Alpine.store('router').restore();
   window.addEventListener('popstate', () => Alpine.store('router').restore());
 
+  // x-scroll-hint on a horizontally scrolling strip: marks the sides that
+  // have more content (.more-left / .more-right), which the CSS fades.
+  if (Alpine.directive) {
+    Alpine.directive('scroll-hint', (el, _, { cleanup }) => {
+      const update = () => {
+        const max = el.scrollWidth - el.clientWidth;
+        el.classList.toggle('more-left', max > 1 && el.scrollLeft > 1);
+        el.classList.toggle('more-right', max > 1 && el.scrollLeft < max - 1);
+      };
+      el.addEventListener('scroll', update, { passive: true });
+      const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null;
+      if (ro) { ro.observe(el); for (const child of el.children) ro.observe(child); }
+      const active = el.querySelector('.active');
+      setTimeout(() => { if (active && active.scrollIntoView && el.scrollWidth > el.clientWidth) el.scrollLeft = Math.max(0, active.offsetLeft - 24); update(); }, 0);
+      cleanup(() => { el.removeEventListener('scroll', update); if (ro) ro.disconnect(); });
+    });
+  }
+
   // x-time="<iso>": relative text, exact time on hover (the one date helper).
   if (Alpine.directive) {
     Alpine.directive('time', (el, { expression }, { effect, evaluateLater }) => {

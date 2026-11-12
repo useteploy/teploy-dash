@@ -130,7 +130,7 @@
   <!-- Hub tabs: Apps, Servers and Monitoring list pages share a tab strip;
        each tab is its own page with its own URL. -->
   <template x-if="$store.router.hubTabs">
-    <nav class="hub-tabs" aria-label="Section pages">
+    <nav class="hub-tabs" aria-label="Section pages" x-scroll-hint>
       <template x-for="ht in $store.router.hubTabs" :key="ht[0]">
         <a class="hub-tab" :href="$store.router.url(ht[0])" :class="{ active: $store.router.page === ht[0] }"
            :aria-current="$store.router.page === ht[0] ? 'page' : null"
@@ -716,7 +716,7 @@
           <!-- Tabs. role=tablist/tab + aria-selected give screen readers the
                section semantics; Arrow Left/Right move between tabs (and
                activate, matching the click path). -->
-          <div class="tabs" role="tablist" aria-label="App sections"
+          <div class="tabs" x-scroll-hint role="tablist" aria-label="App sections"
                @keydown.arrow-right.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.nextElementSibling?.focus()"
                @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
             <button class="tab" :class="{ active: tab === 'general' }" role="tab" id="app-tab-general" aria-controls="app-panel-general" :aria-selected="(tab === 'general').toString()" :tabindex="tab === 'general' ? 0 : -1" @focus="switchTab('general')">General</button>
@@ -927,7 +927,7 @@
                 <div>
                   <h3 style="margin-bottom: 12px; font-size: 15px;">Containers</h3>
                   <div class="table-wrap">
-                    <table>
+                    <table class="stack-table">
                       <thead>
                         <tr>
                           <th>Name</th>
@@ -939,13 +939,13 @@
                       <tbody>
                         <template x-for="c in app.containers" :key="c.ID">
                           <tr>
-                            <td style="font-family: var(--mono); font-size: 12px;" x-text="c.Name"></td>
-                            <td x-text="c.Image"></td>
-                            <td>
+                            <td class="stack-lead" style="font-family: var(--mono); font-size: 12px;" x-text="c.Name"></td>
+                            <td data-label="Image" x-text="c.Image"></td>
+                            <td class="stack-inline">
                               <span class="status-dot" :class="c.State === 'running' ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
                               <span x-text="c.State"></span>
                             </td>
-                            <td x-text="c.Status"></td>
+                            <td class="stack-inline text-muted" x-text="c.Status"></td>
                           </tr>
                         </template>
                       </tbody>
@@ -959,7 +959,7 @@
                 <div style="margin-top: 24px;">
                   <h3 style="margin-bottom: 12px; font-size: 15px;">Accessories</h3>
                   <div class="table-wrap">
-                    <table>
+                    <table class="stack-table">
                       <thead>
                         <tr>
                           <th>Name</th>
@@ -978,13 +978,13 @@
                              "stopped". Correct on both ends, unwired in between. -->
                         <template x-for="a in accessories" :key="a.id">
                           <tr>
-                            <td style="font-family: var(--mono); font-size: 12px;" x-text="a.name"></td>
-                            <td x-text="a.image"></td>
-                            <td>
+                            <td class="stack-lead" style="font-family: var(--mono); font-size: 12px;" x-text="a.name"></td>
+                            <td data-label="Image" x-text="a.image"></td>
+                            <td class="stack-inline">
                               <span class="status-dot" :class="a.state === 'running' ? 'running' : 'stopped'" style="margin-right: 6px;"></span>
                               <span x-text="a.state"></span>
                             </td>
-                            <td>
+                            <td class="row-actions" style="text-align: left;">
                               <!-- D05: database actions are distinct operations with
                                    distinct confirmations — stop and start each state
                                    their own blast radius; the deeper classes (restart,
@@ -1885,7 +1885,7 @@
 
       <template x-if="!loading && visibleRows.length > 0">
         <div class="table-wrap">
-          <table>
+          <table class="stack-table">
             <thead>
               <tr>
                 <th>Domain</th>
@@ -1900,16 +1900,16 @@
             <tbody>
               <template x-for="row in visibleRows" :key="row.host">
                 <tr>
-                  <td>
+                  <td class="stack-lead">
                     <span class="status-dot dot" :class="dotClass(row.overall)"></span>
                     <span class="mono" x-text="row.host"></span>
                     <div class="text-muted" x-show="row.app || row.server" x-text="[row.app, row.server].filter(Boolean).join(' on ')"></div>
                   </td>
-                  <td :title="row.dns.detail" x-text="layerLabel(row.dns)"></td>
-                  <td :title="row.route.detail" x-text="layerLabel(row.route)"></td>
-                  <td :title="row.cert.detail" x-text="layerLabel(row.cert)"></td>
-                  <td :title="row.http.detail" x-text="layerLabel(row.http)"></td>
-                  <td>
+                  <td class="stack-inline" data-label="DNS" :title="row.dns.detail" x-text="layerLabel(row.dns)"></td>
+                  <td class="stack-inline" data-label="Route" :title="row.route.detail" x-text="layerLabel(row.route)"></td>
+                  <td class="stack-inline" data-label="Cert" :title="row.cert.detail" x-text="layerLabel(row.cert)"></td>
+                  <td class="stack-inline" data-label="HTTP" :title="row.http.detail" x-text="layerLabel(row.http)"></td>
+                  <td class="stack-problem" :class="{ 'stack-empty': !firstFailingLabel(row) && !row.evidence }">
                     <strong x-show="firstFailingLabel(row)" x-text="firstFailingLabel(row) + ': '"></strong>
                     <span x-text="row.evidence || ''"></span>
                   </td>
@@ -1942,7 +1942,7 @@
         </div>
       </div>
 
-      <div class="tabs tabs-scroll" role="tablist" aria-label="Backup sections"
+      <div class="tabs tabs-scroll" x-scroll-hint role="tablist" aria-label="Backup sections"
            @keydown.arrow-right.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.nextElementSibling?.focus()"
            @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
         <button class="tab" :class="{ active: tab === 'coverage' }" role="tab" id="bk-tab-coverage" :aria-selected="(tab === 'coverage').toString()" :tabindex="tab === 'coverage' ? 0 : -1" @click="setTab('coverage')" @focus="setTab('coverage')">Coverage</button>
@@ -2581,7 +2581,7 @@
             </template>
             <template x-if="rows.length > 0">
               <div class="table-wrap">
-                <table>
+                <table class="stack-table">
                   <thead>
                     <tr>
                       <th>Target</th>
@@ -2598,33 +2598,33 @@
                   <tbody>
                     <template x-for="row in rows" :key="row.server + '/' + row.name">
                       <tr>
-                        <td>
+                        <td class="stack-lead">
                           <span class="mono" x-text="row.name"></span>
                           <div class="text-muted" x-text="[row.app, row.server].filter(Boolean).join(' on ')"></div>
                           <div class="text-muted" x-show="row.uncovered_databases && row.uncovered_databases.length" x-text="'uncovered databases: ' + (row.uncovered_databases || []).join(', ')"></div>
                           <div class="text-muted" x-show="row.reason" x-text="row.reason"></div>
                         </td>
-                        <td x-text="row.engine || '—'"></td>
-                        <td>
+                        <td class="stack-inline" data-label="Engine" x-text="row.engine || '—'"></td>
+                        <td class="stack-problem">
                           <span class="dot" :class="coverageClass(row.state)"></span>
                           <span x-text="coverageLabel(row.state)"></span>
                           <span class="text-muted" x-show="row.own_schedule" title="This target has its own schedule; the policy leaves it alone"> own schedule</span>
                           <span class="text-muted" x-show="row.legacy_schedule" title="A pre-fleet-engine teploy cron line"> legacy</span>
                         </td>
-                        <td>
+                        <td data-label="Last good">
                           <span x-text="row.last_good ? ageLabel(row.last_good_age_seconds) : 'never'"></span>
                           <div class="text-muted" x-show="row.last_error" x-text="row.last_error"></div>
                         </td>
-                        <td x-text="bytesLabel(row.size_bytes)"></td>
-                        <td>
+                        <td class="stack-inline" data-label="Newest copy" x-text="bytesLabel(row.size_bytes)"></td>
+                        <td class="stack-inline" data-label="Encrypted">
                           <span class="dot" :class="row.encrypted ? 'green' : 'red'"></span>
                           <span x-text="row.encrypted ? 'yes' : 'no'"></span>
                         </td>
-                        <td>
+                        <td data-label="Restore test">
                           <span x-show="row.last_restore_test" x-text="!row.last_restore_test ? '' : (row.last_restore_test.ok ? 'passed ' : 'FAILED ') + ageLabel(Math.round((Date.now() - Date.parse(row.last_restore_test.at)) / 1000))"></span>
                           <span class="text-muted" x-show="!row.last_restore_test">never</span>
                         </td>
-                        <td x-show="hasHandwritten()">
+                        <td x-show="hasHandwritten()" data-label="Old job">
                           <template x-if="row.migration">
                             <span>
                               <span class="dot" :class="row.migration.ready ? 'green' : 'gray'"></span>
@@ -2728,7 +2728,7 @@
                 <tbody>
                   <template x-for="row in restoreTestRows(automaticTests(), tests)" :key="row.key">
                     <tr>
-                      <td data-label="Test">
+                      <td class="stack-lead">
                         <span class="mono" x-text="row.label"></span>
                         <span class="text-muted" x-show="row.engine" x-text="' ' + row.engine"></span>
                         <span class="badge" x-show="row.manual && !row.manual.enabled" style="opacity: .6;">disabled</span>
@@ -2742,7 +2742,7 @@
                           <span x-text="formatInterval(row.manual.interval_hours)"></span>
                         </template>
                       </td>
-                      <td data-label="Last result">
+                      <td class="stack-problem">
                         <span class="dot" :class="{ ok: 'green', failed: 'red', skipped: 'gray', never: 'gray' }[row.state]"></span>
                         <span x-text="row.lastText"></span>
                         <template x-if="row.auto && row.auto.history">
@@ -3456,7 +3456,7 @@
           </div>
 
           <!-- Tabs (tablist semantics as on the app page). -->
-          <div class="tabs" role="tablist" aria-label="Server sections"
+          <div class="tabs" x-scroll-hint role="tablist" aria-label="Server sections"
                @keydown.arrow-right.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.nextElementSibling?.focus()"
                @keydown.arrow-left.prevent="$el.querySelector('[role=tab][aria-selected=true]')?.previousElementSibling?.focus()">
             <button class="tab" :class="{ active: tab === 'overview' }" role="tab" id="srv-tab-overview" aria-controls="srv-panel-overview" :aria-selected="(tab === 'overview').toString()" :tabindex="tab === 'overview' ? 0 : -1" @focus="switchTab('overview')">Overview</button>
@@ -4020,7 +4020,7 @@
         <h1 class="page-title">Settings</h1>
       </div>
 
-      <div class="tabs">
+      <div class="tabs" x-scroll-hint>
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'servers' }" @click="setTab('servers')">Servers</button>
         <button class="tab" :class="{ active: tab === 'groups' }" @click="setTab('groups')">Groups</button>
         <button x-show="isAdmin()" class="tab" :class="{ active: tab === 'notifications' }" @click="setTab('notifications')">Notifications</button>
