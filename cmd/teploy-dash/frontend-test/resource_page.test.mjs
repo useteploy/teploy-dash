@@ -67,7 +67,7 @@ alpineInitListeners.forEach((fn) => fn());
 
   page.app = { observed_at: minutesAgo(4), deployed_at: minutesAgo(90) };
   const age = page.observedAge();
-  assert(age === '4m ago', `observedAge = ${age}, want "4m ago"`);
+  assert(age === '4 min ago', `observedAge = ${age}, want "4 min ago"`);
   assert(page.lastChangeWhen().length > 0, 'lastChangeWhen renders a timestamp');
 
   page.app = { observed_at: '0001-01-01T00:00:00Z' };
@@ -120,7 +120,7 @@ alpineInitListeners.forEach((fn) => fn());
   // And the templates render both surfaces.
   const html = readFileSync(join(here, '../frontend/index.html'), 'utf8');
   const monStart = html.indexOf('Monitors Page');
-  const monEnd = html.indexOf('Restore Tests Page');
+  const monEnd = html.indexOf('Servers Page');
   const monSection = html.slice(monStart, monEnd);
   assert(monStart !== -1 && monEnd > monStart, 'monitors section not found');
   assert(monSection.includes('deliveryWarns(m.delivery)'), 'monitor list renders the delivery warning chip');

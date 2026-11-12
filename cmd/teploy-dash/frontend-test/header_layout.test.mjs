@@ -21,12 +21,16 @@ assert(menu.includes('class="nav-pins"') && menu.includes('x-data="navLinks"'), 
 assert(/\.nav-pins \{ display: none; \}/.test(css), 'menu pins are hidden by default (desktop shows header icons)');
 assert(/@media \(max-width: 640px\)[\s\S]*\.nav-pins \{ display: block;/.test(css), 'menu pins show on phones');
 
-// The nav collapses before it can overflow: thirteen destinations do not fit
-// beside the brand below about 1200px (measured), so the toggle must take over
-// at a width above that, not at the 980px content breakpoint.
-const collapse = css.match(/@media \(max-width: (\d+)px\) \{\s*\.navbar \{[\s\S]*?\.nav-toggle \{ display: flex; \}/);
-assert(collapse && Number(collapse[1]) >= 1200, 'the nav collapses to the toggle at 1200px or wider');
-assert((menu.match(/<li><a /g) || []).length === 13, 'thirteen destinations: re-measure the collapse width when this changes');
+// The nav collapses before it can overflow. Measured 2026-11-11: brand + the
+// seven destinations need 695px tightened, 857px with four pinned icons (more
+// pins scroll in their strip), so the toggle takes over below 900px and the
+// nav tightens below 1100px.
+const collapse = css.match(/@media \(max-width: (\d+)px\) \{\s*\.navbar \{\s*min-height[^}]*\}\s*\.nav-toggle \{ display: flex; \}/);
+assert(collapse && Number(collapse[1]) === 899, 'the nav collapses to the toggle below 900px (measured)');
+const tighten = css.match(/@media \(max-width: (\d+)px\) \{\s*\.navbar \{ gap: 14px; \}/);
+assert(tighten && Number(tighten[1]) === 1099, 'the nav tightens below 1100px');
+const items = [...menu.matchAll(/<li><a [^>]*>([^<]+)<\/a><\/li>/g)].map((m) => m[1]);
+assert(items.join(',') === 'Home,Apps,Servers,Monitoring,Backups,Activity,Settings', 'seven destinations: re-measure the collapse width when this changes (' + items.join(',') + ')');
 
 // The theme store keeps toggle() and gains set().
 const listeners = [];

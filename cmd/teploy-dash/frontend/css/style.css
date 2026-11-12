@@ -20,6 +20,11 @@
   --green: #3fb950;
   --yellow: #d29922;
   --red: #f85149;
+  --success: var(--green);
+  --warning: var(--yellow);
+  --danger: var(--red);
+  --success-bg: rgba(63, 185, 80, 0.15);
+  --bg-inset: rgba(139, 148, 158, 0.15);
   --font: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   --mono: var(--font);
   --radius: 8px;
@@ -163,6 +168,7 @@ a.nav-link:hover { background: var(--bg-card); }
 .form-group, .field { margin-bottom: 14px; }
 .form-label, .field label { display: block; margin-bottom: 5px; color: var(--text-muted); font-size: 12px; font-weight: 500; }
 .form-input, .field input, .field select, .search-input, .log-controls input, .log-controls select { width: 100%; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; outline: none; background: var(--bg-input); color: var(--text); font-size: 13px; }
+.field input[type="checkbox"], .field input[type="radio"], .form-input[type="checkbox"] { width: auto; min-height: 0; padding: 0; }
 .form-input::placeholder, .field input::placeholder, .search-input::placeholder { color: var(--text-muted); opacity: .7; }
 .form-input:focus, .field input:focus, .field select:focus, .search-input:focus, .log-controls input:focus, .log-controls select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -186,13 +192,20 @@ a.nav-link:hover { background: var(--bg-card); }
 .status-value { margin-top: 4px; font-size: 16px; font-weight: 600; }
 .status-value.mono { font-family: var(--mono); font-size: 13px; }
 .stat-value { margin-bottom: 2px; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
+.table-wrap { position: relative; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th { padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 12px; font-weight: 500; text-align: left; }
 td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--bg-card-hover); }
-.tabs { display: flex; margin: -4px 0 22px; gap: 4px; border-bottom: 1px solid var(--border); }
+.tabs { display: flex; margin: -4px 0 22px; gap: 4px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: 0 0 auto; white-space: nowrap; }
+/* Scroll hint (x-scroll-hint): a tab strip that runs past its edge fades
+   out on that side, so hidden tabs read as "more this way". */
+.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent); }
+.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 48px), transparent); }
+.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 48px), transparent); }
 .tab { padding: 7px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px; }
 .tab:hover { color: var(--text); }
 .tab.active { border-bottom-color: var(--accent); color: var(--text); }
@@ -203,6 +216,36 @@ tbody tr:hover { background: var(--bg-card-hover); }
 .status-dot.stopped, .status-dot.offline, .dot.red, .ws-indicator.disconnected { background: var(--red); }
 .status-dot.unknown, .dot.yellow { background: var(--yellow); }
 .dot.gray { background: var(--text-muted); }
+.dot.blue, .status-dot.active { background: var(--accent); }
+.status-dot.active { animation: dot-pulse 1.4s ease-in-out infinite; }
+.status-dot.idle { background: var(--text-muted); }
+.dot.pulse { animation: dot-pulse 1.4s ease-in-out infinite; }
+@keyframes dot-pulse { 50% { opacity: .35; } }
+.text-warn { color: var(--yellow); }
+
+/* Home status: rows that link to the page that owns them. */
+.home-status { display: flex; margin-bottom: 28px; flex-direction: column; gap: 22px; }
+.home-section-head { display: flex; margin-bottom: 8px; align-items: baseline; justify-content: space-between; gap: 12px; }
+.home-shortcuts-head { margin-bottom: 12px; align-items: center; }
+.home-asof, .home-more { font-size: 12px; }
+.home-more { color: var(--text-muted); text-decoration: none; }
+.home-more:hover { color: var(--accent); }
+.status-list { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
+.status-row { display: flex; min-height: 44px; padding: 9px 14px; align-items: center; gap: 12px; color: var(--text); text-decoration: none; }
+.status-row + .status-row { border-top: 1px solid var(--border); }
+a.status-row:hover { background: var(--bg-card-hover); }
+.status-row-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
+.status-row-title { font-size: 13px; overflow-wrap: anywhere; }
+.status-row-detail { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.status-row-meta { flex-shrink: 0; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.status-row-action { flex-shrink: 0; color: var(--accent); font-size: 12px; white-space: nowrap; }
+.status-row-facts { display: flex; flex-shrink: 0; gap: 14px; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .dot.pulse, .status-dot.active { animation: none; } }
+@media (max-width: 640px) {
+  .status-row { flex-wrap: wrap; row-gap: 4px; }
+  .status-row-main { flex-basis: calc(100% - 20px); }
+  .status-row-meta, .status-row-action, .status-row-facts { margin-left: 19px; }
+}
 .monitor-list { display: flex; flex-direction: column; gap: 8px; }
 .monitor-card { display: block; color: inherit; text-decoration: none; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); cursor: pointer; }
 .monitor-card:hover { border-color: var(--text-muted); }
@@ -258,6 +301,11 @@ tbody tr:hover { background: var(--bg-card-hover); }
 .dialog { width: 100%; max-width: 470px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
 .dialog h2 { margin-bottom: 18px; font-size: 16px; font-weight: 600; }
 .dialog-actions { display: flex; margin-top: 20px; justify-content: flex-end; gap: 8px; }
+.danger-zone { margin-top: 32px; }
+.danger-zone .section-title { margin-bottom: 8px; color: var(--red); }
+.danger-row { display: flex; padding: 14px 16px; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; border: 1px solid var(--red); border-radius: var(--radius); background: var(--bg-card); }
+.danger-row .card-meta { max-width: 60ch; }
+.dialog-message { margin-bottom: 14px; color: var(--text-secondary); white-space: pre-line; overflow-wrap: anywhere; }
 .toast-container { position: fixed; right: 20px; bottom: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
 .toast { min-width: 220px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--text); font-size: 12px; }
 .toast.success { border-color: var(--green); color: var(--green); }
@@ -277,6 +325,15 @@ tbody tr:hover { background: var(--bg-card-hover); }
   background: var(--bg-card); color: var(--yellow);
   font-size: 12px; word-break: break-word;
 }
+/* A neutral setting line (not a warning): same shape as the stale banner,
+   muted colours. */
+.info-banner {
+  display: flex; margin-bottom: 16px; padding: 8px 14px; gap: 12px;
+  align-items: center; justify-content: space-between; flex-wrap: wrap;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-card); color: var(--text-secondary); font-size: 12px;
+}
+.backups-page .card { margin-bottom: 12px; cursor: default; }
 .empty-icon { margin-bottom: 12px; opacity: .4; }
 .loading, .spinner { display: none; }
 .back-link { display: inline-flex; margin-bottom: 14px; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; text-decoration: none; }
@@ -294,15 +351,14 @@ tbody tr:hover { background: var(--bg-card-hover); }
 .progress-fill.high { background: var(--red); }
 
 /* Sources page: plain labelled fields, stacked. */
-.source-form, .source-detail { margin-top: 16px; cursor: default; }
+.source-form, .source-detail { margin: 0 0 16px; padding: 16px; cursor: default; }
 .source-form:hover, .source-detail:hover { border-color: var(--border); }
 .source-form .section-title { margin-bottom: 12px; }
-.source-form .field { display: block; color: var(--text-muted); font-size: 12px; font-weight: 500; }
-.source-form .field input, .source-form .field select { display: block; margin-top: 5px; }
-.source-card { display: flex; margin-top: 8px; min-height: 0; flex-wrap: wrap; align-items: center; gap: 8px; }
-.source-detail h2 { margin-bottom: 8px; font-size: 14px; overflow-wrap: anywhere; }
-.source-detail h3 { margin: 14px 0 6px; font-size: 12px; }
-.source-detail p { margin-bottom: 6px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.source-form .card-meta { margin-top: 4px; }
+.source-detail h3 { font-size: 14px; overflow-wrap: anywhere; }
+.source-detail .section-title { font-size: 12px; }
+.source-url { display: block; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-input); font-size: 12px; overflow-wrap: anywhere; }
+tr.row-selected td { background: var(--accent-soft); }
 code { overflow-wrap: anywhere; }
 
 /* Pinned links inside the phone menu (see the 640px block). */
@@ -318,17 +374,19 @@ code { overflow-wrap: anywhere; }
 /* Nav toggle: only shown once the primary nav collapses into a panel. */
 .nav-toggle { display: none; }
 
-/* Responsive header: the thirteen destinations need about 1275px beside the
-   brand. Up to 1400px they tighten to about 1190px; below 1240px the nav
-   collapses into a drop-down panel opened from the header toggle. Raise both
-   when a destination is added. */
-@media (max-width: 1400px) {
+/* Responsive header (measured 2026-11-11): brand + the seven destinations
+   need 767px at full spacing and 695px tightened; four pinned icons add
+   about 160px (857px tightened), and further pins scroll sideways in their
+   strip. Below 1100px the nav tightens; below 900px it collapses into a
+   drop-down panel opened from the header toggle. Re-measure both when a
+   destination is added. */
+@media (max-width: 1099px) {
   .navbar { gap: 14px; }
   .navbar-nav { gap: 2px; }
   .navbar-nav a { padding: 5px 8px; }
 }
 
-@media (max-width: 1239px) {
+@media (max-width: 899px) {
   .navbar {
     min-height: 56px; gap: 10px;
     padding: max(8px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 8px max(14px, env(safe-area-inset-left));
@@ -453,7 +511,7 @@ code { overflow-wrap: anywhere; }
 }
 
 @media (max-width: 400px) {
-  .stats-grid, .status-grid { grid-template-columns: minmax(0, 1fr); }
+  .stats-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -504,6 +562,49 @@ code { overflow-wrap: anywhere; }
 .product-switcher a.ps-item:hover { background: var(--bg-card-hover); }
 .product-switcher .ps-item.current { color: var(--text-muted); cursor: default; }
 
+/* Small action menus (deploy entry, card actions). */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu {
+  position: absolute; right: 0; top: 100%; margin-top: 5px; z-index: 60;
+  display: flex; min-width: 220px; flex-direction: column; padding: 4px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(1, 4, 9, .4);
+}
+.menu-item {
+  display: flex; padding: 8px 10px; flex-direction: column; align-items: flex-start; gap: 2px;
+  border: 0; border-radius: 6px; background: none; color: var(--text); font-size: 13px; text-align: left; cursor: pointer;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--bg-card-hover); }
+.menu-item.danger { color: var(--red); }
+.card-menu { position: absolute; top: 6px; right: 6px; }
+.card-menu-btn { width: 28px; height: 28px; color: var(--text-muted); }
+.card-menu .menu { min-width: 180px; }
+.menu-note { color: var(--text-muted); font-size: 11px; }
+
+.btn-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.row-actions { text-align: right; white-space: nowrap; }
+
+/* App header: state beside the name, server and domain as links. */
+.app-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.state-pill { display: inline-flex; padding: 2px 9px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); font-size: 12px; }
+.app-where a, .app-related a, .card-link, .quiet-link { color: var(--accent); text-decoration: none; }
+.app-where a:hover, .app-related a:hover, .card-link:hover, .quiet-link:hover { text-decoration: underline; }
+.app-where .mono { overflow-wrap: anywhere; }
+.app-facts { display: flex; margin: -12px 0 14px; flex-wrap: wrap; gap: 6px 18px; color: var(--text-secondary); font-size: 12px; }
+.app-facts a { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); text-decoration: none; }
+.app-related { margin-top: 0; }
+.section .app-facts { margin: 0 0 12px; }
+.card-facts { display: flex; margin-top: 6px; gap: 12px; color: var(--text-secondary); font-size: 12px; }
+.card-link { display: inline-block; margin-top: 6px; font-size: 12px; }
+
+/* Hub tabs: the page-level tab strip of Apps, Servers and Monitoring. */
+.hub-tabs { display: flex; margin: -8px 0 22px; gap: 4px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.hub-tabs::-webkit-scrollbar { display: none; }
+.hub-tab { padding: 8px 12px; margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 13px; text-decoration: none; white-space: nowrap; }
+.hub-tab:hover { color: var(--text); }
+.hub-tab.active { border-bottom-color: var(--accent); color: var(--text); font-weight: 600; }
+.subpage-title { font-size: 16px; font-weight: 600; }
+
 /* ── D03 onboarding preflight panel (deploy-form host readiness) ── */
 .preflight-panel {
   margin-top: 10px; padding: 12px 14px;
@@ -532,3 +633,28 @@ code { overflow-wrap: anywhere; }
 .preflight-check.check-fail.sev-warning .check-result { color: var(--yellow); }
 .preflight-check.check-unknown { border-left-color: var(--yellow); }
 .preflight-check.check-unknown .check-result { color: var(--yellow); }
+
+/* Phone tables (2026-11 rework): a .stack-table becomes one block per row.
+   The lead cell (what the row is) and the problem cell (what is wrong) come
+   first; other cells follow with their column name; .stack-inline cells sit
+   side by side; an empty problem cell is dropped. */
+@media (max-width: 640px) {
+  .table-wrap > table.stack-table { display: block; min-width: 0; }
+  .stack-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .stack-table tbody { display: block; }
+  .stack-table tr { display: flex; padding: 12px 14px; flex-wrap: wrap; gap: 4px 14px; border-top: 1px solid var(--border); }
+  .stack-table tbody tr:first-child { border-top: 0; }
+  .table-wrap > table.stack-table td, .table-wrap > table.stack-table td:first-child {
+    position: static; display: block; padding: 0; flex: 1 1 100%; min-width: 0;
+    min-width: 0; max-width: none; border: 0; box-shadow: none; background: none; white-space: normal; overflow-wrap: anywhere;
+  }
+  .table-wrap > table.stack-table tbody tr:hover td:first-child { background: none; }
+  .stack-table td[data-label]::before { content: attr(data-label) " "; color: var(--text-muted); font-size: 11px; }
+  .table-wrap > table.stack-table td.stack-inline { flex: 0 0 auto; }
+  .stack-table td.stack-lead { order: -2; font-weight: 600; }
+  .stack-table td.stack-lead div { font-weight: 400; }
+  .stack-table td.stack-problem { order: -1; color: var(--text); }
+  .stack-table td.stack-empty { display: none; }
+  .table-wrap > table.stack-table td.row-actions { text-align: left; }
+  .stack-table .btn-row { justify-content: flex-start; }
+}

@@ -2577,3 +2577,26 @@ tests also pass under -race; node --check on all three shipped frontend
 bundles; node --test frontend suite 51/51 (baseline). Production code
 untouched (git diff: four _test.go files). No commits were made; the tree
 stays dirty for the orchestrator.
+
+## 2026-11-11 navigation and UI rework (branch nav-rework)
+
+Supersedes the D07 nav description above. The header is seven
+destinations — Home, Apps, Servers, Monitoring, Backups, Activity |
+Settings — and the pages that had their own slot are tabs: Monitoring
+(Uptime /monitors, Domains /domains, Alerts /alerts), Servers (Servers,
+Cleanup /cleanup; a server's report is its Cleanup tab), Apps (Apps,
+Templates), Backups (Coverage, Setup, Restore tests), Settings (+
+Integrations, Git sources). Every old URL and alias still resolves to the
+page and tab it moved to (ROUTES entries may carry fixed params); app,
+server, Backups and Settings tabs are in the URL as ?tab=. Home is a status
+page. One confirm dialog replaces every browser confirm()/prompt(). The
+nav collapses below 900px (re-measured; frontend-test/header_layout).
+Two small backend additions: /api/cleanup rows carry the audited disk
+line, /api/monitors carries each monitor's last_check.
+
+Left as they were, deliberately: the Cleanup destructive-fix and backup
+restore typed-name dialogs keep their own markup (same pattern as the
+shared dialog; their flows are covered by existing tests). The sources
+"UI surface" item under the webhook remainders above now has a table,
+detail, delete and delivery history; the per-forge freshness items stay
+open.

@@ -3856,6 +3856,9 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 			// Delivery exposes the monitor's last alert-delivery state (D08):
 			// pending/delivered/dead-lettered with the last failure.
 			Delivery *outbox.DeliveryStatus `json:"delivery,omitempty"`
+			// LastCheck is the newest check, so the list can show whether a
+			// monitor is down now (the 24h stats only say how it has been).
+			LastCheck *store.CheckResult `json:"last_check,omitempty"`
 		}
 
 		var result []monitorWithStats
@@ -3864,6 +3867,9 @@ func (s *Server) handleMonitors(w http.ResponseWriter, r *http.Request) {
 			mws := monitorWithStats{Monitor: m}
 			stats, _ := s.store.GetStats(m.ID, time.Now().Add(-24*time.Hour))
 			mws.Stats = stats
+			if last, err := s.store.GetChecks(m.ID, time.Time{}, 1); err == nil && len(last) > 0 {
+				mws.LastCheck = &last[0]
+			}
 			if s.outbox != nil {
 				mws.Delivery = s.outbox.LatestForMonitor(m.ID)
 			}

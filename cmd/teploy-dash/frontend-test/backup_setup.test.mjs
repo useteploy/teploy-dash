@@ -206,11 +206,11 @@ test('closing with an unsaved key warns that its file is no use', async () => {
   p.recoveryGen = { publicKey: 'age1x', fileText: 'x', fileName: 'y' };
   const seen = [];
   globalThis.confirm = text => { seen.push(text); return false; };
-  p.closeSetup();
+  await p.closeSetup();
   assert.equal(p.setupOpen, true);
   assert.match(seen[0], /delete it/);
   globalThis.confirm = () => true;
-  p.closeSetup();
+  await p.closeSetup();
   assert.equal(p.setupOpen, false);
   assert.equal(p.recoveryGen, null);
   delete globalThis.confirm;
@@ -454,20 +454,26 @@ test('the hand-written-jobs list shows only when some are found', async () => {
 test('the home page says so until protected, and a failed read says nothing', async () => {
   const h = harness('/');
   let view = baseView();
-  h.respond(() => response(view));
-  const banner = h.components.protectBanner();
-  await banner.init();
-  assert.equal(banner.visible(), true);
+  const ok = (url) => url === '/api/backups' ? response(view) : response({});
+  h.respond(ok);
+  const home = h.components.homeStatus();
+  await home.init();
+  const protect = () => home.attention().find((r) => r.key === 'protect');
+  assert.ok(protect(), 'unprotected: the protect row shows');
   view = baseView({ state: 'protected' });
-  await banner.init();
-  assert.equal(banner.visible(), false);
+  await home.loadOne('backups');
+  assert.equal(protect(), undefined);
   view = baseView({ supported: false });
-  await banner.init();
-  assert.equal(banner.visible(), false);
-  h.respond(() => response({}, { status: 500 }));
-  await banner.init();
-  assert.equal(banner.visible(), false);
-  assert.ok(h.readHTML().includes('x-data="protectBanner"'));
+  await home.loadOne('backups');
+  assert.equal(protect(), undefined);
+  // A failed first read shows no protect row, and names backups as unchecked.
+  const fresh = h.components.homeStatus();
+  h.respond((url) => url === '/api/backups' ? response({}, { status: 500 }) : response({}));
+  await fresh.init();
+  assert.equal(fresh.attention().find((r) => r.key === 'protect'), undefined);
+  assert.ok(fresh.unchecked().some((s) => s.key === 'backups'), 'a failed backups read is named as unchecked');
+  home.destroy(); fresh.destroy();
+  assert.ok(h.readHTML().includes('x-data="homeStatus"'));
 });
 
 test('no emoji in the page, and the layout holds at phone width', () => {

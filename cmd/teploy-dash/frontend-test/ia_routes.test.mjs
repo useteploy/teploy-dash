@@ -72,6 +72,7 @@ assert(!!router, 'router store was not registered');
     ['/operations/abc', 'operation-detail'],
     // task-named aliases deep-link to the same pages, with params.
     ['/projects', 'projects'],
+    ['/apps', 'projects'],
     ['/fleet', 'servers'],
     ['/fleet/prod', 'server-detail'],
     ['/activity', 'operations'],
@@ -124,29 +125,90 @@ assert(!!router, 'router store was not registered');
 //    semantics; page titles renamed.
 {
   const html = readFileSync(join(here, '../frontend/index.html'), 'utf8');
-  for (const label of ['>Projects</a>', '>Fleet</a>', '>Activity</a>', '>Monitors</a>', '>Domains</a>', '>Restore Tests</a>', '>Templates</a>', '>Settings</a>']) {
-    assert(html.includes(label), `nav must render ${label}`);
-  }
+  // Seven destinations: Home Apps Servers Monitoring Backups Activity | Settings.
+  const nav = html.slice(html.indexOf('id="primary-nav"'), html.indexOf('</ul>', html.indexOf('id="primary-nav"')));
+  const labels = [...nav.matchAll(/<li><a [^>]*>([^<]+)<\/a><\/li>/g)].map((m) => m[1]);
+  assert(JSON.stringify(labels) === JSON.stringify(['Home', 'Apps', 'Servers', 'Monitoring', 'Backups', 'Activity', 'Settings']), `nav destinations: ${labels.join(', ')}`);
   assert(!html.includes('>Deployments</a>'), 'nav must not render the old Deployments label');
-  const seps = (html.match(/class="nav-sep"/g) || []).length;
-  assert(seps === 2, `nav must render two group separators (found ${seps})`);
-  assert(html.includes('title="Groups, projects, and the apps deployed to them"'), 'Projects nav link must carry its task title');
-  assert(html.includes('title="Every server this dash manages'), 'Fleet nav link must carry its task title');
+  const seps = (nav.match(/class="nav-sep"/g) || []).length;
+  assert(seps === 1, `nav must render one separator, before Settings (found ${seps})`);
+  assert((nav.match(/\$store\.router\.section === '/g) || []).length === 14, 'every destination is active (and aria-current) for its whole section');
+  assert(html.includes('title="Groups, projects, the apps deployed to them, and app templates"'), 'Apps nav link must carry its task title');
+  assert(html.includes('title="Every server this dash manages'), 'Servers nav link must carry its task title');
   assert(html.includes('title="Operations started through dash'), 'Activity nav link must carry its task title');
   // Page titles follow the nav names.
-  assert(html.includes('<h1 class="page-title">Projects</h1>'), 'projects page title');
-  assert(html.includes('<h1 class="page-title">Fleet</h1>'), 'fleet page title');
+  assert(html.includes('<h1 class="page-title">Apps</h1>'), 'apps page title');
+  assert(html.includes('<h1 class="page-title">Servers</h1>'), 'servers page title');
+  assert(!/>(Projects|Fleet|Siblings|Sources)<\/(a|h1)>/.test(html), 'old labels Projects, Fleet, Siblings, Sources are gone');
   assert(html.includes('<h1 class="page-title">Activity</h1>'), 'activity page title');
   assert(!html.includes('&larr; Deployments</a>'), 'back-links must say Projects, not Deployments');
-  assert(html.includes('&larr; Projects</a>') && html.includes('&larr; Fleet</a>') && html.includes('&larr; Activity</a>'), 'back-links renamed');
+  assert(html.includes('&larr; Apps</a>') && html.includes('&larr; Servers</a>') && html.includes('&larr; Activity</a>'), 'back-links renamed');
   // Tab semantics on the resource page (app) and the server page.
   assert(html.includes('role="tablist"'), 'tabs render tablist semantics');
   const tabs = (html.match(/role="tab"/g) || []).length;
-  assert(tabs === 12, `expected 12 role=tab buttons (10 app incl. capability-gated Settings, Activity, Releases, Backups and Repository + 2 server), found ${tabs}`);
+  assert(tabs === 16, `expected 16 role=tab buttons (10 app incl. capability-gated Settings, History, Releases, Backups and Repository + 3 server + 3 backups), found ${tabs}`);
   const panels = (html.match(/role="tabpanel"/g) || []).length;
-  assert(panels === 12, `expected 12 role=tabpanel containers, found ${panels}`);
+  assert(panels === 13, `expected 13 role=tabpanel containers (10 app + 3 server), found ${panels}`);
   assert(html.includes('aria-selected='), 'tabs expose aria-selected');
   assert(html.includes('@keydown.arrow-right.prevent='), 'tablist supports arrow-key navigation');
+}
+
+// 5. Pages that became tabs: the old URLs open the right page and tab, the
+//    old page names still navigate, and every page belongs to a section.
+{
+  const resolve = (pathname, search = '') => {
+    globalThis.location = { pathname, search };
+    router.restore();
+    return { page: router.page, params: { ...router.params }, section: router.section };
+  };
+  const cases = [
+    ['/', 'homepage', {}, 'home'],
+    ['/apps', 'projects', {}, 'apps'],
+    ['/templates', 'templates', {}, 'apps'],
+    ['/fleet', 'servers', {}, 'servers'],
+    ['/cleanup', 'cleanup', {}, 'servers'],
+    ['/cleanup/prod', 'server-detail', { name: 'prod', tab: 'cleanup' }, 'servers'],
+    ['/monitors', 'monitors', {}, 'monitoring'],
+    ['/monitors/m1', 'monitor-detail', { id: 'm1' }, 'monitoring'],
+    ['/domains', 'domains', {}, 'monitoring'],
+    ['/alerts', 'alerts', {}, 'monitoring'],
+    ['/backups', 'backups', {}, 'backups'],
+    ['/restore-tests', 'backups', { tab: 'restore-tests' }, 'backups'],
+    ['/activity', 'operations', {}, 'activity'],
+    ['/siblings', 'settings', { tab: 'integrations' }, 'settings'],
+    ['/sources', 'settings', { tab: 'git-sources' }, 'settings'],
+  ];
+  for (const [path, page, params, section] of cases) {
+    const got = resolve(path);
+    assert(got.page === page && JSON.stringify(got.params) === JSON.stringify(params) && got.section === section,
+      `${path} -> ${JSON.stringify(got)}, want ${page} ${JSON.stringify(params)} in ${section}`);
+  }
+  const tabbed = [
+    ['/settings', '?tab=notifications', 'settings', 'notifications'],
+    ['/backups', '?tab=setup', 'backups', 'setup'],
+    ['/servers/prod', '?tab=proxy', 'server-detail', 'proxy'],
+    ['/deployments/prod/web', '?tab=env', 'app-detail', 'env'],
+  ];
+  for (const [path, search, page, tab] of tabbed) {
+    const got = resolve(path, search);
+    assert(got.page === page && got.params.tab === tab, `${path}${search} -> ${got.page} tab ${got.params.tab}`);
+  }
+  pushed.length = 0;
+  for (const [name, params, url] of [
+    ['cleanup-detail', { server: 'prod' }, '/servers/prod?tab=cleanup'],
+    ['siblings', {}, '/settings?tab=integrations'],
+    ['sources', {}, '/settings?tab=git-sources'],
+    ['restore-tests', {}, '/backups?tab=restore-tests'],
+  ]) {
+    router.navigate(name, params);
+    assert(pushed.at(-1) === url, `navigate('${name}') pushed ${pushed.at(-1)}, want ${url}`);
+  }
+  const hub = (page) => { globalThis.location = { pathname: router.url(page), search: '' }; router.restore(); return (router.hubTabs || []).map((t) => t[1]).join(','); };
+  assert(hub('projects') === 'Apps,Templates', 'Apps hub tabs');
+  assert(hub('servers') === 'Servers,Cleanup', 'Servers hub tabs');
+  assert(hub('monitors') === 'Uptime,Domains,Alerts', 'Monitoring hub tabs');
+  resolve('/servers/prod');
+  assert(router.hubTabs === null, 'detail pages have no hub tabs');
 }
 
 if (failures.length) {

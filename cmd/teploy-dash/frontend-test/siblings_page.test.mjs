@@ -29,12 +29,13 @@ const body = (extra = {}) => ({
   ...extra,
 });
 
-test('the /siblings route renders the page and the nav names it', async () => {
+test('/siblings opens Settings > Integrations, which renders the page', async () => {
   const h = harness('/siblings'); h.stores.router.restore();
-  assert.equal(h.stores.router.page, 'siblings');
+  assert.equal(h.stores.router.page, 'settings');
+  assert.equal(h.stores.router.params.tab, 'integrations');
   const html = h.readHTML();
-  assert.ok(html.includes(`x-if="$store.router.page === 'siblings'"`));
-  assert.ok(html.includes('>Siblings</a>'));
+  assert.ok(html.includes(`x-if="tab === 'integrations'"`));
+  assert.ok(html.includes(`@click="setTab('integrations')">Integrations</button>`));
   assert.ok(html.includes('x-data="siblingsPage"'));
 });
 

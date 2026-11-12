@@ -261,6 +261,71 @@ function formatObservedAt(iso) {
   return isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
 }
 
+// opDotClass colours an operation's status dot: in progress is a pulsing
+// blue (never the green of a finished success), succeeded green, failed or
+// interrupted red, canceled or otherwise settled grey.
+function opDotClass(status) {
+  if (['queued', 'running', 'cancel_requested', 'stopping'].includes(status)) return 'active';
+  if (status === 'succeeded') return 'running';
+  if (status === 'failed' || status === 'interrupted') return 'stopped';
+  return 'idle';
+}
+
+// arr: a list from a response field, or empty when the field is missing or
+// not a list (a mis-shaped response must not break the page that reads it).
+function arr(v) { return Array.isArray(v) ? v : []; }
+
+// The one date helper (2026-11 rework). Times read as relative text ("5 min
+// ago", "in 3 h") with the exact local time in a title attribute: in
+// templates, x-time="<iso>" does both; relTime / ageText give the text where
+// a time is part of a longer sentence.
+function ageText(seconds) {
+  const future = seconds < 0;
+  const abs = Math.abs(seconds);
+  if (abs < 90) return 'just now';
+  const minutes = Math.round(abs / 60);
+  let text;
+  if (minutes < 120) text = `${minutes} min`;
+  else if (minutes / 60 < 48) text = `${Math.round(minutes / 60)} h`;
+  else text = `${Math.round(minutes / 1440)} days`;
+  return future ? 'in ' + text : text + ' ago';
+}
+function relTime(iso) {
+  if (!iso || String(iso).startsWith('0001')) return '';
+  const t = Date.parse(iso);
+  if (isNaN(t)) return String(iso);
+  return ageText(Math.round((Date.now() - t) / 1000));
+}
+
+// ── Confirm dialog (2026-11 rework) ──
+// One dialog for every confirmation and every question that used to be a
+// browser confirm() or prompt(). askConfirm resolves true/false; a `typed`
+// name must be typed exactly before the confirm button enables. askForm
+// shows labelled fields and resolves their values, or null when cancelled.
+//   askConfirm({ title, message, confirmLabel, danger, typed })
+//   askForm({ title, message, confirmLabel, danger, typed, fields: [{ key, label, value, type, placeholder, hint, required, minLength }] })
+function askConfirm(opts) {
+  if (typeof opts === 'string') opts = questionDialog(opts);
+  return Alpine.store('dialog').open({ ...opts, kind: 'confirm' });
+}
+// questionDialog turns a one-string question ("Remove x?\n\nWhat happens.")
+// into dialog options: the question is the title, the rest the message, and
+// the confirm button is named by the question's verb.
+function questionDialog(text) {
+  let title = String(text), message = '';
+  const para = title.indexOf('\n\n');
+  if (para > 0) { message = title.slice(para + 2); title = title.slice(0, para); }
+  else {
+    const q = title.indexOf('? ');
+    if (q > 0) { message = title.slice(q + 2); title = title.slice(0, q + 1); }
+  }
+  const verb = (title.match(/^(Sign out|Roll back|[A-Z][a-z]+)/) || [''])[0];
+  const labels = { Roll: 'Roll back', Edit: 'Switch', Poll: 'Poll now', Put: 'Start maintenance', Restore: 'Restore settings' };
+  const danger = /^(Delete|Remove|Revoke|Stop|Roll|Sign out|Restart|Reset)\b/.test(title);
+  return { title, message, confirmLabel: labels[verb] || verb || 'Confirm', danger };
+}
+function askForm(opts) { return Alpine.store('dialog').open({ ...opts, kind: 'form' }); }
+
 // ── Accessibility helpers ──
 // trapDialogFocus keeps Tab/Shift+Tab inside an open dialog (A49/A58).
 // Attach with @keydown.tab on the dialog overlay; focus is kept within the
@@ -326,6 +391,76 @@ function authCaps(me) {
   return Array.isArray(caps) ? caps : [];
 }
 
+// formatInterval names common check intervals (hourly, daily, weekly) and
+// falls back to "every N h".
+function formatInterval(hours) {
+  const h = Number(hours);
+  if (!Number.isFinite(h) || h <= 0) return '';
+  return { 1: 'hourly', 24: 'daily', 168: 'weekly' }[h] || (h % 24 === 0 ? `every ${h / 24} days` : `every ${h} h`);
+}
+
+// routeTab reads the ?tab= of a route's params: one of the page's tab names,
+// else the page's default tab.
+function routeTab(params, allowed, fallback) {
+  const t = params && params.tab;
+  return allowed.includes(t) ? t : fallback;
+}
+const APP_TABS = ['general', 'settings', 'repository', 'env', 'logs', 'deploys', 'releases', 'history', 'backups', 'kv'];
+const SERVER_TABS = ['overview', 'proxy', 'cleanup'];
+const SETTINGS_TABS = ['servers', 'groups', 'notifications', 'registry', 'mcp', 'users', 'sso', 'links', 'integrations', 'git-sources', 'account'];
+const BACKUP_TABS = ['coverage', 'setup', 'restore-tests'];
+
+// Header destinations (2026-11 nav rework): Home, Apps, Servers, Monitoring,
+// Backups, Activity, then Settings. Every page belongs to one.
+const NAV_SECTIONS = {
+  'homepage': 'home',
+  'projects': 'apps', 'project-detail': 'apps', 'app-detail': 'apps', 'templates': 'apps',
+  'servers': 'servers', 'server-detail': 'servers', 'cleanup': 'servers',
+  'monitors': 'monitoring', 'monitor-detail': 'monitoring', 'domains': 'monitoring', 'alerts': 'monitoring',
+  'backups': 'backups',
+  'operations': 'activity', 'operation-detail': 'activity',
+  'settings': 'settings',
+};
+// Hub list pages that share a tab strip; each tab is its own page and URL.
+const HUB_APPS = [['projects', 'Apps'], ['templates', 'Templates']];
+const HUB_SERVERS = [['servers', 'Servers'], ['cleanup', 'Cleanup']];
+const HUB_MONITORING = [['monitors', 'Uptime'], ['domains', 'Domains'], ['alerts', 'Alerts']];
+const HUB_TABS = {
+  'projects': HUB_APPS, 'templates': HUB_APPS,
+  'servers': HUB_SERVERS, 'cleanup': HUB_SERVERS,
+  'monitors': HUB_MONITORING, 'domains': HUB_MONITORING, 'alerts': HUB_MONITORING,
+};
+
+// restoreTestRows merges the automatic (dash-owned, from /api/backups) and
+// hand-added (/api/restore-tests) restore tests into one list for the
+// Backups > Restore tests table.
+function restoreTestRows(automatic, manual) {
+  const rows = [];
+  for (const t of automatic || []) {
+    const last = t.last_run;
+    rows.push({
+      key: 'auto:' + t.id, auto: t, manual: null,
+      label: [t.server, t.app || t.accessory, t.database].filter(Boolean).join(' · '),
+      engine: t.engine || '',
+      addedBy: t.adopted ? 'Automatic (adopted)' : 'Automatic',
+      state: !last ? 'never' : last.skipped ? 'skipped' : last.ok ? 'ok' : 'failed',
+      lastText: !last ? 'not yet' : last.skipped ? last.skipped : last.ok ? 'passed' : 'failed',
+    });
+  }
+  for (const t of manual || []) {
+    const ran = t.last_run_at && !String(t.last_run_at).startsWith('0001');
+    rows.push({
+      key: 'manual:' + t.id, auto: null, manual: t,
+      label: [t.server, t.app + '/' + t.accessory].join(' · '),
+      engine: '',
+      addedBy: 'By hand',
+      state: !ran ? 'never' : t.last_ok ? 'ok' : 'failed',
+      lastText: !ran ? 'never run' : t.last_ok ? 'passed' : 'failed',
+    });
+  }
+  return rows;
+}
+
 // ── Alpine.js App ──
 document.addEventListener('alpine:init', () => {
   // ── Router Store ──
@@ -348,13 +483,10 @@ document.addEventListener('alpine:init', () => {
     { page: 'monitors', path: '/monitors' },
     { page: 'monitor-detail', path: '/monitors/:id' },
     { page: 'domains', path: '/domains' },
+    { page: 'alerts', path: '/alerts' },
     { page: 'cleanup', path: '/cleanup' },
-    { page: 'cleanup-detail', path: '/cleanup/:server' },
-    { page: 'siblings', path: '/siblings' },
     { page: 'backups', path: '/backups' },
-    { page: 'restore-tests', path: '/restore-tests' },
     { page: 'templates', path: '/templates' },
-    { page: 'sources', path: '/sources' },
     { page: 'servers', path: '/servers' },
     { page: 'server-detail', path: '/servers/:name' },
     { page: 'operations', path: '/operations' },
@@ -362,11 +494,25 @@ document.addEventListener('alpine:init', () => {
     { page: 'settings', path: '/settings' },
     // Task-named aliases (D07): same pages, task-meaningful paths.
     { page: 'projects', path: '/projects' },
+    { page: 'projects', path: '/apps' },
     { page: 'servers', path: '/fleet' },
     { page: 'server-detail', path: '/fleet/:name' },
     { page: 'operations', path: '/activity' },
     { page: 'operation-detail', path: '/activity/:id' },
+    // Pages that became tabs (2026-11 nav rework): the old URLs open the
+    // page and tab they moved to. `params` are fixed by the route.
+    { page: 'server-detail', path: '/cleanup/:name', params: { tab: 'cleanup' } },
+    { page: 'settings', path: '/siblings', params: { tab: 'integrations' } },
+    { page: 'settings', path: '/sources', params: { tab: 'git-sources' } },
+    { page: 'backups', path: '/restore-tests', params: { tab: 'restore-tests' } },
   ];
+  // Page names from before the rework, still accepted by navigate().
+  const MOVED_PAGES = {
+    'cleanup-detail': (p) => ['server-detail', { name: p.server || p.name, tab: 'cleanup' }],
+    'siblings': (p) => ['settings', { ...p, tab: 'integrations' }],
+    'sources': (p) => ['settings', { ...p, tab: 'git-sources' }],
+    'restore-tests': (p) => ['backups', { ...p, tab: 'restore-tests' }],
+  };
 
   function routeToURL(page, params) {
     const route = ROUTES.find(r => r.page === page);
@@ -406,6 +552,7 @@ document.addEventListener('alpine:init', () => {
         else if (want[i] !== have[i]) { ok = false; break; }
       }
       if (!ok) continue;
+      Object.assign(params, route.params || {});
       // Path-derived identifiers are authoritative: a conflicting query
       // parameter must not retarget the page onto another resource.
       for (const [k, v] of new URLSearchParams(search)) {
@@ -419,7 +566,13 @@ document.addEventListener('alpine:init', () => {
   Alpine.store('router', {
     page: 'homepage',
     params: {},
+    // The header destination the current page belongs to.
+    get section() { return NAV_SECTIONS[this.page] || ''; },
+    // The page-level tabs (each its own URL) shown above a hub's list pages.
+    get hubTabs() { return HUB_TABS[this.page] || null; },
+    url(page, params = {}) { return routeToURL(page, params); },
     navigate(page, params = {}) {
+      if (MOVED_PAGES[page]) [page, params] = MOVED_PAGES[page](params);
       this.page = page;
       this.params = params;
       history.pushState({ page, params }, '', routeToURL(page, params));
@@ -429,9 +582,106 @@ document.addEventListener('alpine:init', () => {
       this.page = page;
       this.params = params;
     },
+    // Tabs live in the URL as ?tab=<name> (the default tab is left out so
+    // canonical URLs stay clean). A tab change replaces the current history
+    // entry rather than pushing one: reload and shared links land on the tab,
+    // Back leaves the page, and arrow-keying across a tab strip does not fill
+    // the history.
+    setTab(tab, fallback) {
+      const params = { ...this.params };
+      if (!tab || tab === fallback) delete params.tab; else params.tab = tab;
+      if ((this.params.tab || '') === (params.tab || '')) return;
+      this.params = params;
+      history.replaceState({ page: this.page, params }, '', routeToURL(this.page, params));
+    },
   });
   Alpine.store('router').restore();
   window.addEventListener('popstate', () => Alpine.store('router').restore());
+
+  // x-scroll-hint on a horizontally scrolling strip: marks the sides that
+  // have more content (.more-left / .more-right), which the CSS fades.
+  if (Alpine.directive) {
+    Alpine.directive('scroll-hint', (el, _, { cleanup }) => {
+      const update = () => {
+        const max = el.scrollWidth - el.clientWidth;
+        el.classList.toggle('more-left', max > 1 && el.scrollLeft > 1);
+        el.classList.toggle('more-right', max > 1 && el.scrollLeft < max - 1);
+      };
+      el.addEventListener('scroll', update, { passive: true });
+      const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null;
+      if (ro) { ro.observe(el); for (const child of el.children) ro.observe(child); }
+      // Keep the active tab in view: on open (its class lands after this
+      // runs) and whenever the active tab changes.
+      let shown = null, shownAt = -1;
+      const reveal = () => {
+        const active = el.querySelector('.active');
+        if (active && (active !== shown || active.offsetLeft !== shownAt)) {
+          shown = active; shownAt = active.offsetLeft;
+          const left = active.offsetLeft - el.offsetLeft, right = left + active.offsetWidth;
+          if (left < el.scrollLeft || right > el.scrollLeft + el.clientWidth) el.scrollLeft = Math.max(0, left - 24);
+        }
+        update();
+      };
+      const mo = typeof MutationObserver === 'function' ? new MutationObserver(reveal) : null;
+      if (mo) mo.observe(el, { attributes: true, attributeFilter: ['class', 'style'], subtree: true, childList: true });
+      setTimeout(reveal, 0);
+      cleanup(() => { el.removeEventListener('scroll', update); if (ro) ro.disconnect(); if (mo) mo.disconnect(); });
+    });
+  }
+
+  // x-time="<iso>": relative text, exact time on hover (the one date helper).
+  if (Alpine.directive) {
+    Alpine.directive('time', (el, { expression }, { effect, evaluateLater }) => {
+      const read = evaluateLater(expression);
+      effect(() => read((iso) => {
+        el.textContent = relTime(iso) || '—';
+        if (iso && !String(iso).startsWith('0001')) el.title = formatObservedAt(iso); else el.removeAttribute('title');
+      }));
+    });
+  }
+
+  Alpine.store('dialog', {
+    current: null,
+    values: {},
+    typedValue: '',
+    _resolve: null,
+    _returnFocus: null,
+    open(opts) {
+      if (this._resolve) this._finish(false);
+      this.current = { title: '', message: '', confirmLabel: 'Confirm', danger: false, typed: '', fields: [], ...opts };
+      this.values = {};
+      for (const f of this.current.fields) this.values[f.key] = f.value ?? '';
+      this.typedValue = '';
+      this._returnFocus = typeof document !== 'undefined' ? document.activeElement : null;
+      return new Promise((resolve) => { this._resolve = resolve; });
+    },
+    canSubmit() {
+      const c = this.current;
+      if (!c) return false;
+      if (c.typed && this.typedValue !== c.typed) return false;
+      for (const f of c.fields) {
+        const v = String(this.values[f.key] ?? '');
+        if (f.required && !v.trim()) return false;
+        if (f.minLength && v.length < f.minLength) return false;
+      }
+      return true;
+    },
+    submit() {
+      if (!this.canSubmit()) return;
+      this._finish(true);
+    },
+    cancel() { this._finish(false); },
+    _finish(ok) {
+      const c = this.current, resolve = this._resolve;
+      const result = c && c.kind === 'form' ? (ok ? { ...this.values } : null) : !!ok;
+      this.current = null;
+      this._resolve = null;
+      const back = this._returnFocus;
+      this._returnFocus = null;
+      if (back && typeof back.focus === 'function') setTimeout(() => back.focus(), 0);
+      if (resolve) resolve(result);
+    },
+  });
 
   // ── Service-link icons ──
   // Built-in monochrome glyphs, drawn in the current text colour so they flip
@@ -775,7 +1025,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async createProject(groupName) {
-      const name = prompt('Project name:');
+      const form = await askForm({ title: 'New project in ' + groupName, confirmLabel: 'Create project',
+        fields: [{ key: 'name', label: 'Project name', required: true, placeholder: 'storefront' }] });
+      const name = form && form.name.trim();
       if (!name) return;
       try {
         await api.post(`/api/groups/${encodeURIComponent(groupName)}/projects`, { name });
@@ -787,7 +1039,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async createGroup() {
-      const name = prompt('Group name:');
+      const form = await askForm({ title: 'New group', confirmLabel: 'Create group',
+        fields: [{ key: 'name', label: 'Group name', required: true, placeholder: 'Shop', hint: 'Groups hold projects, and projects hold apps.' }] });
+      const name = form && form.name.trim();
       if (!name) return;
       try {
         await api.post('/api/groups', { name });
@@ -799,7 +1053,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteProject(groupName, projectName) {
-      if (!confirm(`Delete project "${projectName}"? Apps inside remain in the group.`)) return;
+      if (!(await askConfirm(`Delete project "${projectName}"? Apps inside remain in the group.`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`);
         showToast('Project deleted', 'success');
@@ -815,7 +1069,7 @@ document.addEventListener('alpine:init', () => {
       const refs = (group?.server_apps || []).filter(ref => ref.app === appName);
       const scoped = refs.some(ref => ref.server_id === app.server_id);
       const query = scoped ? `?server_id=${encodeURIComponent(app.server_id)}` : '?legacy=1';
-      if (!confirm(`Remove "${appName}" from group "${groupName}"?`)) return;
+      if (!(await askConfirm(`Remove "${appName}" from group "${groupName}"?`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/apps/${encodeURIComponent(appName)}${query}`);
         showToast('App removed from group', 'success');
@@ -908,7 +1162,7 @@ document.addEventListener('alpine:init', () => {
       const project = (group?.projects || []).find(p => p.name === this.projectName);
       const scoped = (project?.server_apps || []).some(ref => ref.app === appName && ref.server_id === app.server_id);
       const query = scoped ? `?server_id=${encodeURIComponent(app.server_id)}` : '?legacy=1';
-      if (!confirm(`Remove "${appName}" from project "${this.projectName}"?`)) return;
+      if (!(await askConfirm(`Remove "${appName}" from project "${this.projectName}"?`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}/apps/${encodeURIComponent(appName)}${query}`);
         if (!this.current(generation)) return;
@@ -922,7 +1176,7 @@ document.addEventListener('alpine:init', () => {
     async deleteThisProject() {
       const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
       if (!this.current(generation)) return;
-      if (!confirm(`Delete project "${this.projectName}"? Apps remain in the group.`)) return;
+      if (!(await askConfirm(`Delete project "${this.projectName}"? Apps remain in the group.`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`);
         if (!this.current(generation)) return;
@@ -936,7 +1190,9 @@ document.addEventListener('alpine:init', () => {
     async renameThisProject() {
       const generation = this.generation, groupName = this.groupName, projectName = this.projectName;
       if (!this.current(generation)) return;
-      const name = prompt('Project name:', this.projectName);
+      const form = await askForm({ title: 'Rename project', confirmLabel: 'Rename',
+        fields: [{ key: 'name', label: 'Project name', value: this.projectName, required: true }] });
+      const name = form && form.name.trim();
       if (!name || name === this.projectName) return;
       try {
         await api.put(`/api/groups/${encodeURIComponent(groupName)}/projects/${encodeURIComponent(projectName)}`, { name });
@@ -997,6 +1253,7 @@ document.addEventListener('alpine:init', () => {
   // ── App Detail Page ──
   Alpine.data('appDetailPage', () => withAsyncLoad({
     tab: 'general',
+    related: { loaded: false, monitor: null, domain: null },
     // resource is the IMMUTABLE identity this page was opened for (A49).
     // Every path and destructive action reads it — never the live router
     // params, which already point at the NEXT app the moment the user
@@ -1136,6 +1393,13 @@ document.addEventListener('alpine:init', () => {
           this.reload();
         }
       });
+      // The tab follows the URL (reload, links, Back into the page).
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'app-detail' || !this.resource) return;
+        const t = routeTab(r.params, APP_TABS, 'general');
+        if (t !== this.tab) queueMicrotask(() => this.switchTab(t));
+      });
       await this.reload();
     },
 
@@ -1146,6 +1410,7 @@ document.addEventListener('alpine:init', () => {
     activateResource(params) {
       this.resource = Object.freeze({server: params.server, name: params.name});
       this.tab = 'general';
+      this.related = { loaded: false, monitor: null, domain: null };
       this.app = null;
       this.envVars = [];
       this.configAuthority = null;
@@ -1194,6 +1459,7 @@ document.addEventListener('alpine:init', () => {
 
     // F059: scrub secret-bearing state when the component unmounts.
     destroy() {
+      if (this.tabEffect) Alpine.release(this.tabEffect);
       this.kvValues = {};
       this.newEnvValue = '';
       this.newKvValue = '';
@@ -1207,6 +1473,34 @@ document.addEventListener('alpine:init', () => {
       this.loadDrift();
       this.loadStats();
       this.loadConfigAuthority();
+      this.loadRelated();
+    },
+
+    // The app's monitor and domain-health row (cached reads, no SSH), for
+    // the links on the General tab. A failed read just leaves the plain
+    // page links; it never claims the app is healthy.
+    async loadRelated() {
+      const target = this.resource;
+      if (!target) return;
+      const [monitors, domains] = await Promise.all([
+        rawFetch.get('/api/monitors').catch(() => null),
+        api.get('/api/domains').catch(() => null),
+      ]);
+      if (this.resource !== target) return;
+      const monitor = arr(monitors).find((m) => m.app === target.name && (!m.server || m.server === target.server)) || null;
+      const domain = arr(domains && domains.rows).find((r) => r.app === target.name && (!r.server || r.server === target.server)) || null;
+      this.related = { loaded: true, monitor, domain, monitorsRead: !!monitors, domainsRead: !!domains };
+    },
+    // Running / stopped / unknown, from the observed status.
+    appState() {
+      const st = (this.app && this.app.status) || '';
+      if (st === 'running') return { cls: 'running', label: 'Running' };
+      if (['stopped', 'exited', 'dead', 'created'].includes(st)) return { cls: 'stopped', label: 'Stopped' };
+      return { cls: 'idle', label: st ? st.charAt(0).toUpperCase() + st.slice(1) : 'State unknown' };
+    },
+    domainURL() {
+      const d = this.app && this.app.domain;
+      return d ? (/^https?:\/\//.test(d) ? d : 'https://' + d) : '';
     },
 
     // The CLI's config-home answer for this app.
@@ -1357,7 +1651,7 @@ document.addEventListener('alpine:init', () => {
 
     async restoreSettings(commit) {
       const target = this.resource;
-      if (!confirm(`Restore the settings from ${this.shortHash(commit)}?\n\nThey become the current settings as a new change; nothing is deployed until you deploy.`)) return;
+      if (!(await askConfirm(`Restore the settings from ${this.shortHash(commit)}?\n\nThey become the current settings as a new change; nothing is deployed until you deploy.`))) return;
       try {
         await api.post(`${this.appPath()}/config/restore`, { commit });
         if (this.resource !== target) return;
@@ -1370,7 +1664,7 @@ document.addEventListener('alpine:init', () => {
 
     async deployPending() {
       const target = this.resource;
-      if (!confirm(`Deploy ${target.name} on ${target.server} with its current settings?`)) return;
+      if (!(await askConfirm(`Deploy ${target.name} on ${target.server} with its current settings?`))) return;
       this.actionLoading = true;
       try {
         const op = await api.post(`${this.appPath()}/deploy`);
@@ -1386,7 +1680,7 @@ document.addEventListener('alpine:init', () => {
     // cannot, its refusal names the way forward.
     async makeEditableHere() {
       const target = this.resource;
-      if (!confirm(`Edit ${target.name}'s settings in Teploy from now on?\n\nTeploy rebuilds them from what is running, and only switches if that matches exactly. After this, deploys from the app's folder are refused until you switch back.`)) return;
+      if (!(await askConfirm(`Edit ${target.name}'s settings in Teploy from now on?\n\nTeploy rebuilds them from what is running, and only switches if that matches exactly. After this, deploys from the app's folder are refused until you switch back.`))) return;
       this.settingsSaving = true;
       try {
         await api.post(`${this.appPath()}/config/home`, { home: 'teploy' });
@@ -1403,7 +1697,7 @@ document.addEventListener('alpine:init', () => {
     // content offered as a teploy.yml download for the app's folder.
     async moveSettingsToFolder() {
       const target = this.resource;
-      if (!confirm(`Edit ${target.name}'s settings in a folder again?\n\nThe Teploy settings are kept in history and downloaded as teploy.yml; deploy from the folder that holds it from now on.`)) return;
+      if (!(await askConfirm(`Edit ${target.name}'s settings in a folder again?\n\nThe Teploy settings are kept in history and downloaded as teploy.yml; deploy from the folder that holds it from now on.`))) return;
       this.settingsSaving = true;
       try {
         const res = await api.post(`${this.appPath()}/config/home`, { home: 'folder' });
@@ -1490,7 +1784,7 @@ document.addEventListener('alpine:init', () => {
 
     async rollbackTo(rel) {
       const target = this.resource;
-      if (!confirm(`Roll ${target.name} on ${target.server} back to ${this.shortHash(rel.release)}?\n\nIt was deployed ${rel.deployed_at ? new Date(rel.deployed_at).toLocaleString() : '(date unknown)'}${rel.image ? ' from ' + rel.image : ''}. The running release is replaced by it.`)) return;
+      if (!(await askConfirm(`Roll ${target.name} on ${target.server} back to ${this.shortHash(rel.release)}?\n\nIt was deployed ${rel.deployed_at ? new Date(rel.deployed_at).toLocaleString() : '(date unknown)'}${rel.image ? ' from ' + rel.image : ''}. The running release is replaced by it.`))) return;
       this.actionLoading = true;
       try {
         const op = await api.post(`${this.appPath()}/rollback`, { to: rel.release });
@@ -1531,7 +1825,7 @@ document.addEventListener('alpine:init', () => {
 
     async deleteSecret(key) {
       const target = this.resource;
-      if (!confirm(`Remove secret ${key}?\n\nContainers keep the old value in their environment until the app is redeployed.`)) return;
+      if (!(await askConfirm(`Remove secret ${key}?\n\nContainers keep the old value in their environment until the app is redeployed.`))) return;
       try {
         await api.del(`${this.appPath()}/secrets/${encodeURIComponent(key)}`);
         if (this.resource !== target) return;
@@ -1921,7 +2215,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async delKv(key) {
-      if (!confirm(`Delete ${key}?\n\nThis KV store is shared — anything else using this accessory loses the key too.`)) return;
+      if (!(await askConfirm(`Delete ${key}?\n\nThis KV store is shared — anything else using this accessory loses the key too.`))) return;
       try {
         await api.del(`${this.appPath()}/kv${this.kvQuery({ key })}`);
         showToast('Key removed', 'success');
@@ -2110,7 +2404,7 @@ document.addEventListener('alpine:init', () => {
     async gitConfirmHostKeys() {
       const fingerprints = (this.gitHostKeys && this.gitHostKeys.host_key_fingerprints) || [];
       const question = `The forge's host keys are pinned:\n\n${fingerprints.join('\n')}\n\nVerify they match the fingerprints your forge publishes, then confirm to finish the connection.`;
-      if (!confirm(question)) return;
+      if (!(await askConfirm({ title: 'Check the forge host keys', message: question, confirmLabel: 'They match' }))) return;
       const target = this.resource;
       this.gitBusy = true;
       this.gitError = '';
@@ -2142,7 +2436,7 @@ document.addEventListener('alpine:init', () => {
     // polls immediately.
     async gitRetry() {
       const target = this.resource;
-      if (!confirm(`Poll ${target.name} now? A commit that exhausted its retry budget is polled again.`)) return;
+      if (!(await askConfirm(`Poll ${target.name} now? A commit that exhausted its retry budget is polled again.`))) return;
       this.gitBusy = true;
       this.gitError = '';
       try {
@@ -2161,11 +2455,10 @@ document.addEventListener('alpine:init', () => {
     async gitResetWatermark() {
       const ref = (this.gitShow && this.gitShow.trigger && this.gitShow.trigger.ref) || '';
       if (!ref) return;
-      const typed = prompt(`Reset the watermark for ${ref}?\n\nThe next poll admits the CURRENT head even if it does not descend from the last admitted commit (needed after a force-push). Type the ref to confirm:`, '');
-      if (typed === null || typed.trim() !== ref) {
-        if (typed !== null) showToast('Type the ref exactly to confirm', 'error');
-        return;
-      }
+      const ok = await askConfirm({ title: `Reset the watermark for ${ref}?`, typed: ref, danger: true, confirmLabel: 'Reset watermark',
+        message: 'The next poll admits the CURRENT head even if it does not descend from the last admitted commit (needed after a force-push).' });
+      if (!ok) return;
+      const typed = ref;
       const target = this.resource;
       this.gitBusy = true;
       this.gitError = '';
@@ -2182,12 +2475,13 @@ document.addEventListener('alpine:init', () => {
 
     async switchTab(t) {
       this.tab = t;
+      if (Alpine.store('router').page === 'app-detail') Alpine.store('router').setTab(t, 'general');
       if (t === 'env') await this.loadEnv();
       if (t === 'deploys') await this.loadLog();
       if (t === 'general') await this.loadAccessories();
       if (t === 'settings') await this.loadSettings();
       if (t === 'repository') await this.loadGitSource();
-      if (t === 'activity') await this.loadEvents();
+      if (t === 'history') await this.loadEvents();
       if (t === 'releases') await this.loadReleases();
       if (t === 'backups') await this.loadBackups();
       if (t === 'env' && this.hasFeature('secrets')) await this.loadSecrets();
@@ -2220,7 +2514,7 @@ document.addEventListener('alpine:init', () => {
       // the page is displaying.
       if (!target || !this.app || this.app.name !== target.name || this.app.server !== target.server) return;
       const question = this.actionConfirmation(action);
-      if (question && !confirm(question)) return;
+      if (question && !(await askConfirm(question))) return;
       this.actionLoading = true;
       try {
         const result = await api.post(`${this.appPath()}/${action}`);
@@ -2245,9 +2539,14 @@ document.addEventListener('alpine:init', () => {
       // has not (yet) loaded, or no longer matches the route, must not
       // submit anything (A49).
       if (!this.app || this.app.name !== target.name || this.app.server !== target.server) return;
-      if (!confirm(`Remove ${target.name} from ${target.server}?\n\nThis stops and removes its containers, removes its route, and deletes its deploy state. Volumes and accessory data are preserved.`)) return;
-      const redirect = prompt('Optional: leave a permanent redirect to this URL (blank for none):', '');
-      if (redirect === null) return; // cancelled
+      const form = await askForm({
+        title: `Remove ${target.name} from ${target.server}?`,
+        message: 'This stops and removes its containers, removes its route, and deletes its deploy state. Volumes and accessory data are preserved.',
+        fields: [{ key: 'redirect', label: 'Redirect (optional)', type: 'url', placeholder: 'https://example.com', hint: 'Leave a permanent redirect to this URL in place of the app. Blank for none.' }],
+        typed: target.name, danger: true, confirmLabel: 'Remove app',
+      });
+      if (!form) return; // cancelled
+      const redirect = form.redirect || '';
       this.actionLoading = true;
       try {
         const op = await api.post(`/api/apps/${encodeURIComponent(target.server)}/${encodeURIComponent(target.name)}/remove`, { redirect: redirect.trim() });
@@ -2284,7 +2583,7 @@ document.addEventListener('alpine:init', () => {
 
     async deleteEnvVar(key) {
       if (this.envKeyLocked(key)) return; // read-only: owned by the source or the app's settings
-      if (!confirm(`Delete ${key}?`)) return;
+      if (!(await askConfirm(`Delete ${key}?`))) return;
       try {
         await api.del(`${this.appPath()}/env/${key}`);
         showToast('Env var removed', 'success');
@@ -2311,17 +2610,13 @@ document.addEventListener('alpine:init', () => {
       if (!at || String(at).startsWith('0001')) return '';
       const ms = Date.now() - new Date(at).getTime();
       if (isNaN(ms) || ms < 0) return '';
-      const s = Math.floor(ms / 1000);
-      if (s < 60) return s + 's ago';
-      if (s < 3600) return Math.floor(s / 60) + 'm ago';
-      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-      return Math.floor(s / 86400) + 'd ago';
+      return relTime(at);
     },
 
     observedWhen() {
       const at = this.app?.observed_at;
       if (!at || String(at).startsWith('0001')) return 'unknown';
-      return formatObservedAt(at);
+      return relTime(at);
     },
 
     // The most recent change line: when this release landed and what it
@@ -2330,17 +2625,17 @@ document.addEventListener('alpine:init', () => {
     lastChangeWhen() {
       const at = this.app?.deployed_at;
       if (!at || String(at).startsWith('0001')) return 'not recorded';
-      return formatObservedAt(at);
+      return relTime(at);
     },
 
     shortHash(h) {
       return h ? String(h).slice(0, 12) : '';
     },
 
-    formatWhen(iso) { return iso ? formatObservedAt(iso) : ''; },
+    formatWhen(iso) { return relTime(iso); },
 
     openRestoreTests() {
-      Alpine.store('router').navigate('restore-tests');
+      Alpine.store('router').navigate('backups', { tab: 'restore-tests' });
     },
 
     accessoryName(containerName) {
@@ -2355,9 +2650,9 @@ document.addEventListener('alpine:init', () => {
     async accessoryAction(accessory, action) {
       const name = this.accessoryName(accessory.name);
       if (action === 'stop') {
-        if (!confirm(`Stop database ${name} on ${this.resource.server}?\n\nApps using ${name} lose their data connection until it is started again. In-flight queries abort. Persisted data is untouched.`)) return;
+        if (!(await askConfirm(`Stop database ${name} on ${this.resource.server}?\n\nApps using ${name} lose their data connection until it is started again. In-flight queries abort. Persisted data is untouched.`))) return;
       } else if (action === 'start') {
-        if (!confirm(`Start database ${name} on ${this.resource.server}?\n\nIt comes back empty-memory: connection pools and caches warm up from scratch. No data is changed.`)) return;
+        if (!(await askConfirm(`Start database ${name} on ${this.resource.server}?\n\nIt comes back empty-memory: connection pools and caches warm up from scratch. No data is changed.`))) return;
       }
       this.actionLoading = true;
       try {
@@ -2575,7 +2870,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteTest(id) {
-      if (!confirm('Delete this restore test?')) return;
+      if (!(await askConfirm('Delete this restore test?'))) return;
       try {
         await rawFetch.del('/api/restore-tests/' + id);
         await this.loadTests();
@@ -2614,9 +2909,7 @@ document.addEventListener('alpine:init', () => {
       };
     },
 
-    formatDate(d) {
-      return new Date(d).toLocaleString();
-    },
+    formatDate(d) { return relTime(d); },
   }));
 
   // ── Servers Page ──
@@ -2628,6 +2921,7 @@ document.addEventListener('alpine:init', () => {
   // cards render exactly as before, and /api/apps consumers are untouched.
   Alpine.data('serversPage', () => withAsyncLoad({
     servers: [],
+    audits: {},
     loading: true,
 
     async init() {
@@ -2646,7 +2940,11 @@ document.addEventListener('alpine:init', () => {
         // The fleet envelopes carry each server's truth; a failure here must
         // not take the page down (additive switch — D01): cards render
         // without freshness chrome instead.
-        const fleet = await api.get('/api/fleet').catch(() => null);
+        const [fleet, cleanup] = await Promise.all([
+          api.get('/api/fleet').catch(() => null),
+          api.get('/api/cleanup').catch(() => null),
+        ]);
+        this.audits = Object.fromEntries(arr(cleanup && cleanup.servers).map((row) => [row.server, row]));
         const observed = new Map(((fleet && fleet.servers) || []).map(env => [env.server, env]));
         const merged = (Array.isArray(raw) ? raw : Object.entries(raw).map(([name, s]) => ({ name, ...s })))
           .map(s => withObservation(s, observed.get(s.name)));
@@ -2671,6 +2969,20 @@ document.addEventListener('alpine:init', () => {
     freshnessLabel(s) {
       return ({ fresh: 'Fresh', stale: 'Stale', unknown: 'Unknown' })[s.freshness] || '';
     },
+    // The card's cleanup line, from the server's last cached audit.
+    cleanupLine(s) {
+      const a = (this.audits || {})[s.name];
+      if (!a) return '';
+      if (a.state === 'never') return 'Cleanup: not audited yet';
+      if (a.state === 'unreachable') return 'Cleanup: last audit could not reach it';
+      const n = ((a.counts && a.counts.critical) || 0) + ((a.counts && a.counts.warning) || 0);
+      const head = a.state === 'ok' ? 'Audited' : a.state === 'stale' ? 'Audit is stale' : 'Partly audited';
+      return 'Cleanup: ' + head + (n ? ', ' + n + ' warning' + (n === 1 ? '' : 's') : ', no warnings') + (a.age_seconds != null ? ' (' + ageText(a.age_seconds) + ')' : '');
+    },
+    diskOf(s) {
+      const a = (this.audits || {})[s.name];
+      return a && a.disk ? a.disk : null;
+    },
 
     // The dot reflects observation truth when the fleet answered, and the
     // legacy online flag otherwise.
@@ -2688,7 +3000,7 @@ document.addEventListener('alpine:init', () => {
       if (s.appCount !== null && s.appCount !== undefined) {
         parts.push(`${s.appCount} app${s.appCount === 1 ? '' : 's'} (last known)`);
       }
-      if (s.lastSuccessAt) parts.push(`last successful observation ${formatObservedAt(s.lastSuccessAt)}`);
+      if (s.lastSuccessAt) parts.push(`last successful observation ${relTime(s.lastSuccessAt)}`);
       else parts.push('never observed successfully');
       return parts.join(' — ');
     },
@@ -2720,6 +3032,8 @@ document.addEventListener('alpine:init', () => {
     proxy: null,
     tab: 'overview',
     loading: true,
+    apps: null,
+    appsError: '',
 
     name: '', generation: 0, destroyed: false,
     routeIdentity() { const r = Alpine.store('router'); return r.page === 'server-detail' ? r.params.name : ''; },
@@ -2731,18 +3045,37 @@ document.addEventListener('alpine:init', () => {
         const identity = this.routeIdentity();
         if (identity !== this.boundIdentity) { this.boundIdentity = identity; this.bindRoute(); }
       });
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'server-detail' || !this.name) return;
+        const t = routeTab(r.params, SERVER_TABS, 'overview');
+        if (t !== this.tab) queueMicrotask(() => this.switchTab(t));
+      });
       await initialLoad;
     },
-    destroy() { this.destroyed = true; this.generation++; if (this.routeEffect) Alpine.release(this.routeEffect); this.status = null; this.proxy = null; },
+    destroy() { this.destroyed = true; this.generation++; if (this.routeEffect) Alpine.release(this.routeEffect); if (this.tabEffect) Alpine.release(this.tabEffect); this.status = null; this.proxy = null; },
     async bindRoute() {
       if (this.destroyed) return;
       this.generation++; this.name = this.routeIdentity(); this.status = null; this.proxy = null; this.tab = 'overview';
       if (this.name) await this.reload();
     },
+    // The apps the last fleet sweep saw on this server (cached, no SSH), for
+    // the "On this server" links. Null until read; a failed read says so.
+    async loadApps() {
+      const generation = this.generation, name = this.name;
+      try {
+        const fleet = await api.get('/api/fleet');
+        if (!this.current(generation)) return;
+        const env = arr(fleet && fleet.servers).find((e) => e.server === name);
+        this.apps = env ? arr(env.apps).map((a) => ({ name: a.app || a.name, status: a.status, domain: a.domain })) : [];
+        this.appsError = '';
+      } catch (e) { if (this.current(generation)) this.appsError = e.message; }
+    },
     async reload() {
       const generation = this.generation, name = this.name;
       if (!this.current(generation)) return;
       this.loading = true;
+      this.loadApps();
       try {
         const status = await api.get(`/api/servers/${encodeURIComponent(name)}/status`);
         if (!this.current(generation)) return;
@@ -2753,6 +3086,7 @@ document.addEventListener('alpine:init', () => {
     async switchTab(t) {
       if (!this.current(this.generation)) return;
       this.tab = t;
+      Alpine.store('router').setTab(t, 'overview');
       if (t === 'proxy' && !this.proxy) await this.loadProxy();
     },
     async loadProxy() {
@@ -2808,9 +3142,22 @@ document.addEventListener('alpine:init', () => {
 
     isAdmin() { return (this.me && this.me.role) === 'admin'; },
 
+    setTab(t) {
+      this.tab = t;
+      if (Alpine.store('router').page === 'settings') Alpine.store('router').setTab(t, 'servers');
+    },
+
     async init() {
+      this.tab = routeTab(Alpine.store('router').params, SETTINGS_TABS, 'servers');
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'settings') return;
+        const t = routeTab(r.params, SETTINGS_TABS, 'servers');
+        if (t !== this.tab) this.tab = t;
+      });
       await this.loadAll();
     },
+    destroy() { if (this.tabEffect) Alpine.release(this.tabEffect); },
 
     async loadAll() {
       this.loading = true;
@@ -2839,7 +3186,11 @@ document.addEventListener('alpine:init', () => {
         // A non-admin can't see the admin tabs; if the default landed on one,
         // move to a tab they can use.
         if (!admin && ['servers', 'notifications', 'registry', 'mcp', 'users', 'sso'].includes(this.tab)) {
-          this.tab = 'groups';
+          this.setTab('groups');
+        }
+        // Servers > Add server lands here with the add form focused.
+        if (admin && this.tab === 'servers' && Alpine.store('router').params.add === 'server') {
+          setTimeout(() => { const el = document.getElementById('new-server-name'); if (el) el.focus(); }, 0);
         }
       } catch (e) {
         showToast(e.message, 'error');
@@ -2875,7 +3226,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async resetUserPassword(username) {
-      const pw = prompt(`New password for ${username} (at least 8 characters):`);
+      const form = await askForm({ title: `New password for ${username}`, confirmLabel: 'Set password',
+        fields: [{ key: 'password', label: 'Password', type: 'password', required: true, minLength: 8, hint: 'At least 8 characters.' }] });
+      const pw = form && form.password;
       if (!pw) return;
       try {
         await api.post(`/api/users/${encodeURIComponent(username)}/password`, { password: pw });
@@ -2886,7 +3239,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteUser(username) {
-      if (!confirm(`Remove user ${username}? Any active sessions are ended immediately.`)) return;
+      if (!(await askConfirm(`Remove user ${username}? Any active sessions are ended immediately.`))) return;
       try {
         await api.del(`/api/users/${encodeURIComponent(username)}`);
         showToast('User removed', 'success');
@@ -2899,7 +3252,7 @@ document.addEventListener('alpine:init', () => {
     // A02 surface: durable session revocation — the epoch bump retires every
     // live session on its next request; the user simply signs in again.
     async revokeUserSessions(username) {
-      if (!confirm(`Sign out ${username} everywhere? Active sessions end on their next request.`)) return;
+      if (!(await askConfirm(`Sign out ${username} everywhere? Active sessions end on their next request.`))) return;
       try {
         await api.post(`/api/users/${encodeURIComponent(username)}/revoke-sessions`);
         showToast(`Sessions for ${username} revoked`, 'success');
@@ -2912,7 +3265,7 @@ document.addEventListener('alpine:init', () => {
     // pre-matrix permissions with its role's preset. The confirm is the
     // explicit act; the server applies it to live sessions immediately.
     async narrowToPreset(username) {
-      if (!confirm(`Narrow ${username} to its role's preset?\n\nPre-matrix permissions (including any env/KV value reads the old role allowed) are replaced by the preset for its current role. Active sessions pick up the change on their next request.`)) return;
+      if (!(await askConfirm(`Narrow ${username} to its role's preset?\n\nPre-matrix permissions (including any env/KV value reads the old role allowed) are replaced by the preset for its current role. Active sessions pick up the change on their next request.`))) return;
       try {
         await api.post(`/api/users/${encodeURIComponent(username)}/narrow-to-preset`);
         showToast(`${username} narrowed to preset`, 'success');
@@ -2940,7 +3293,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async revokeSSO(p) {
-      if (!confirm(`Sign out ${p.username || p.subject} everywhere? Active sessions end on their next request.`)) return;
+      if (!(await askConfirm(`Sign out ${p.username || p.subject} everywhere? Active sessions end on their next request.`))) return;
       try {
         await api.post('/api/sso/revoke', { subject: p.subject });
         showToast('SSO sessions revoked', 'success');
@@ -2958,7 +3311,7 @@ document.addEventListener('alpine:init', () => {
 
     fmtDate(d) {
       if (!d || String(d).startsWith('0001')) return 'never';
-      return new Date(d).toLocaleString();
+      return relTime(d);
     },
 
     async createMcpToken() {
@@ -2977,7 +3330,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteMcpToken(id) {
-      if (!confirm('Revoke this token? Clients using it will lose access immediately.')) return;
+      if (!(await askConfirm('Revoke this token? Clients using it will lose access immediately.'))) return;
       try {
         await api.del(`/api/mcp-tokens/${encodeURIComponent(id)}`);
         this.createdMcpToken = '';
@@ -3005,7 +3358,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteServer(name) {
-      if (!confirm(`Remove server ${name}?`)) return;
+      if (!(await askConfirm({ title: `Remove server ${name}?`, typed: name, danger: true, confirmLabel: 'Remove server',
+        message: "This runs teploy server remove: the server leaves teploy's server list and Dash stops showing it." }))) return;
       try {
         await api.del(`/api/config/servers/${name}`);
         showToast('Server removed', 'success');
@@ -3028,7 +3382,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteGroup(name) {
-      if (!confirm(`Delete group ${name}?`)) return;
+      if (!(await askConfirm(`Delete group ${name}?`))) return;
       try {
         await api.del(`/api/groups/${encodeURIComponent(name)}`);
         showToast('Group deleted', 'success');
@@ -3039,7 +3393,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async renameGroup(oldName) {
-      const newName = prompt('New group name:', oldName);
+      const form = await askForm({ title: 'Rename group', confirmLabel: 'Rename',
+        fields: [{ key: 'name', label: 'Group name', value: oldName, required: true }] });
+      const newName = form && form.name.trim();
       if (!newName || newName === oldName) return;
       try {
         await api.put(`/api/groups/${encodeURIComponent(oldName)}`, { name: newName });
@@ -3114,7 +3470,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteRegistry(server) {
-      if (!confirm(`Remove registry ${server}?`)) return;
+      if (!(await askConfirm(`Remove registry ${server}?`))) return;
       try {
         await api.del(`/api/registries/${encodeURIComponent(server)}`);
         showToast('Registry removed', 'success');
@@ -3157,6 +3513,7 @@ document.addEventListener('alpine:init', () => {
 
   // ── Templates Page ──
   Alpine.data('sourcesPage', () => withAsyncLoad({
+    loading: true,
     sources: [], selected: null, error: '', busy: false,
     generation: 0, listGeneration: 0, webhookSecret: '', destroyed: false,
     form: {forge: 'github', clone_url: '', default_branch: '', credential_ref: '', display_name: ''},
@@ -3201,6 +3558,34 @@ document.addEventListener('alpine:init', () => {
       } catch (e) { if (this.alive(generation)) this.error = e.message; }
       finally { if (!this.destroyed) this.busy = false; }
     },
+    // Delete a registered source after the confirm dialog. Its webhook URL
+    // stops accepting pushes; apps keep their git settings.
+    async remove(src) {
+      if (this.destroyed || this.busy) return;
+      const label = src.display_name || src.clone_url;
+      if (!(await askConfirm({ title: `Delete the git source ${label}?`, danger: true, confirmLabel: 'Delete source',
+        message: 'Its webhook URL stops accepting pushes, so pushes no longer wake the apps that build from it. The repository itself is not touched.' }))) return;
+      this.busy = true; this.error = '';
+      try {
+        await api.del(`/api/sources/${encodeURIComponent(src.id)}`);
+        if (this.destroyed) return;
+        if (this.selected && this.selected.id === src.id) { this.selected = null; this.webhookSecret = ''; this.generation++; }
+        showToast('Git source deleted', 'success');
+        await this.load();
+      } catch (e) { if (!this.destroyed) this.error = e.message; }
+      finally { if (!this.destroyed) this.busy = false; }
+    },
+    verdictLabel(v) {
+      return { verified: 'Credentials verified', unverified: 'Not verified yet', degraded: 'Credentials failing', 'no-credential': 'No credentials' }[v] || v || '';
+    },
+    verdictClass(v) {
+      return { verified: 'green', unverified: 'gray', degraded: 'red', 'no-credential': 'yellow' }[v] || 'gray';
+    },
+    webhookAbsolute(url) {
+      if (!url || /^https?:/.test(url)) return url || '';
+      return (typeof location !== 'undefined' && location.origin ? location.origin : '') + url;
+    },
+
     async action(action) {
       if (this.destroyed || this.busy || !this.selected) return;
       this.busy = true; this.error = ''; this.webhookSecret = '';
@@ -3368,7 +3753,7 @@ document.addEventListener('alpine:init', () => {
     urlHelp(t) { return (CHANNEL_TYPES[t] || {}).help || ''; },
     credentialURL(t) { return t === 'slack' || t === 'discord'; },
     kindLabel(k) { return { incident_opened: 'opened', incident_repeat: 'reminders', incident_recovered: 'recovered' }[k] || k; },
-    formatDate(d) { return d ? new Date(d).toLocaleString() : ''; },
+    formatDate(d) { return relTime(d); },
 
     channelHealthText(ch) {
       const h = ch.health;
@@ -3451,7 +3836,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteChannel(id) {
-      if (!confirm('Delete this alert channel?')) return;
+      if (!(await askConfirm('Delete this alert channel?'))) return;
       try {
         await api.del(`/api/notifications/channels/${encodeURIComponent(id)}`);
         showToast('Channel deleted', 'success');
@@ -3496,7 +3881,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteHeartbeat(id) {
-      if (!confirm('Remove this heartbeat receiver? It will alert when the pings stop, so pause or delete the check there too.')) return;
+      if (!(await askConfirm('Remove this heartbeat receiver? It will alert when the pings stop, so pause or delete the check there too.'))) return;
       try {
         await api.del(`/api/notifications/heartbeats/${encodeURIComponent(id)}`);
         await this.load();
@@ -3546,7 +3931,7 @@ document.addEventListener('alpine:init', () => {
     },
     kindText(k) { return { incident_opened: 'Opened', incident_repeat: 'Reminder', incident_recovered: 'Recovered', summary: 'Summary', test: 'Test' }[k] || k; },
     deliveryClass(st) { return { delivered: 'green', pending: 'yellow', dead_lettered: 'red' }[st] || ''; },
-    formatDate(d) { return d ? new Date(d).toLocaleString() : ''; },
+    formatDate(d) { return relTime(d); },
 
     async addSilence() {
       const body = { scope: this.draft.scope, target: this.draft.scope === 'all' ? '' : (this.draft.target || '').trim(),
@@ -3642,13 +4027,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'not checked';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'not checked' : ageText(seconds);
     },
 
     serverProblem(s) {
@@ -3772,10 +4151,10 @@ document.addEventListener('alpine:init', () => {
         this.setupError = '';
         this.setupStep = step;
       },
-      closeSetup() {
+      async closeSetup() {
         // A key made and not saved opens nothing: its file must not be kept by mistake.
-        if (this.recoveryGen && typeof confirm === 'function' &&
-            !confirm('This recovery key was not saved to Dash, so no backup will use it. If you downloaded the file, it is no use: delete it. Close anyway?')) {
+        if (this.recoveryGen && !(await askConfirm({ title: 'Close without saving the recovery key?', danger: true, confirmLabel: 'Close anyway',
+          message: 'This recovery key was not saved to Dash, so no backup will use it. If you downloaded the file, it is no use: delete it.' }))) {
           return;
         }
         this.setupOpen = false;
@@ -4219,6 +4598,7 @@ document.addEventListener('alpine:init', () => {
   // policy). Reads the slow sweep's cached view; Refresh asks for a new one.
   Alpine.data('backupsPage', () => withAsyncLoad({
     ...backupSetupComponent(),
+    tab: 'coverage',
     view: null,
     loading: true,
     refreshInterval: null,
@@ -4249,13 +4629,28 @@ document.addEventListener('alpine:init', () => {
     overrideFor: null,
     override: { cron: '0 3 * * *', keep_last: 0, max_age_days: 0 },
 
+    setTab(t) {
+      this.tab = t;
+      if (Alpine.store('router').page === 'backups') Alpine.store('router').setTab(t, 'coverage');
+    },
+    // The dash-owned tests from /api/backups, for the merged Restore tests table.
+    automaticTests() { return (this.view && this.view.tests) || []; },
+
     async init() {
+      this.tab = routeTab(Alpine.store('router').params, BACKUP_TABS, 'coverage');
+      this.tabEffect = Alpine.effect(() => {
+        const r = Alpine.store('router');
+        if (r.page !== 'backups') return;
+        const t = routeTab(r.params, BACKUP_TABS, 'coverage');
+        if (t !== this.tab) this.tab = t;
+      });
       await this.load();
       this.refreshInterval = setInterval(() => this.load(), 60000);
     },
 
     destroy() {
       clearInterval(this.refreshInterval);
+      if (this.tabEffect) Alpine.release(this.tabEffect);
       this._loadGeneration++;
     },
 
@@ -4309,13 +4704,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'never';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'never' : ageText(seconds);
     },
 
     bytesLabel(bytes) {
@@ -4445,15 +4834,135 @@ document.addEventListener('alpine:init', () => {
 
   // The home page's one line about backups. Viewers see it too; the page it links to
   // says what they can do. A failed read shows nothing rather than a false alarm.
-  Alpine.data('protectBanner', () => ({
-    setup: null,
-    async init() {
-      try {
-        const view = await api.get('/api/backups');
-        this.setup = (view && view.setup) || null;
-      } catch (e) { this.setup = null; }
+  // ── Home status (2026-11 rework) ──
+  // What needs attention, what is running, and each server — built only from
+  // the endpoints the other pages already read. Each source loads on its own
+  // and keeps the loading / error / stale conventions: a source that failed
+  // to load is named as unchecked, so a failure never reads as "nothing
+  // wrong", and a failed refresh keeps the earlier data under a stale line.
+  Alpine.data('homeStatus', () => ({
+    sources: {
+      incidents: { url: '/api/alerts/incidents', label: 'alerts', data: null, error: '', loading: true, loadedAt: null },
+      domains: { url: '/api/domains', label: 'domains', data: null, error: '', loading: true, loadedAt: null },
+      backups: { url: '/api/backups', label: 'backups', data: null, error: '', loading: true, loadedAt: null },
+      operations: { url: '/api/operations', label: 'operations', data: null, error: '', loading: true, loadedAt: null },
+      fleet: { url: '/api/fleet', label: 'servers', data: null, error: '', loading: true, loadedAt: null },
+      cleanup: { url: '/api/cleanup', label: 'cleanup reports', data: null, error: '', loading: true, loadedAt: null },
     },
-    visible() { return !!(this.setup && this.setup.supported && this.setup.state !== 'protected'); },
+    refreshTimer: null,
+    _alive: false,
+
+    async init() {
+      this._alive = true;
+      this.refreshTimer = setInterval(() => { if (this._alive) this.loadAll(); }, 60000);
+      await this.loadAll();
+    },
+    destroy() { this._alive = false; clearInterval(this.refreshTimer); },
+    loadAll() { return Promise.all(Object.keys(this.sources).map((k) => this.loadOne(k))); },
+    async loadOne(key) {
+      const src = this.sources[key];
+      if (!src.data) src.loading = true;
+      try {
+        const data = await api.get(src.url);
+        if (!this._alive) return;
+        src.data = data; src.error = ''; src.loadedAt = new Date().toISOString();
+      } catch (e) {
+        if (this._alive) src.error = e.message || String(e);
+      } finally {
+        if (this._alive) src.loading = false;
+      }
+    },
+
+    anyLoading() { return Object.values(this.sources).some((s) => s.loading); },
+    // Sources with no data at all because their load failed: unchecked.
+    unchecked() { return Object.entries(this.sources).filter(([, s]) => !s.loading && s.error && !s.data).map(([key, s]) => ({ key, ...s })); },
+    // Sources showing earlier data because the refresh failed.
+    stale() { return Object.entries(this.sources).filter(([, s]) => s.error && s.data).map(([key, s]) => ({ key, ...s })); },
+
+    // The oldest observation behind what is shown: the server sweep, the
+    // domain sweep, the backup read; live sources count as read when loaded.
+    oldestObservation() {
+      const times = [];
+      const f = this.sources.fleet.data, d = this.sources.domains.data, b = this.sources.backups.data;
+      if (f && f.collected_at && !String(f.collected_at).startsWith('0001')) times.push(f.collected_at);
+      if (d && d.last_sweep_at) times.push(d.last_sweep_at);
+      if (b && b.last_sweep_at) times.push(b.last_sweep_at);
+      for (const k of ['incidents', 'operations']) if (this.sources[k].loadedAt) times.push(this.sources[k].loadedAt);
+      const valid = times.map((t) => Date.parse(t)).filter((t) => !isNaN(t));
+      return valid.length ? new Date(Math.min(...valid)).toISOString() : '';
+    },
+
+    attention() {
+      const rows = [];
+      const inc = this.sources.incidents.data;
+      for (const i of arr(inc && inc.open)) {
+        rows.push({ key: 'inc:' + (i.key || i.id || i.name), level: i.severity === 'critical' ? 'bad' : 'warn',
+          title: i.name + (i.source === 'monitor' || i.source === 'heartbeat' || !i.source ? ' is down' : ''),
+          detail: i.message || 'open incident', at: i.started_at, verb: 'since',
+          href: i.path || '/alerts' });
+      }
+      const fleet = this.sources.fleet.data;
+      for (const sv of arr(fleet && fleet.servers)) {
+        if (!sv.error) continue;
+        rows.push({ key: 'srv:' + sv.server, level: 'bad', title: sv.server + ' is unreachable', detail: sv.error,
+          at: sv.last_success_at && !String(sv.last_success_at).startsWith('0001') ? sv.last_success_at : '', verb: 'last read',
+          href: '/servers/' + encodeURIComponent(sv.server) });
+      }
+      const dom = this.sources.domains.data;
+      for (const r of arr(dom && dom.rows)) {
+        const certWarn = r.cert && (r.cert.state === 'warn' || r.cert.state === 'fail');
+        if (r.overall !== 'fail' && !certWarn) continue;
+        rows.push({ key: 'dom:' + r.host, level: r.overall === 'fail' ? 'bad' : 'warn',
+          title: r.host + (r.overall === 'fail' ? ' is failing' + (r.first_failing ? ' at ' + r.first_failing.toUpperCase() : '') : ': certificate needs attention'),
+          detail: r.evidence || (r.cert && r.cert.detail) || '', at: '', href: '/domains' });
+      }
+      const bk = this.sources.backups.data;
+      const setup = bk && bk.setup;
+      if (setup && setup.supported && setup.state !== 'protected') {
+        rows.push({ key: 'protect', level: setup.state === 'none' ? 'warn' : 'bad', title: setup.headline || 'Your data is not fully protected',
+          detail: '', at: '', href: '/backups', action: setup.state === 'none' ? 'Protect my data' : 'See backups' });
+      }
+      for (const r of arr(bk && bk.rows)) {
+        if (r.state !== 'failing' && r.state !== 'uncovered') continue;
+        rows.push({ key: 'bk:' + r.server + '/' + r.name, level: r.state === 'failing' ? 'bad' : 'warn',
+          title: r.name + (r.state === 'failing' ? ' backup is failing' : ' is not backed up'),
+          detail: r.last_error || (r.app ? r.app + ' on ' + r.server : r.server), at: r.state === 'failing' ? r.last_good : '', verb: 'last good',
+          href: '/backups' });
+      }
+      const ops = this.sources.operations.data;
+      const dayAgo = Date.now() - 86400 * 1000;
+      for (const op of arr(ops)) {
+        if (op.status !== 'failed' && op.status !== 'interrupted') continue;
+        const at = Date.parse(op.finished_at || op.created_at);
+        if (isNaN(at) || at < dayAgo) continue;
+        rows.push({ key: 'op:' + op.id, level: 'bad', title: ((op.request && op.request.kind) || 'operation') + ' ' + (op.target || '') + ' ' + op.status,
+          detail: op.error || '', at: op.finished_at || op.created_at, verb: '', href: '/operations/' + encodeURIComponent(op.id) });
+      }
+      return rows;
+    },
+
+    running() {
+      const live = ['queued', 'running', 'cancel_requested', 'stopping'];
+      return arr(this.sources.operations.data).filter((op) => live.includes(op.status));
+    },
+
+    servers() {
+      const fleet = this.sources.fleet.data;
+      const cleanup = this.sources.cleanup.data;
+      const audits = {};
+      for (const row of arr(cleanup && cleanup.servers)) audits[row.server] = row;
+      return arr(fleet && fleet.servers).map((sv) => ({
+        name: sv.server, host: sv.host, error: sv.error || '', freshness: sv.freshness,
+        apps: arr(sv.apps).length, audit: audits[sv.server] || null,
+      }));
+    },
+
+    go(href, e) {
+      if (e && (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1)) return;
+      if (e) e.preventDefault();
+      history.pushState({}, '', href);
+      Alpine.store('router').restore();
+    },
   }));
 
   // ── Cleanup Page (Slice 6) ──
@@ -4465,6 +4974,7 @@ document.addEventListener('alpine:init', () => {
   // run is a durable operation; the page shows the cached report with its
   // age while one runs.
   Alpine.data('cleanupPage', () => withAsyncLoad({
+    loading: true,
     rows: [],
     detail: null,
     cliSupported: true,
@@ -4486,7 +4996,8 @@ document.addEventListener('alpine:init', () => {
     detailId: '',
     _alive: false,
 
-    routeIdentity() { const r = Alpine.store('router'); return r.page === 'cleanup-detail' ? (r.params.server || '') : ''; },
+    // A server's report renders in the Cleanup tab of its server page.
+    routeIdentity() { const r = Alpine.store('router'); return r.page === 'server-detail' && r.params.tab === 'cleanup' ? (r.params.name || '') : ''; },
 
     async init() {
       this._alive = true;
@@ -4548,7 +5059,7 @@ document.addEventListener('alpine:init', () => {
       await this.load();
     },
 
-    openServer(server) { Alpine.store('router').navigate('cleanup-detail', { server }); },
+    openServer(server) { Alpine.store('router').navigate('server-detail', { name: server, tab: 'cleanup' }); },
 
     async runAudit(server) {
       this.auditBusy = server;
@@ -4620,8 +5131,22 @@ document.addEventListener('alpine:init', () => {
       return findings.filter(f => f.dismissed);
     },
 
+    // An ok state means the audit completed, not that nothing was found:
+    // it reads "Audited" with the open warning count.
+    auditLabel(state, counts) {
+      if (state !== 'ok') return this.stateLabel(state);
+      const n = ((counts && counts.critical) || 0) + ((counts && counts.warning) || 0);
+      return n ? `Audited — ${n} warning${n === 1 ? '' : 's'}` : 'Audited — no warnings';
+    },
+    detailCounts() {
+      const counts = { critical: 0, warning: 0 };
+      for (const f of (this.detail && this.detail.findings) || []) {
+        if (!f.dismissed && (f.severity === 'critical' || f.severity === 'warning')) counts[f.severity]++;
+      }
+      return counts;
+    },
     stateLabel(state) {
-      return { ok: 'Clean bill', partial: 'Partially audited', unreachable: 'Unreachable', never: 'Not audited yet', stale: 'Report is stale' }[state] || state;
+      return { ok: 'Audited', partial: 'Partially audited', unreachable: 'Unreachable', never: 'Not audited yet', stale: 'Report is stale' }[state] || state;
     },
     stateClass(state) {
       return { ok: 'green', partial: 'yellow', unreachable: 'red', never: 'gray', stale: 'gray' }[state] || 'gray';
@@ -4652,13 +5177,7 @@ document.addEventListener('alpine:init', () => {
       return `${v >= 10 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
     },
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'never';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'never' : ageText(seconds);
     },
     countsSummary(row) {
       const c = row.counts || {};
@@ -4673,6 +5192,7 @@ document.addEventListener('alpine:init', () => {
 
   // ── Siblings Page (Programme B: discovery + Observe connect) ──
   Alpine.data('siblingsPage', () => withAsyncLoad({
+    loading: true,
     servers: [],
     candidates: [],
     allowInternal: false,
@@ -4938,19 +5458,16 @@ document.addEventListener('alpine:init', () => {
       return candidate.error || '';
     },
     ageLabel(seconds) {
-      if (seconds === undefined || seconds === null) return 'never';
-      if (seconds < 90) return 'just now';
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 120) return `${minutes} min ago`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours} h ago`;
-      return `${Math.round(hours / 24)} days ago`;
+      return seconds === undefined || seconds === null ? 'never' : ageText(seconds);
     },
   }));
 
   // ── Monitors Page ──
   Alpine.data('monitorsPage', () => withAsyncLoad({
     monitors: [],
+    // Rule ids of monitors with an open incident (Alerts v2). Null when the
+    // incidents could not be read: the dot then falls back to the last check.
+    openIncidents: null,
     selectedMonitor: null,
     showCreateDialog: false,
     creating: false,
@@ -5048,9 +5565,13 @@ document.addEventListener('alpine:init', () => {
     async loadMonitors() {
       const generation = ++this._loadGeneration;
       try {
-        const data = await rawFetch.get('/api/monitors');
+        const [data, incidents] = await Promise.all([
+          rawFetch.get('/api/monitors'),
+          api.get('/api/alerts/incidents').catch(() => null),
+        ]);
         if (!this._alive || generation !== this._loadGeneration) return;
         this.monitors = data || [];
+        this.openIncidents = incidents ? arr(incidents.open).filter((i) => !i.source || i.source === 'monitor' || i.source === 'heartbeat').map((i) => i.rule_id) : null;
         this.loadError = null;
         this.loadedAt = new Date().toISOString();
       } catch (e) {
@@ -5119,7 +5640,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteMonitor(id) {
-      if (!confirm('Delete this monitor?')) return;
+      if (!(await askConfirm('Delete this monitor?'))) return;
       try {
         await rawFetch.del('/api/monitors/' + id);
         if (this.detailId === id) this.openList();
@@ -5238,9 +5759,23 @@ document.addEventListener('alpine:init', () => {
       return text + '.';
     },
 
+    // The dot is the CURRENT state: red while an incident is open or the
+    // newest check failed, green when the newest check passed, grey when
+    // paused or not checked yet. The 24h uptime stays as text beside it.
+    monitorState(m) {
+      if (m.enabled === false) return 'paused';
+      if (this.openIncidents && this.openIncidents.includes(m.id)) return 'down';
+      const c = m.last_check;
+      if (!c) return 'unknown';
+      return c.status === 'up' ? 'up' : 'down';
+    },
     getMonitorDot(m) {
-      if (!m.stats || m.stats.total_checks === 0) return 'gray';
-      return m.stats.uptime_percent >= 99 ? 'green' : m.stats.uptime_percent >= 95 ? 'yellow' : 'red';
+      return { up: 'green', down: 'red', paused: 'gray', unknown: 'gray' }[this.monitorState(m)];
+    },
+    monitorStateLabel(m) {
+      const c = m.last_check;
+      const when = c ? ' (checked ' + relTime(c.checked_at) + ')' : '';
+      return { up: 'Up now', down: 'Down now', paused: 'Paused', unknown: 'Not checked yet' }[this.monitorState(m)] + (this.monitorState(m) === 'paused' ? '' : when);
     },
 
     // ── Alert delivery status (D08) ──
@@ -5277,9 +5812,7 @@ document.addEventListener('alpine:init', () => {
       return Math.round(ns / 1000000) + 'ms';
     },
 
-    formatDate(d) {
-      return new Date(d).toLocaleString();
-    },
+    formatDate(d) { return relTime(d); },
   }));
 
   // ── Homepage ──

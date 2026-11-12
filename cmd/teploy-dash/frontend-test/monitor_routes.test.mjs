@@ -34,7 +34,7 @@ test('an unknown monitor id is an error state with retry, not a blank page',asyn
  const p=h.page('monitorsPage');await p.init();
  assert.equal(p.selectedMonitor,null);assert.match(p.detailError,/gone/);
  const html=h.readHTML();
- assert.ok(html.includes(`x-if="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail'"`),'monitor-detail route must render the monitors component');
+ assert.ok(html.includes(`x-if="$store.router.page === 'monitors' || $store.router.page === 'monitor-detail' || $store.router.page === 'alerts'"`),'monitor-detail route must render the monitors component');
  assert.ok(html.includes('x-if="detailId && !selectedMonitor"'),'deep-link loading/error state must render');
  p.destroy();
 });

@@ -12,7 +12,8 @@ test('the /domains route renders the page and the nav names it',async()=>{
  assert.equal(h.stores.router.page,'domains');
  const html=h.readHTML();
  assert.ok(html.includes(`x-if="$store.router.page === 'domains'"`));
- assert.ok(html.includes('>Domains</a>'));
+ assert.ok(h.stores.router.hubTabs.some(([page, label]) => page === 'domains' && label === 'Domains'));
+ assert.equal(h.stores.router.section, 'monitoring');
  assert.ok(html.includes('x-data="domainsPage"'));
 });
 

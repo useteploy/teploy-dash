@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { bridgeDialogs } from './dialog_bridge.mjs';
 
 export function harness(pathname = '/operations/A') {
   const root = process.env.DASH_FRONTEND_ROOT || join(dirname(fileURLToPath(import.meta.url)), '../frontend');
@@ -41,6 +42,7 @@ export function harness(pathname = '/operations/A') {
   };
   new Function(readFileSync(join(root, 'js/app.js'), 'utf8') + '\n;' + readFileSync(join(root, 'js/operations.js'), 'utf8'))();
   init.forEach(fn => fn());
+  bridgeDialogs(stores);
   return {
     components, stores, sources, requests, toasts, effects,
     readHTML: () => readFileSync(join(root, 'index.html'), 'utf8'),

@@ -8,6 +8,7 @@
 // responses.
 //
 // Run: node cmd/teploy-dash/frontend-test/git_source_card.test.mjs
+import { bridgeDialogs } from './dialog_bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -58,9 +59,11 @@ globalThis.fetch = async (url, init) => {
 };
 
 const components = {};
+const dialogStore = {};
+bridgeDialogs({ dialog: dialogStore });
 globalThis.Alpine = {
   data: (name, factory) => { components[name] = factory; },
-  store: () => ({ navigate() {}, restore() {}, params: { server: 'prod', name: 'web' }, page: 'app-detail' }),
+  store: (name) => name === 'dialog' ? dialogStore : ({ navigate() {}, restore() {}, params: { server: 'prod', name: 'web' }, page: 'app-detail' }),
   effect: (fn) => fn(),
 };
 
@@ -201,7 +204,8 @@ function requestsFor(method, urlPart) {
   promptAnswer = 'main';
   await page.gitResetWatermark();
   assert(requestsFor('POST', '/apps/prod/web/source/reset-watermark').length === 0, 'a mistyped ref must not reset');
-  assert(lastToast && lastToast.includes('Type the ref'), `mistyped toast = ${lastToast}`);
+  const typedGate = dialogStore.opened.at(-1);
+  assert(typedGate && typedGate.typed === 'refs/heads/main' && typedGate.danger, 'the reset dialog is gated on typing the ref');
 
   promptAnswer = 'refs/heads/main';
   await page.gitResetWatermark();
@@ -239,7 +243,7 @@ function requestsFor(method, urlPart) {
   const html = readFileSync(join(here, '../frontend/index.html'), 'utf8');
   const tabStart = html.indexOf('id="app-tab-repository"');
   const panelStart = html.indexOf('id="app-panel-repository"');
-  const panelEnd = html.indexOf('id="app-panel-activity"');
+  const panelEnd = html.indexOf('id="app-panel-history"');
   assert(tabStart !== -1 && panelStart !== -1 && panelEnd > panelStart, 'repository tab/panel not found in index.html');
   const tabButton = html.slice(tabStart - 400, tabStart + 300);
   assert(tabButton.includes("hasFeature('git_source') && teployHome()"), 'tab must hide without the git-source token or on non-Teploy homes');

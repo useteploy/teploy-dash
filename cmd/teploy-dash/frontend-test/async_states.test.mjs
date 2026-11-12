@@ -281,7 +281,7 @@ const rawOk = (value) => () => ({
   // The empty states that used to paint on failure now gate on !loadFailed.
   for (const marker of [
     '!loading && !loadFailed && monitors.length === 0',
-    '!loading && !loadFailed && tests.length === 0',
+    '!loading && !loadFailed && restoreTestRows(automaticTests(), tests).length === 0',
     '!loading && !loadFailed && ops.length === 0',
     '!loading && !loadFailed && visibleItems.length === 0',
   ]) {

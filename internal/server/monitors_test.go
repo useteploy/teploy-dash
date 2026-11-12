@@ -1,9 +1,11 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/useteploy/teploy-dash/internal/store"
 )
@@ -109,5 +111,44 @@ func TestMonitorTCPTargetValidation(t *testing.T) {
 	good := `{"id":"m","name":"M","type":"tcp","target":"db.example:5432","interval":60000000000,"timeout":10000000000}`
 	if w := postMonitor(t, s, RoleAdmin, good); w.Code != 200 {
 		t.Fatalf("valid tcp target: got %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+}
+
+// The monitor list carries each monitor's newest check, so the list dot can
+// show the current state rather than the 24-hour uptime.
+func TestMonitorListCarriesLastCheck(t *testing.T) {
+	s := monitorsTestServer(t)
+	m := &store.Monitor{ID: "m1", Name: "M1", Type: "http", Target: "https://example.com", Interval: time.Minute, Timeout: 10 * time.Second, Enabled: true}
+	if err := s.store.SaveMonitor(m); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, c := range []store.CheckResult{
+		{MonitorID: "m1", Status: "down", Message: "refused", CheckedAt: now, Incarnation: m.Incarnation},
+		{MonitorID: "m1", Status: "up", CheckedAt: now.Add(-time.Minute), Incarnation: m.Incarnation},
+	} {
+		if ok, err := s.store.SaveCheck(c); err != nil || !ok {
+			t.Fatalf("save check: %v %v", ok, err)
+		}
+	}
+	w := httptest.NewRecorder()
+	s.handleMonitors(w, httptest.NewRequest("GET", "/api/monitors", nil))
+	var list []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list) != 1 {
+		t.Fatalf("list = %s (%v)", w.Body.String(), err)
+	}
+	last, ok := list[0]["last_check"].(map[string]any)
+	if !ok || last["status"] != "down" || last["message"] != "refused" {
+		t.Fatalf("last_check = %v, want the newest (down) check", list[0]["last_check"])
+	}
+
+	fresh := monitorsTestServer(t)
+	if err := fresh.store.SaveMonitor(&store.Monitor{ID: "m2", Name: "M2", Type: "http", Target: "https://example.com", Interval: time.Minute, Timeout: 10 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	fresh.handleMonitors(w, httptest.NewRequest("GET", "/api/monitors", nil))
+	if strings.Contains(w.Body.String(), "last_check") {
+		t.Fatalf("a monitor with no checks must not carry last_check: %s", w.Body.String())
 	}
 }

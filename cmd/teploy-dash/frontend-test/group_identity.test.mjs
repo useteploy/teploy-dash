@@ -73,7 +73,7 @@ test('D06: scoped deletion sends exact identity and legacy deletion cannot touch
   page.groups = [{ name: 'Mixed', apps: ['web'], server_apps: [{ server_id: prodID, app: 'web' }, {server_id: stageID, app: 'web'}] }];
   page.load = async () => {};
   h.respond(() => response({ status: 'unassigned' }));
-  const binding = h.readHTML().match(/@click.stop="(unassignFromGroup\([^"]+)"/)[1];
+  const binding = h.readHTML().match(/@click="open = false; (unassignFromGroup\([^"]+)"/)[1];
   const remove = app => new Function('page', 'group', 'app', `return page.${binding}`)(page, page.groups[0], app);
   await remove({ name: 'web', server: 'prod', server_id: prodID });
   assert.equal(h.requests.at(-1).url, `/api/groups/Mixed/apps/web?server_id=${prodID}`);
