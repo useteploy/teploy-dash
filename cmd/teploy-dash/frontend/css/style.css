@@ -351,15 +351,14 @@ a.status-row:hover { background: var(--bg-card-hover); }
 .progress-fill.high { background: var(--red); }
 
 /* Sources page: plain labelled fields, stacked. */
-.source-form, .source-detail { margin-top: 16px; cursor: default; }
+.source-form, .source-detail { margin: 0 0 16px; padding: 16px; cursor: default; }
 .source-form:hover, .source-detail:hover { border-color: var(--border); }
 .source-form .section-title { margin-bottom: 12px; }
-.source-form .field { display: block; color: var(--text-muted); font-size: 12px; font-weight: 500; }
-.source-form .field input, .source-form .field select { display: block; margin-top: 5px; }
-.source-card { display: flex; margin-top: 8px; min-height: 0; flex-wrap: wrap; align-items: center; gap: 8px; }
-.source-detail h2 { margin-bottom: 8px; font-size: 14px; overflow-wrap: anywhere; }
-.source-detail h3 { margin: 14px 0 6px; font-size: 12px; }
-.source-detail p { margin-bottom: 6px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.source-form .card-meta { margin-top: 4px; }
+.source-detail h3 { font-size: 14px; overflow-wrap: anywhere; }
+.source-detail .section-title { font-size: 12px; }
+.source-url { display: block; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-input); font-size: 12px; overflow-wrap: anywhere; }
+tr.row-selected td { background: var(--accent-soft); }
 code { overflow-wrap: anywhere; }
 
 /* Pinned links inside the phone menu (see the 640px block). */
@@ -652,8 +651,8 @@ code { overflow-wrap: anywhere; }
   .table-wrap > table.stack-table tbody tr:hover td:first-child { background: none; }
   .stack-table td[data-label]::before { content: attr(data-label) " "; color: var(--text-muted); font-size: 11px; }
   .table-wrap > table.stack-table td.stack-inline { flex: 0 0 auto; }
-  .stack-table td.stack-lead { order: -2; }
-  .stack-table td.stack-lead > .mono:first-of-type, .stack-table td.stack-lead.mono { font-weight: 600; }
+  .stack-table td.stack-lead { order: -2; font-weight: 600; }
+  .stack-table td.stack-lead div { font-weight: 400; }
   .stack-table td.stack-problem { order: -1; color: var(--text); }
   .stack-table td.stack-empty { display: none; }
   .table-wrap > table.stack-table td.row-actions { text-align: left; }

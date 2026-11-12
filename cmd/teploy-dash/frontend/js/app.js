@@ -610,9 +610,22 @@ document.addEventListener('alpine:init', () => {
       el.addEventListener('scroll', update, { passive: true });
       const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null;
       if (ro) { ro.observe(el); for (const child of el.children) ro.observe(child); }
-      const active = el.querySelector('.active');
-      setTimeout(() => { if (active && active.scrollIntoView && el.scrollWidth > el.clientWidth) el.scrollLeft = Math.max(0, active.offsetLeft - 24); update(); }, 0);
-      cleanup(() => { el.removeEventListener('scroll', update); if (ro) ro.disconnect(); });
+      // Keep the active tab in view: on open (its class lands after this
+      // runs) and whenever the active tab changes.
+      let shown = null, shownAt = -1;
+      const reveal = () => {
+        const active = el.querySelector('.active');
+        if (active && (active !== shown || active.offsetLeft !== shownAt)) {
+          shown = active; shownAt = active.offsetLeft;
+          const left = active.offsetLeft - el.offsetLeft, right = left + active.offsetWidth;
+          if (left < el.scrollLeft || right > el.scrollLeft + el.clientWidth) el.scrollLeft = Math.max(0, left - 24);
+        }
+        update();
+      };
+      const mo = typeof MutationObserver === 'function' ? new MutationObserver(reveal) : null;
+      if (mo) mo.observe(el, { attributes: true, attributeFilter: ['class', 'style'], subtree: true, childList: true });
+      setTimeout(reveal, 0);
+      cleanup(() => { el.removeEventListener('scroll', update); if (ro) ro.disconnect(); if (mo) mo.disconnect(); });
     });
   }
 
@@ -3545,6 +3558,34 @@ document.addEventListener('alpine:init', () => {
       } catch (e) { if (this.alive(generation)) this.error = e.message; }
       finally { if (!this.destroyed) this.busy = false; }
     },
+    // Delete a registered source after the confirm dialog. Its webhook URL
+    // stops accepting pushes; apps keep their git settings.
+    async remove(src) {
+      if (this.destroyed || this.busy) return;
+      const label = src.display_name || src.clone_url;
+      if (!(await askConfirm({ title: `Delete the git source ${label}?`, danger: true, confirmLabel: 'Delete source',
+        message: 'Its webhook URL stops accepting pushes, so pushes no longer wake the apps that build from it. The repository itself is not touched.' }))) return;
+      this.busy = true; this.error = '';
+      try {
+        await api.del(`/api/sources/${encodeURIComponent(src.id)}`);
+        if (this.destroyed) return;
+        if (this.selected && this.selected.id === src.id) { this.selected = null; this.webhookSecret = ''; this.generation++; }
+        showToast('Git source deleted', 'success');
+        await this.load();
+      } catch (e) { if (!this.destroyed) this.error = e.message; }
+      finally { if (!this.destroyed) this.busy = false; }
+    },
+    verdictLabel(v) {
+      return { verified: 'Credentials verified', unverified: 'Not verified yet', degraded: 'Credentials failing', 'no-credential': 'No credentials' }[v] || v || '';
+    },
+    verdictClass(v) {
+      return { verified: 'green', unverified: 'gray', degraded: 'red', 'no-credential': 'yellow' }[v] || 'gray';
+    },
+    webhookAbsolute(url) {
+      if (!url || /^https?:/.test(url)) return url || '';
+      return (typeof location !== 'undefined' && location.origin ? location.origin : '') + url;
+    },
+
     async action(action) {
       if (this.destroyed || this.busy || !this.selected) return;
       this.busy = true; this.error = ''; this.webhookSecret = '';

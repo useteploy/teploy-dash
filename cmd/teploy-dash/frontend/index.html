@@ -1340,6 +1340,9 @@
                CLI or a folder-home app shows nothing here. -->
           <template x-if="tab === 'repository'">
             <div role="tabpanel" id="app-panel-repository" aria-labelledby="app-tab-repository" tabindex="-1">
+              <p class="app-facts app-related" style="margin: 0 0 14px;">
+                <a href="/settings?tab=git-sources" @click.prevent="$store.router.navigate('settings', { tab: 'git-sources' })">Git sources: registered repositories and their webhooks</a>
+              </p>
               <template x-if="gitShowLoading && !gitShow">
                 <div class="loading"><div class="spinner"></div></div>
               </template>
@@ -4413,42 +4416,123 @@
           <div class="page-header">
             <div>
               <h2 class="subpage-title">Git sources</h2>
-              <p class="subtitle">Register a repository so dash can receive and verify its webhook pushes. Provider names select credentials configured by the operator.</p>
+              <p class="subtitle">Repositories Dash receives push webhooks from. A verified push wakes the apps that build from the repository; each app's own poll decides what deploys. Apps connect to a repository on their Repository tab.</p>
             </div>
             <div class="header-actions">
-              <button class="btn" @click="load()" :disabled="loading">Refresh</button>
+              <button class="btn btn-sm" @click="load()" :disabled="loading">Refresh</button>
             </div>
           </div>
-          <p role="alert" class="stale-banner" x-show="loadError" x-text="loadError"></p>
+          <template x-if="loading && !sources.length">
+            <div class="loading"><div class="spinner"></div></div>
+          </template>
+          <p role="alert" class="stale-banner" x-show="loadError" x-text="(sources.length ? 'Showing the last list — refresh failed: ' : 'Git sources could not be read: ') + loadError"></p>
           <p role="alert" class="stale-banner" x-show="error" x-text="error"></p>
-          <p class="text-muted" x-show="!loading && !loadError && sources.length === 0">No sources configured.</p>
-          <template x-for="src in sources" :key="src.id">
-            <div class="card source-card">
-              <button class="btn" @click="select(src.id)" :disabled="busy" x-text="src.display_name || src.clone_url"></button>
-              <span x-text="src.credential_verdict"></span><span x-text="src.degrade_reason || ''"></span>
+
+          <template x-if="!loading && !loadError && sources.length === 0">
+            <div class="empty-state"><p>No git sources yet. Add a repository below to receive its push webhooks.</p></div>
+          </template>
+          <template x-if="sources.length > 0">
+            <div class="table-wrap" style="margin-bottom: 20px;">
+              <table class="stack-table">
+                <thead><tr><th>Repository</th><th>Forge</th><th>Branch</th><th>Credentials</th><th><span class="sr-only">Actions</span></th></tr></thead>
+                <tbody>
+                  <template x-for="src in sources" :key="src.id">
+                    <tr :class="{ 'row-selected': selected && selected.id === src.id }">
+                      <td class="stack-lead">
+                        <span x-text="src.display_name || src.clone_url"></span>
+                        <div class="text-muted mono" x-show="src.display_name" x-text="src.clone_url"></div>
+                      </td>
+                      <td class="stack-inline" data-label="Forge" x-text="src.forge || '—'"></td>
+                      <td class="stack-inline mono" data-label="Branch" x-text="src.default_branch || 'default'"></td>
+                      <td class="stack-problem">
+                        <span class="dot" :class="verdictClass(src.credential_verdict)"></span>
+                        <span x-text="verdictLabel(src.credential_verdict)"></span>
+                        <div class="text-muted" x-show="src.degrade_reason" x-text="src.degrade_reason"></div>
+                      </td>
+                      <td class="row-actions">
+                        <div class="btn-row">
+                          <button class="btn btn-sm" @click="selected && selected.id === src.id ? (selected = null, webhookSecret = '') : select(src.id)" :disabled="busy" :aria-expanded="!!(selected && selected.id === src.id)" x-text="selected && selected.id === src.id ? 'Close' : 'Details'"></button>
+                          <button class="btn btn-sm btn-danger" @click="remove(src)" :disabled="busy">Delete</button>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
             </div>
           </template>
-          <form @submit.prevent="create()" class="card source-form">
-            <h2 class="section-title">Add repository</h2>
-            <label class="field">Forge <select x-model="form.forge"><option>github</option><option>gitlab</option><option>forgejo</option><option>gitea</option><option>generic</option></select></label>
-            <label class="field">Clone URL <input type="url" required x-model="form.clone_url"></label>
-            <label class="field">Watched branch <input x-model="form.default_branch"></label>
-            <label class="field">Provider name <input required x-model="form.credential_ref" autocomplete="off"></label>
-            <label class="field">Display name <input x-model="form.display_name"></label>
-            <button type="submit" class="btn btn-primary" :disabled="busy">Add source</button>
-          </form>
+
+          <!-- The selected source's detail, above the add form. -->
           <template x-if="selected">
-            <section class="card source-detail">
-              <h2 x-text="selected.display_name || selected.clone_url"></h2>
-              <p>Webhook URL: <code x-text="selected.webhook_url"></code></p>
-              <button class="btn btn-sm" @click="action('verify')" :disabled="busy">Verify credentials</button>
-              <button class="btn btn-sm" @click="action('rotate-secret')" :disabled="busy">Rotate webhook secret</button>
-              <div x-show="webhookSecret"><p>Save this webhook secret now. It is shown once.</p><code x-text="webhookSecret"></code><button class="btn btn-sm" @click="webhookSecret = ''">Hide</button></div>
-              <h3>Recent deliveries</h3>
-              <template x-for="delivery in selected.deliveries || []" :key="delivery.id + delivery.received_at"><p><code x-text="delivery.commit"></code> <span x-text="delivery.disposition"></span> <span x-text="delivery.reason"></span></p></template>
-              <p class="card-meta">Pushes to a repository an app builds from wake that app's server-side poll (which decides what deploys); every authenticated push is recorded here.</p>
+            <section class="card source-detail" aria-labelledby="source-detail-title">
+              <div class="home-section-head">
+                <h3 id="source-detail-title" x-text="selected.display_name || selected.clone_url"></h3>
+                <span class="text-muted" x-text="selected.forge"></span>
+              </div>
+              <div class="field">
+                <label>Webhook URL</label>
+                <code class="mono source-url" x-text="webhookAbsolute(selected.webhook_url)"></code>
+                <p class="card-meta">Add this as a push webhook on the forge, with the webhook secret Dash showed when the source was created or last rotated.</p>
+              </div>
+              <div x-show="webhookSecret" class="info-banner" role="status">
+                <span>Save this webhook secret now. It is shown once: <code class="mono" x-text="webhookSecret"></code></span>
+                <button class="btn btn-sm" @click="webhookSecret = ''">Hide</button>
+              </div>
+              <div class="btn-row" style="justify-content: flex-start; margin: 10px 0 16px;">
+                <button class="btn btn-sm" @click="action('verify')" :disabled="busy">Verify credentials</button>
+                <button class="btn btn-sm" @click="action('rotate-secret')" :disabled="busy">Rotate webhook secret</button>
+              </div>
+              <h3 class="section-title" style="margin-bottom: 8px;">Recent deliveries</h3>
+              <template x-if="!(selected.deliveries || []).length"><p class="card-meta">No pushes received yet.</p></template>
+              <template x-if="(selected.deliveries || []).length">
+                <div class="table-wrap">
+                  <table class="stack-table">
+                    <thead><tr><th>Received</th><th>Commit</th><th>Result</th></tr></thead>
+                    <tbody>
+                      <template x-for="delivery in selected.deliveries" :key="delivery.id + delivery.received_at">
+                        <tr>
+                          <td class="stack-lead" x-time="delivery.received_at"></td>
+                          <td class="stack-inline mono" data-label="Commit" x-text="(delivery.commit || '').slice(0, 12) || '—'"></td>
+                          <td class="stack-problem"><span x-text="delivery.disposition"></span> <span class="text-muted" x-show="delivery.reason" x-text="'— ' + delivery.reason"></span></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+              <p class="card-meta" style="margin-top: 10px;">Every authenticated push is recorded here. A push to a repository an app builds from wakes that app's server-side poll, which decides what deploys.</p>
             </section>
           </template>
+
+          <form @submit.prevent="create()" class="card source-form" aria-labelledby="source-add-title">
+            <h3 id="source-add-title" class="section-title">Add a repository</h3>
+            <div class="field-row">
+              <div class="field">
+                <label for="source-forge">Forge</label>
+                <select id="source-forge" x-model="form.forge"><option>github</option><option>gitlab</option><option>forgejo</option><option>gitea</option><option>generic</option></select>
+              </div>
+              <div class="field">
+                <label for="source-branch">Watched branch</label>
+                <input id="source-branch" x-model="form.default_branch" placeholder="main">
+              </div>
+            </div>
+            <div class="field">
+              <label for="source-url">Clone URL</label>
+              <input id="source-url" type="url" required x-model="form.clone_url" placeholder="https://git.example.com/me/shop.git">
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label for="source-provider">Provider name</label>
+                <input id="source-provider" required x-model="form.credential_ref" autocomplete="off" placeholder="github-main">
+                <p class="card-meta">The name of an entry in the source-provider file on the Dash host (set by TEPLOY_DASH_SOURCE_PROVIDERS), which holds this forge's token or app credentials. Dash stores only the name, never a token.</p>
+              </div>
+              <div class="field">
+                <label for="source-display">Display name (optional)</label>
+                <input id="source-display" x-model="form.display_name" placeholder="shop">
+              </div>
+            </div>
+            <button type="submit" class="btn btn-primary" :disabled="busy">Add source</button>
+          </form>
         </div>
       </template>
 

@@ -158,6 +158,20 @@ assert(/\.field input\[type="checkbox"\][^{]*\{[^}]*width: auto/.test(css), 'fie
   assert(html.includes("navigate('app-detail', { server: selectedMonitor.monitor.server, name: selectedMonitor.monitor.app })"), 'a monitor links to its app');
 }
 
+// Git sources: a table with credential state, detail above the form, delete
+// through the confirm dialog, help for "Provider name", and a link from the
+// app's Repository tab.
+{
+  const tab = html.slice(html.indexOf('x-data="sourcesPage"'), html.indexOf('</form>', html.indexOf('x-data="sourcesPage"')));
+  assert(tab.includes('<table class="stack-table">') && tab.includes('verdictLabel(src.credential_verdict)'), 'sources list as a table with readable credential states');
+  assert(tab.indexOf('class="card source-detail"') < tab.indexOf('class="card source-form"'), 'the selected source sits above the add form');
+  assert(tab.includes('@click="remove(src)"') && js.includes('await api.del(`/api/sources/${encodeURIComponent(src.id)}`)'), 'a source can be deleted');
+  assert(tab.includes('TEPLOY_DASH_SOURCE_PROVIDERS'), 'Provider name is explained');
+  assert((html.match(/@submit\.prevent="create\(\)" class="card source-form"/g) || []).length === 1 && !html.includes('>Add repository</h2>'), 'one add form, the old one is gone');
+  const repo = html.slice(html.indexOf('id="app-panel-repository"'), html.indexOf('id="app-panel-repository"') + 600);
+  assert(repo.includes("navigate('settings', { tab: 'git-sources' })"), 'the Repository tab links to Git sources');
+}
+
 function finish() {
 if (failures.length) { console.error(`FAIL (${failures.length}):`); failures.forEach((f) => console.error('  - ' + f)); process.exit(1); }
 console.log('nav_rework.test: all assertions passed');

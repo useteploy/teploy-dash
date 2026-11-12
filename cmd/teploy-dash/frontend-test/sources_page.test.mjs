@@ -48,3 +48,18 @@ for(const kind of ['create','verify']) for(const phase of ['post','list','detail
   await pending;assert.equal(p.webhookSecret,'');assert.equal(p.selected?.id,change==='destroy'?undefined:'new');
  });
 }
+test('deleting a source asks first, then sends DELETE and closes its detail', async () => {
+ const h = sourceHarness(), p = h.page('sourcesPage');
+ h.respond((url, options) => options.method === 'DELETE' ? { status: 204, ok: true, headers: new Headers(), text: async () => '' } : response(url === '/api/sources' ? [] : { id: url.split('/').at(-1) }));
+ await p.select('s1');
+ globalThis.confirm = () => false;
+ await p.remove({ id: 's1', clone_url: 'https://git.example.com/a.git' });
+ assert.equal(h.requests.filter(r => r.method === 'DELETE').length, 0, 'cancel sends nothing');
+ assert.equal(h.stores.dialog.opened.at(-1).danger, true);
+ globalThis.confirm = () => true;
+ await p.remove({ id: 's1', clone_url: 'https://git.example.com/a.git' });
+ assert.deepEqual(h.requests.filter(r => r.method === 'DELETE').map(r => r.url), ['/api/sources/s1']);
+ assert.equal(p.selected, null);
+ delete globalThis.confirm;
+ p.destroy();
+});
