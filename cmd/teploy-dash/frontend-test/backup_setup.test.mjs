@@ -527,3 +527,61 @@ test('the home list stays a glance: one row before setup, grouped after, capped'
   const html = h.readHTML();
   assert.ok(html.includes('attentionShown()') && html.includes("'Show ' + attentionHidden() + ' more'"));
 });
+
+test('home agrees with the backups page: skipping on purpose is protected', async () => {
+  const h = harness('/');
+  const view = baseView({ state: 'protected_except', headline: 'Protected, except redis-cache (you chose to skip).',
+    servers: [{ server: 'a', state: 'protected_except', skipped: ['redis-cache'], detail: 'Protected, except redis-cache (you chose to skip).' }] });
+  h.respond((url) => url === '/api/backups' ? response(view) : response({}));
+  const home = h.components.homeStatus();
+  await home.init();
+  assert.deepEqual(home.attention().filter((r) => String(r.key).startsWith('protect')), [], 'no attention row for a choice the owner made');
+  home.destroy();
+
+  const b = setupHarness({}, { state: 'protected_except' });
+  const p = b.page('backupsPage');
+  await p.init();
+  assert.equal(p.setupDone(), true, 'the backups page card reads done too');
+  assert.equal(p.setupStateClass('protected_except'), 'green');
+  p.destroy();
+  const html = b.readHTML();
+  assert.ok(html.includes(`:class="setupDone() ? '' : 'setup-card-todo'"`), 'the setup card styles protected_except as done');
+  assert.ok(!html.includes("view.setup.state !== 'protected'"), 'no card test treats only "protected" as done');
+});
+
+test('home names the cause of "needs attention" per server', async () => {
+  const h = harness('/');
+  const servers = [
+    { server: 'a', state: 'unreachable', detail: 'a cannot reach its storage.' },
+    { server: 'b', state: 'late', detail: 'Backups are late: blog-db' },
+    { server: 'c', state: 'failing', detail: 'Backups are failing: shop-db' },
+    { server: 'd', state: 'protected' },
+  ];
+  const rows = [{ server: 'c', name: 'shop-db', state: 'failing', last_error: 'upload failed' }];
+  const open = [
+    { key: 'backup:a:target:', source: 'backup', name: 'Backup storage for a is unreachable', severity: 'critical' },
+    { key: 'backup:b:stale:blog-db', source: 'backup', name: 'blog-db backups are late', severity: 'warning' },
+    { key: 'backup:c:fail:shop-db', source: 'backup', name: 'shop-db backups are failing', severity: 'critical' },
+    { key: 'backup:e:tools:', source: 'backup', name: 'age is missing on e', severity: 'critical' },
+  ];
+  let view = baseView({ state: 'attention', headline: 'Your backups need attention.', turned_on: true, servers }, { rows });
+  h.respond((url) => url === '/api/backups' ? response(view) : url === '/api/alerts/incidents' ? response({ open }) : response({}));
+  const home = h.components.homeStatus();
+  await home.init();
+  const att = home.attention();
+  assert.deepEqual(att.map((r) => r.key), ['inc:backup:e:tools:', 'protect:a', 'protect:b', 'bk:c/shop-db'],
+    'tools incident kept (no row names it); target/stale named by their server rows; failing by its backup row');
+  const a = att.find((r) => r.key === 'protect:a');
+  assert.equal(a.title, 'Backups on a: cannot reach storage');
+  assert.equal(a.detail, 'a cannot reach its storage.');
+  assert.equal(a.level, 'bad');
+  assert.equal(att.find((r) => r.key === 'protect:b').level, 'warn');
+  assert.ok(!att.some((r) => r.title === 'Your backups need attention.'), 'no generic line');
+
+  // Without the setup view (an older CLI) the target and stale incidents are
+  // the only place those causes are named, so they stay.
+  view = baseView({ supported: false }, { rows });
+  await home.loadOne('backups');
+  assert.deepEqual(home.attention().map((r) => r.key), ['inc:backup:a:target:', 'inc:backup:b:stale:blog-db', 'inc:backup:e:tools:', 'bk:c/shop-db']);
+  home.destroy();
+});
