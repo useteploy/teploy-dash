@@ -4906,17 +4906,33 @@ document.addEventListener('alpine:init', () => {
       const bk = this.sources.backups.data;
       const setup = bk && bk.setup;
       const setupRows = !!(setup && setup.supported);
+      // What the rows further down will actually say, so an incident is only
+      // left out when one of them names the same cause.
+      const serverState = {};
+      if (setupRows && setup.state === 'attention') {
+        for (const sv of arr(setup.servers)) serverState[sv.server] = sv.state;
+      }
+      const beforeSetup = setupRows && setup.state === 'none';
+      const rowState = {};
+      for (const r of arr(bk && bk.rows)) rowState[r.server + '\n' + r.name] = r.state;
       for (const i of arr(inc && inc.open)) {
         // Backup incidents whose cause a row below already names are left
-        // out: failing and uncovered targets have rows of their own, and
-        // with "Protect my data" supported an unreachable target or late
-        // backups show as that server's row. Anything else (missing tools, a
-        // rule this page does not know) stays, and every backup incident
-        // stands in when the backup read itself is missing.
+        // out: a failing or uncovered target has a backup row of its own
+        // (before setup, the one "not protected yet" row stands for every
+        // uncovered target), and an unreachable target or late backups show
+        // as that server's "Protect my data" row when that is the state the
+        // server reports. Anything else stays: missing tools, a rule this
+        // page does not know, a database inside a covered target that the
+        // engine cannot back up, late backups on a server whose row is about
+        // something else. Every backup incident stands in when the backup
+        // read itself is missing.
         if (i.source === 'backup' && bk) {
-          const kind = String(i.key || '').split(':')[2];
-          if (kind === 'fail' || kind === 'uncovered') continue;
-          if (setupRows && (kind === 'target' || kind === 'stale')) continue;
+          const parts = String(i.key || '').split(':');
+          const server = parts[1], kind = parts[2], state = rowState[server + '\n' + parts.slice(3).join(':')];
+          if (kind === 'fail' && state === 'failing') continue;
+          if (kind === 'uncovered' && (beforeSetup || state === 'uncovered')) continue;
+          if (kind === 'target' && serverState[server] === 'unreachable') continue;
+          if (kind === 'stale' && serverState[server] === 'late') continue;
         }
         rows.push({ key: 'inc:' + (i.key || i.id || i.name), level: i.severity === 'critical' ? 'bad' : 'warn',
           title: i.name + (i.source === 'monitor' || i.source === 'heartbeat' || !i.source ? ' is down' : ''),

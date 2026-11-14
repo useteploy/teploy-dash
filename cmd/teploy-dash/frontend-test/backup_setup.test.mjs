@@ -499,7 +499,8 @@ test('the home list stays a glance: one row before setup, grouped after, capped'
   const rows = [];
   for (let i = 0; i < 12; i++) rows.push({ server: i < 9 ? 'a' : 'b', name: 'app' + i + '/volumes', state: 'uncovered' });
   rows.push({ server: 'a', name: 'ship/postgres', state: 'failing', last_error: 'upload failed' });
-  const open = rows.map((r) => ({ key: 'backup:' + r.server + ':uncovered:' + r.name, source: 'backup', name: r.name + ' on ' + r.server + ' is not covered', severity: 'warning' }));
+  // One incident per row, under the rule the server opens for that row's state.
+  const open = rows.map((r) => ({ key: 'backup:' + r.server + (r.state === 'failing' ? ':fail:' : ':uncovered:') + r.name, source: 'backup', name: r.name + ' on ' + r.server + ' is not covered', severity: 'warning' }));
   open.push({ key: 'm1', source: 'monitor', name: 'Shop', severity: 'critical' });
   let view = baseView({}, { rows });
   h.respond((url) => url === '/api/backups' ? response(view) : url === '/api/alerts/incidents' ? response({ open }) : response({}));
@@ -584,4 +585,45 @@ test('home names the cause of "needs attention" per server', async () => {
   await home.loadOne('backups');
   assert.deepEqual(home.attention().map((r) => r.key), ['inc:backup:a:target:', 'inc:backup:b:stale:blog-db', 'inc:backup:e:tools:', 'bk:c/shop-db']);
   home.destroy();
+});
+
+test('home drops a backup incident only when a row names the same cause', async () => {
+  const h = harness('/');
+  // a: covered accessory holding a database the engine cannot address (the
+  // server reads not_covered, but no backup row is "uncovered").
+  // b: one target failing and another late (the server row says failing, so
+  // nothing but the incident names the late one).
+  // c: failing backups AND unreachable storage reported under another state.
+  const servers = [
+    { server: 'a', state: 'not_covered', detail: 'Not backed up: shop-db/analytics.' },
+    { server: 'b', state: 'failing', detail: 'Backups are failing: blog-db' },
+    { server: 'c', state: 'unknown', detail: 'Dash could not read this server.' },
+  ];
+  const rows = [
+    { server: 'a', name: 'shop-db', state: 'covered', uncovered_databases: ['analytics'] },
+    { server: 'b', name: 'blog-db', state: 'failing', last_error: 'upload failed' },
+    { server: 'b', name: 'wiki-db', state: 'stale' },
+    { server: 'c', name: 'old-db', state: 'unknown' },
+  ];
+  const open = [
+    { key: 'backup:a:uncovered:shop-db', source: 'backup', name: 'shop-db on a is not covered', severity: 'warning' },
+    { key: 'backup:b:fail:blog-db', source: 'backup', name: 'backups of blog-db on b', severity: 'critical' },
+    { key: 'backup:b:stale:wiki-db', source: 'backup', name: 'backups of wiki-db on b are stale', severity: 'critical' },
+    { key: 'backup:c:target:', source: 'backup', name: 'backup target on c', severity: 'critical' },
+    { key: 'backup:c:fail:old-db', source: 'backup', name: 'backups of old-db on c', severity: 'critical' },
+  ];
+  const view = baseView({ state: 'attention', headline: 'Your backups need attention.', turned_on: true, servers }, { rows });
+  h.respond((url) => url === '/api/backups' ? response(view) : url === '/api/alerts/incidents' ? response({ open }) : response({}));
+  const home = h.components.homeStatus();
+  await home.init();
+  const keys = home.attention().map((r) => r.key);
+  home.destroy();
+  assert.deepEqual(keys, [
+    'inc:backup:a:uncovered:shop-db', // no row is "uncovered" on a
+    'inc:backup:b:stale:wiki-db', // b's server row is left to the failing backup row
+    'inc:backup:c:target:', // c's row says "could not be read", not unreachable
+    'inc:backup:c:fail:old-db', // old-db's row reads unknown, not failing
+    'protect:c',
+    'bk:b/blog-db',
+  ]);
 });
