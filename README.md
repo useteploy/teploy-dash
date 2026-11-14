@@ -28,13 +28,31 @@ brew install useteploy/tap/teploy-dash
 
 Anonymous image volumes are NOT reused when the container is replaced, so
 dashboard data (users, monitors, MCP tokens) and the CLI's `~/.teploy`
-configuration need named volumes to survive upgrades. The generated password
-below is printed to the container log once — copy it out, or use first-run
-setup (`/setup` with the bootstrap token from the log) instead:
+configuration need named volumes to survive upgrades.
 
 ```bash
-docker run -d -p 127.0.0.1:3456:3456 \
-  -e TEPLOY_DASH_PASSWORD=$(openssl rand -base64 24) \
+docker run -d --name teploy-dash -p 127.0.0.1:3456:3456 \
+  -v deployments:/deployments \
+  -v dash-data:/var/teploy-dash \
+  -v teploy-config:/root/.teploy \
+  ghcr.io/useteploy/teploy-dash:latest
+docker logs teploy-dash 2>&1 | grep "Bootstrap token"
+```
+
+On first start (no account yet) Dash logs a one-time **bootstrap token**,
+valid for 30 minutes. Open `http://127.0.0.1:3456/setup`, enter the token,
+and choose the admin username and password there. If the token has expired,
+`docker restart teploy-dash` issues a new one (only while no account exists).
+Dash never prints a password.
+
+To create the admin account without the setup page, pass a password you
+choose yourself — Dash stores it as the `admin` account (or
+`TEPLOY_DASH_USER`) on first start and does not log it:
+
+```bash
+PW=$(openssl rand -base64 24); echo "Dash admin password: $PW"
+docker run -d --name teploy-dash -p 127.0.0.1:3456:3456 \
+  -e TEPLOY_DASH_PASSWORD="$PW" \
   -v deployments:/deployments \
   -v dash-data:/var/teploy-dash \
   -v teploy-config:/root/.teploy \
