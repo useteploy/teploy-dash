@@ -105,11 +105,11 @@ make build                                     # builds ./teploy-dash
 ./teploy-dash --no-auth                        # local dev only
 ```
 
-`TEPLOY_DASH_PASSWORD` is optional; if absent and no `auth.json` exists, setup mode runs on first visit.
+`TEPLOY_DASH_PASSWORD` is optional; if absent and no `users.json` (or legacy `auth.json`) exists, setup mode runs on first visit, gated by a one-time bootstrap token printed to the log.
 
 ## API
 
-Full route list at README.md "API" section. Routes are registered in `internal/server/server.go` via `mux.HandleFunc`. All non-`/api/health` routes go through `authGate.wrap()` when auth is configured.
+Full route list at README.md "API" section. Routes are registered in `internal/server/server.go` via `mux.HandleFunc`. Every route goes through `authGate.wrap()` when auth is configured. The wrapper passes a fixed set without a session: `/api/health`, `/healthz`, `/readyz`, `/login`, `/api/login`, `/api/logout`, `/api/login/methods`, `/api/setup` (bootstrap token), `/status` and `/api/status` (404 unless `--public-status`), `/api/mcp` (its own bearer token), the favicons, `/oidc/login` and `/oidc/callback` (rate-limited), `/api/push/{token}` (path token) and `/hooks/sources/{id}` (HMAC/provider token). Everything else needs a live session, passes the same-origin check on mutations, and must hold the capability `requiredCapabilities` (`internal/server/caps.go`) names for the route.
 
 ## Key Decisions
 

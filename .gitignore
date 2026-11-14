@@ -41,3 +41,6 @@ Thumbs.db
 
 # ci/ node tooling installs (ci/package-lock.json IS committed)
 /ci/node_modules/
+
+# Local run logs (e.g. dash.log from a dev run)
+*.log
