@@ -58,6 +58,12 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+      # A50: fail on any vulnerability the code actually reaches (symbol
+      # level), in dependencies or in the toolchain's standard library.
+      - name: Vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
   # X01 5.2 job 3 (X02 ADR 4): dash CI decodes the PINNED contracts corpus.
   # One job proves the shipped pair, not just the pin: the pinned teploy-cli
