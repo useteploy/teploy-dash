@@ -41,17 +41,31 @@ const (
 	KindServerPrune   Kind = "server_prune"
 )
 
-// Records of the removed manifest_* and source_preview* kinds still load and
-// display; Build refuses them and Retry answers ErrNotRetryable.
+// supportedKinds is every kind Build accepts. Records of the removed
+// manifest_* and source_preview* kinds still load and display; Build refuses
+// them and Retry answers ErrNotRetryable.
+var supportedKinds = []Kind{
+	KindDeploy, KindRollback, KindRemove, KindTemplateInstall, KindAppLifecycle, KindMaintenance,
+	KindRedeploy, KindBackupCreate, KindBackupRestore,
+	KindServerAudit, KindRouteRemove, KindReleasesPrune, KindServerPrune,
+}
+
+// SupportedKinds returns a copy of every kind Build accepts, for tables
+// elsewhere (the server's per-kind capability table) that must cover them all.
+func SupportedKinds() []Kind {
+	return append([]Kind(nil), supportedKinds...)
+}
+
+// SupportedKind reports whether Build accepts kind.
+func SupportedKind(kind Kind) bool { return supportedKind(kind) }
+
 func supportedKind(kind Kind) bool {
-	switch kind {
-	case KindDeploy, KindRollback, KindRemove, KindTemplateInstall, KindAppLifecycle, KindMaintenance,
-		KindRedeploy, KindBackupCreate, KindBackupRestore,
-		KindServerAudit, KindRouteRemove, KindReleasesPrune, KindServerPrune:
-		return true
-	default:
-		return false
+	for _, k := range supportedKinds {
+		if k == kind {
+			return true
+		}
 	}
+	return false
 }
 
 type Status string
