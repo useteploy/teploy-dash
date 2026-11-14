@@ -1999,7 +1999,7 @@ func (s *Server) cliAppRun(ctx context.Context, serverName, appName string, part
 // hermetically testable and share one seam.
 func (s *Server) envList(ctx context.Context, serverName, appName string) (interface{}, error) {
 	if !s.cliInstalled() {
-		return nil, errors.New("teploy CLI not installed")
+		return nil, cli.ErrNotInstalled
 	}
 	args := []string{"env", "list", "--host", s.serverHost(serverName), "--app", appName, "--reveal"}
 	if u := s.serverUser(serverName); u != "" {
@@ -2049,7 +2049,13 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 
 	// Up-front existence check for every action so an unconfigured server name
 	// returns a clear "server not found" instead of an opaque SSH/CLI error.
+	// Servers are known only through the CLI, so without one the answer is
+	// that the CLI is missing, not that this server is.
 	if _, ok := s.lookupServer(serverName); !ok {
+		if !s.cliInstalled() {
+			writeCLINotInstalled(w)
+			return
+		}
 		writeError(w, "server not found: "+serverName)
 		return
 	}
@@ -2152,7 +2158,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.envSet(r, serverName, appName, body.Key, body.Value)
@@ -2175,7 +2181,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.envUnset(r, serverName, appName, key)
@@ -2191,7 +2197,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 
 	case action == "log" && r.Method == "GET":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "log", "--json")
@@ -2206,7 +2212,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	// passed: detected drift is a successful answer, not a command failure.
 	case action == "drift" && r.Method == "GET":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "drift", "--json")
@@ -2220,7 +2226,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	// like drift rather than becoming an operation.
 	case action == "stats" && r.Method == "GET":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "stats", "--json")
@@ -2237,7 +2243,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	// detail page's initial load — it runs when asked for.
 	case action == "health" && r.Method == "GET":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "health", "--json")
@@ -2280,7 +2286,7 @@ func (s *Server) handleAppAction(w http.ResponseWriter, r *http.Request) {
 
 	case action == "accessories" && r.Method == "GET":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "accessory", "list", "--json")
@@ -2308,7 +2314,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 	switch action {
 	case "stop", "start", "restart":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		s.enqueueOperation(w, r, operation.Request{
@@ -2317,7 +2323,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 
 	case "rollback":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		// D5: an optional {to} body targets a chosen release
@@ -2355,7 +2361,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 
 	case "remove":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		var body struct {
@@ -2377,7 +2383,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 
 	case "lock":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "lock")
@@ -2390,7 +2396,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 
 	case "unlock":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		result, err := s.cliAppRun(r.Context(), serverName, appName, "unlock")
@@ -2403,7 +2409,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 
 	case "maintenance/on", "maintenance/off":
 		if !s.cliInstalled() {
-			writeError(w, "teploy CLI not installed")
+			writeCLINotInstalled(w)
 			return
 		}
 		s.enqueueOperation(w, r, operation.Request{
@@ -2414,7 +2420,7 @@ func (s *Server) handleAppPost(w http.ResponseWriter, r *http.Request, serverNam
 	default:
 		if strings.HasPrefix(action, "accessories/") {
 			if !s.cliInstalled() {
-				writeError(w, "teploy CLI not installed")
+				writeCLINotInstalled(w)
 				return
 			}
 			accParts := strings.Split(strings.TrimPrefix(action, "accessories/"), "/")
@@ -2470,6 +2476,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	srv, ok := s.lookupServer(serverName)
+	if !ok && !s.cliInstalled() {
+		writeCLINotInstalled(w)
+		return
+	}
 	if !ok {
 		http.Error(w, "server not found: "+serverName, 404)
 		return
@@ -2702,7 +2712,7 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 
@@ -2770,7 +2780,7 @@ func (s *Server) handleTemplateInstall(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed on this host")
+		writeCLINotInstalled(w)
 		return
 	}
 	result, err := s.runCLI(r.Context(), "server", "list", "--json")
@@ -2823,7 +2833,7 @@ func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
 	// An error status, not a 200 whose data is {"error": ...}: the page
 	// would otherwise render an empty status as if the server answered.
 	if !s.cliInstalled() {
-		writeErrorStatus(w, "teploy CLI not installed", http.StatusServiceUnavailable)
+		writeCLINotInstalled(w)
 		return
 	}
 
@@ -2895,7 +2905,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 	var body struct {
@@ -4613,11 +4623,23 @@ func writeData(w http.ResponseWriter, data interface{}) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"data": data})
 }
 
+// writeCLINotInstalled answers a request that needs the teploy CLI when the
+// dashboard host has none.
+func writeCLINotInstalled(w http.ResponseWriter) {
+	writeErrorStatus(w, cli.ErrNotInstalled.Error(), http.StatusServiceUnavailable)
+}
+
 func writeError(w http.ResponseWriter, msg string) {
 	writeErrorStatus(w, msg, http.StatusBadRequest)
 }
 
 func writeErrorStatus(w http.ResponseWriter, msg string, status int) {
+	// A missing teploy binary reads the same on every route, whichever
+	// handler hit it and however it wrapped the error: one 503 carrying the
+	// install remediation, never a raw exec error under a 400 or 502.
+	if strings.Contains(msg, cli.ErrNotInstalled.Error()) {
+		msg, status = cli.ErrNotInstalled.Error(), http.StatusServiceUnavailable
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})

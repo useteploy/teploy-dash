@@ -114,7 +114,7 @@ func (b mcpBackend) GetApp(ctx context.Context, server, app string) (string, err
 
 func (b mcpBackend) AppLogs(ctx context.Context, server, app string, lines int) (string, error) {
 	if !b.s.cliInstalled() {
-		return "", fmt.Errorf("teploy CLI not installed on the dash host")
+		return "", cli.ErrNotInstalled
 	}
 	srv, err := b.resolveServer(server)
 	if err != nil {
@@ -183,7 +183,7 @@ func (b mcpBackend) ListMonitors(ctx context.Context) (string, error) {
 
 func (b mcpBackend) ListEnvKeys(ctx context.Context, server, app string) (string, error) {
 	if !b.s.cliInstalled() {
-		return "", fmt.Errorf("teploy CLI not installed on the dash host")
+		return "", cli.ErrNotInstalled
 	}
 	srv, err := b.resolveServer(server)
 	if err != nil {
@@ -257,7 +257,7 @@ func (b mcpBackend) AppAction(ctx context.Context, server, app, action string) (
 		// Everything else (lock, unlock, maintenance on/off) delegates to
 		// the CLI, exactly like the UI.
 		if !b.s.cliInstalled() {
-			return "", fmt.Errorf("teploy CLI not installed on the dash host")
+			return "", cli.ErrNotInstalled
 		}
 		if _, err := b.resolveServer(server); err != nil {
 			return "", err
@@ -275,7 +275,7 @@ func (b mcpBackend) AppAction(ctx context.Context, server, app, action string) (
 
 func (b mcpBackend) SetEnv(ctx context.Context, server, app, key, value string) (string, error) {
 	if !b.s.cliInstalled() {
-		return "", fmt.Errorf("teploy CLI not installed on the dash host")
+		return "", cli.ErrNotInstalled
 	}
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")
@@ -295,7 +295,7 @@ func (b mcpBackend) SetEnv(ctx context.Context, server, app, key, value string) 
 
 func (b mcpBackend) UnsetEnv(ctx context.Context, server, app, key string) (string, error) {
 	if !b.s.cliInstalled() {
-		return "", fmt.Errorf("teploy CLI not installed on the dash host")
+		return "", cli.ErrNotInstalled
 	}
 	if !validEnvKey(key) {
 		return "", fmt.Errorf("invalid env var name")

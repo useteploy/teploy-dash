@@ -75,7 +75,7 @@ func (s *Server) requireFeature(w http.ResponseWriter, r *http.Request, ok func(
 // appeared in, so the remedy names the release that actually provides it.
 func (s *Server) requireFeatureMin(w http.ResponseWriter, r *http.Request, ok func(machineFeatures) bool, what, minVersion string) bool {
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return false
 	}
 	if !ok(s.capabilities(r.Context()).Features) {

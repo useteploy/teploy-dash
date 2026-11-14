@@ -215,7 +215,7 @@ type kvWriteResponse struct {
 // handleKVList lists keys matching a glob. GET, viewer.
 func (s *Server) handleKVList(w http.ResponseWriter, r *http.Request, serverName, appName string) {
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 	pattern := r.URL.Query().Get("pattern")
@@ -254,7 +254,7 @@ func (s *Server) handleKVList(w http.ResponseWriter, r *http.Request, serverName
 // check reads r.URL.Path only, so this does not weaken it.
 func (s *Server) handleKVGet(w http.ResponseWriter, r *http.Request, serverName, appName string) {
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 	key := r.URL.Query().Get("key")
@@ -293,7 +293,7 @@ func (s *Server) handleKVGet(w http.ResponseWriter, r *http.Request, serverName,
 // handleKVSet writes a key. POST, editor.
 func (s *Server) handleKVSet(w http.ResponseWriter, r *http.Request, serverName, appName string) {
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 	var body struct {
@@ -388,7 +388,7 @@ func (s *Server) kvRunStdin(w http.ResponseWriter, r *http.Request, serverName, 
 // handleKVDelete removes a key. DELETE, editor.
 func (s *Server) handleKVDelete(w http.ResponseWriter, r *http.Request, serverName, appName string) {
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 	key := r.URL.Query().Get("key")

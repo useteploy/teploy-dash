@@ -1,6 +1,6 @@
 # Teploy Dash
 
-Self-hosted deployment dashboard for the [Teploy CLI](https://github.com/useteploy/teploy),
+Self-hosted deployment dashboard for the [Teploy CLI](https://github.com/useteploy/teploy-cli),
 plus uptime monitoring — in one Go binary.
 
 The CLI writes deployment state to `/deployments/{app}/state` (a plain

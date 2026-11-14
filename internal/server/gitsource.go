@@ -48,7 +48,7 @@ type gitSourceShowDTO struct {
 // commands); trigger routes additionally need the poll token.
 func (s *Server) requireGitSource(w http.ResponseWriter, r *http.Request, what string, trigger bool) bool {
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return false
 	}
 	features := s.capabilities(r.Context()).Features
