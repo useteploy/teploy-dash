@@ -428,12 +428,16 @@ func TestNavSkipsUnconfirmedProbes(t *testing.T) {
 	}
 }
 
-func TestNavAppendsConfirmedForgejoLink(t *testing.T) {
+func TestNavListsForgejoOnlyWhenConfigured(t *testing.T) {
 	s := New(Config{DataDir: t.TempDir(), NoAuth: true})
 	publishSiblingsProbe(s, "infra", &siblingProbe{
 		Server: "infra", Product: "forgejo", State: probeConfirmed, BaseURL: "http://203.0.113.9:3000", Version: "11.0.1", ProbedAt: time.Now(),
 	})
-	if got := navURL(s.teployNav("dash"), "forgejo"); got != "http://203.0.113.9:3000" {
-		t.Fatalf("forgejo url = %q, want the confirmed base URL as a plain link", got)
+	if got := navURL(s.teployNav("dash"), "forgejo"); got != "<absent>" {
+		t.Fatalf("forgejo url = %q, want absent: a forge found on the fleet is not a product", got)
+	}
+	t.Setenv("TEPLOY_NAV_FORGEJO_URL", "https://git.example.com")
+	if got := navURL(s.teployNav("dash"), "forgejo"); got != "https://git.example.com" {
+		t.Fatalf("forgejo url = %q, want the configured URL", got)
 	}
 }

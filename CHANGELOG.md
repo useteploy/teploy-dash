@@ -4,6 +4,15 @@ All notable changes to teploy-dash are recorded here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Switcher:** a Forgejo found on the fleet no longer joins the top-left
+  product switcher. Set `TEPLOY_NAV_FORGEJO_URL` to list one.
+
+### Fixed
+
+- **Shortcuts:** a link with a `#` in it can be saved.
+
 ## [0.1.27] - 2026-11-11
 
 ### Changed
