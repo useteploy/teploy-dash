@@ -153,7 +153,16 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The retry is re-authorized by the caller, so it is attributed to
-		// them; RetryOf on the new record preserves the lineage.
+		// them; RetryOf on the new record preserves the lineage. It reruns
+		// the stored request, so it needs what that kind needs.
+		prior, err := s.operations.Get(id)
+		if err != nil {
+			writeOperationError(w, err)
+			return
+		}
+		if !authorizeOperationKind(w, r, prior.Request.Kind) {
+			return
+		}
 		op, err := s.operations.Retry(id, actorFromRequest(r))
 		if err != nil {
 			writeOperationError(w, err)
@@ -165,11 +174,74 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// operationKindCapabilities is the one table of what running each operation
+// kind requires. Every route that admits an operation (the kind's dedicated
+// route, the generic POST /api/operations, and retry) checks it, so the
+// generic route can never be weaker than the dedicated one: each entry must
+// hold at least the capabilities requiredCapabilities gives the kind's
+// dedicated route (TestOperationKindCapabilityParity pins this for every
+// supported kind).
+var operationKindCapabilities = map[operation.Kind][]string{
+	// Deploy-state changes: the dedicated routes (/api/deploy, the app
+	// lifecycle/rollback/redeploy/remove/maintenance verbs, template install,
+	// backups/create, the cleanup audit and remedies) all require
+	// execute.deploy.
+	operation.KindDeploy:          {caps.ExecuteDeploy},
+	operation.KindRollback:        {caps.ExecuteDeploy},
+	operation.KindRemove:          {caps.ExecuteDeploy},
+	operation.KindTemplateInstall: {caps.ExecuteDeploy},
+	operation.KindAppLifecycle:    {caps.ExecuteDeploy},
+	operation.KindMaintenance:     {caps.ExecuteDeploy},
+	operation.KindRedeploy:        {caps.ExecuteDeploy},
+	operation.KindBackupCreate:    {caps.ExecuteDeploy},
+	operation.KindServerAudit:     {caps.ExecuteDeploy},
+	operation.KindRouteRemove:     {caps.ExecuteDeploy},
+	operation.KindReleasesPrune:   {caps.ExecuteDeploy},
+	operation.KindServerPrune:     {caps.ExecuteDeploy},
+	// A restore overwrites live data: its dedicated route requires
+	// restore.data, and it runs as an operation (execute.deploy).
+	operation.KindBackupRestore: {caps.ExecuteDeploy, caps.RestoreData},
+}
+
+// requiredCapsForKind returns what admitting an operation of kind requires.
+// A kind the operation package does not build at all (a removed kind's old
+// record, a typo) needs only execute.deploy: the operation package refuses
+// it. A supported kind missing from the table fails closed.
+func requiredCapsForKind(kind operation.Kind) ([]string, bool) {
+	if required, ok := operationKindCapabilities[kind]; ok {
+		return required, true
+	}
+	if operation.SupportedKind(kind) {
+		return nil, false
+	}
+	return []string{caps.ExecuteDeploy}, true
+}
+
+// authorizeOperationKind refuses (403) a principal that lacks any capability
+// the kind requires. Without a principal (--no-auth) there is nothing to check.
+func authorizeOperationKind(w http.ResponseWriter, r *http.Request, kind operation.Kind) bool {
+	actor := actorFromRequest(r)
+	if actor == nil {
+		return true
+	}
+	required, ok := requiredCapsForKind(kind)
+	if !ok {
+		writeErrorStatus(w, "forbidden: no capability rule for operation kind "+string(kind), http.StatusForbidden)
+		return false
+	}
+	held := caps.NewSet(actor.Capabilities...)
+	for _, c := range required {
+		if !held.Allow(c) {
+			writeErrorStatus(w, "forbidden: this action requires the "+c+" capability", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) enqueueOperation(w http.ResponseWriter, r *http.Request, request operation.Request) {
 	noStore(w)
-	required := caps.ExecuteDeploy
-	if actor := actorFromRequest(r); actor != nil && !caps.NewSet(actor.Capabilities...).Allow(required) {
-		writeErrorStatus(w, "missing capability: "+required, http.StatusForbidden)
+	if !authorizeOperationKind(w, r, request.Kind) {
 		return
 	}
 	if !s.operationsAvailableFor(w, http.MethodPost) {

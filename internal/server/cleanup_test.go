@@ -20,18 +20,22 @@ import (
 
 const cleanupAuditToken = "server-audit-v1"
 
-// auditEnvelopeJSON builds a minimal but complete server-audit envelope.
+// auditEnvelopeJSON builds a minimal but complete server-audit envelope. It is
+// stamped an hour ago on the real clock: the fleet view compares audited_at
+// with time.Now against cleanupStaleAfter, so a fixed date would rot into
+// "stale" a week after it was written.
 func auditEnvelopeJSON(state, findings string) string {
+	auditedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	return fmt.Sprintf(`{
   "machine_interface": 2,
   "server": "prod",
   "host": "192.0.2.10",
-  "audited_at": "2026-11-05T12:00:00Z",
+  "audited_at": %q,
   "state": %q,
   "checks": [{"name": "apps", "status": "ok"}],
   "disk": null,
   "findings": [%s]
-}`, state, findings)
+}`, auditedAt, state, findings)
 }
 
 const findingStaleRoute = `{"id":"stale_route:ghost","kind":"stale_route","severity":"warning","subject":"ghost","app":"ghost","evidence":"ghost left a managed block behind","remedy":{"argv":["teploy","route","remove","--app","ghost","--host","prod"],"destructive":false,"confirm":false}}`

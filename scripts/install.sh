@@ -261,7 +261,8 @@ if [ "$OS" = "linux" ] && [ -z "$TEPLOY_DASH_NO_SERVICE" ] && command -v systemc
   echo "  reverse proxy with explicit auth; do not remove the loopback bind"
   echo "  without one."
 else
-  echo "  Run:     TEPLOY_DASH_PASSWORD=\$(openssl rand -base64 24) teploy-dash"
-  echo "  UI:      http://127.0.0.1:3456"
+  echo "  Run:     teploy-dash"
+  echo "  UI:      http://127.0.0.1:3456/setup (enter the one-time bootstrap token"
+  echo "           teploy-dash prints on first start, then choose your password)"
 fi
 echo

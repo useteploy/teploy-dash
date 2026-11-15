@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/remote"
 	sshclient "github.com/useteploy/teploy-dash/internal/ssh"
 )
@@ -216,7 +217,7 @@ func (s *Server) preflightCLIchecks(ctx context.Context) []PreflightCheck {
 		return []PreflightCheck{
 			{Name: "teploy_cli", Result: "fail", Severity: "blocking",
 				Detail:      "teploy CLI not found on the dashboard host",
-				Remediation: "Install the teploy CLI on the dashboard host (https://teploy.dev), then retry."},
+				Remediation: "Install the teploy CLI on the dashboard host (" + cli.InstallURL + "), then retry."},
 			preflightCheck("machine_interface", "unknown", "warning", "CLI not installed — machine interface unknown", remediationMachineInterface),
 		}
 	}

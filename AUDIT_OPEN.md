@@ -579,10 +579,11 @@ landed in commits fba6510, 26c2cde, a9df8f0, b180687, 0c29c95, c71cf97,
   REMAINS DEFERRED: a real-browser pass (keyboard walkthrough, screen
   reader, contrast audit) — the landed work is verified statically
   (label/id resolution checked mechanically), not interactively.
-- A50 (residual) - browser-contract tests, govulncheck in CI, reviewed
-  toolchain pin (1.24 is past end of support; latest supported series at
-  audit date is 1.27.x), action/image digest pinning. Race tests, gofmt
-  gate, module consistency, and release-depends-on-CI landed.
+- A50 (residual) - browser-contract tests, reviewed toolchain pin (1.24 is
+  past end of support; latest supported series at audit date is 1.27.x),
+  action/image digest pinning. Race tests, gofmt gate, module consistency,
+  release-depends-on-CI, and (2026-11-14) a `govulncheck ./...` CI step
+  landed.
 - A51 (residual) - version metadata build args in the source Dockerfile,
   image smoke test. Named-volume/persistence docs, loopback bind, TLS
   guidance, and state-format wording corrected.
@@ -711,7 +712,7 @@ dash side was ours to do.
 - A56 - notification secrets get keep/replace/clear controls.
 - A57 - resource IDs from crypto.getRandomValues (insecure-context safe);
   restore dialog no longer references undefined editingId state.
-- A59 - CI, release, and source Dockerfile build on Go 1.27.1.
+- A59 - CI, release, and source Dockerfile build on Go 1.27.4.
 - A61 - installer downloads archive + checksums from the same resolved
   tag, requires exactly one matching row, verifies before extraction,
   bounded curl timeouts/retries.

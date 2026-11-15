@@ -275,6 +275,28 @@ function opDotClass(status) {
 // not a list (a mis-shaped response must not break the page that reads it).
 function arr(v) { return Array.isArray(v) ? v : []; }
 
+// "Protect my data" states, shared by the Backups page and Home so the two
+// never disagree. protected_except is protected: what is left out was the
+// owner's own choice.
+function backupSetupDone(state) { return state === 'protected' || state === 'protected_except'; }
+function backupSetupStateLabel(state) {
+  return ({
+    not_protected: 'not backed up', unknown: 'could not be read', capped: 'daily cap reached',
+    unreachable: 'cannot reach storage', empty: 'nothing to back up yet',
+    waiting_first_backup: 'waiting for the first backup', late: 'backups are late', failing: 'backups are failing',
+    waiting_restore_test: 'waiting for a restore test', guard_skipped: 'restore test put off',
+    restore_test_failed: 'restore test failed', restore_test_overdue: 'restore test overdue',
+    not_covered: 'not fully backed up', protected_except: 'protected, with exceptions', all_skipped: 'skipped',
+    protected: 'protected',
+  })[state] || state;
+}
+function backupSetupStateClass(state) {
+  if (backupSetupDone(state)) return 'green';
+  if (state === 'failing' || state === 'restore_test_failed' || state === 'unreachable' || state === 'not_protected' || state === 'not_covered') return 'red';
+  if (state === 'empty' || state === 'unknown' || state === 'all_skipped') return 'gray';
+  return 'yellow';
+}
+
 // The one date helper (2026-11 rework). Times read as relative text ("5 min
 // ago", "in 3 h") with the exact local time in a title attribute: in
 // templates, x-time="<iso>" does both; relTime / ageText give the text where
@@ -4090,23 +4112,9 @@ document.addEventListener('alpine:init', () => {
       setupSupported() { return !!(this.view && this.view.setup && this.view.setup.supported); },
       hasHandwritten() { return !!(this.view && this.view.handwritten && this.view.handwritten.length); },
 
-      setupStateLabel(state) {
-        return ({
-          not_protected: 'not backed up', unknown: 'could not be read', capped: 'daily cap reached',
-          unreachable: 'cannot reach storage', empty: 'nothing to back up yet',
-          waiting_first_backup: 'waiting for the first backup', late: 'backups are late', failing: 'backups are failing',
-          waiting_restore_test: 'waiting for a restore test', guard_skipped: 'restore test put off',
-          restore_test_failed: 'restore test failed', restore_test_overdue: 'restore test overdue',
-          not_covered: 'not fully backed up', protected_except: 'protected, with exceptions', all_skipped: 'skipped',
-          protected: 'protected',
-        })[state] || state;
-      },
-      setupStateClass(state) {
-        if (state === 'protected' || state === 'protected_except') return 'green';
-        if (state === 'failing' || state === 'restore_test_failed' || state === 'unreachable' || state === 'not_protected' || state === 'not_covered') return 'red';
-        if (state === 'empty' || state === 'unknown' || state === 'all_skipped') return 'gray';
-        return 'yellow';
-      },
+      setupStateLabel(state) { return backupSetupStateLabel(state); },
+      setupStateClass(state) { return backupSetupStateClass(state); },
+      setupDone() { return !!(this.view && this.view.setup && backupSetupDone(this.view.setup.state)); },
       canBackUpNow(sv) {
         return ['waiting_first_backup', 'late', 'failing'].includes(sv.state);
       },
@@ -4896,10 +4904,36 @@ document.addEventListener('alpine:init', () => {
       const rows = [];
       const inc = this.sources.incidents.data;
       const bk = this.sources.backups.data;
+      const setup = bk && bk.setup;
+      const setupRows = !!(setup && setup.supported);
+      // What the rows further down will actually say, so an incident is only
+      // left out when one of them names the same cause.
+      const serverState = {};
+      if (setupRows && setup.state === 'attention') {
+        for (const sv of arr(setup.servers)) serverState[sv.server] = sv.state;
+      }
+      const beforeSetup = setupRows && setup.state === 'none';
+      const rowState = {};
+      for (const r of arr(bk && bk.rows)) rowState[r.server + '\n' + r.name] = r.state;
       for (const i of arr(inc && inc.open)) {
-        // Backup incidents repeat what the backup rows below say, target by
-        // target; they only stand in when the backup read itself is missing.
-        if (i.source === 'backup' && bk) continue;
+        // Backup incidents whose cause a row below already names are left
+        // out: a failing or uncovered target has a backup row of its own
+        // (before setup, the one "not protected yet" row stands for every
+        // uncovered target), and an unreachable target or late backups show
+        // as that server's "Protect my data" row when that is the state the
+        // server reports. Anything else stays: missing tools, a rule this
+        // page does not know, a database inside a covered target that the
+        // engine cannot back up, late backups on a server whose row is about
+        // something else. Every backup incident stands in when the backup
+        // read itself is missing.
+        if (i.source === 'backup' && bk) {
+          const parts = String(i.key || '').split(':');
+          const server = parts[1], kind = parts[2], state = rowState[server + '\n' + parts.slice(3).join(':')];
+          if (kind === 'fail' && state === 'failing') continue;
+          if (kind === 'uncovered' && (beforeSetup || state === 'uncovered')) continue;
+          if (kind === 'target' && serverState[server] === 'unreachable') continue;
+          if (kind === 'stale' && serverState[server] === 'late') continue;
+        }
         rows.push({ key: 'inc:' + (i.key || i.id || i.name), level: i.severity === 'critical' ? 'bad' : 'warn',
           title: i.name + (i.source === 'monitor' || i.source === 'heartbeat' || !i.source ? ' is down' : ''),
           detail: i.message || 'open incident', at: i.started_at, verb: 'since',
@@ -4920,9 +4954,19 @@ document.addEventListener('alpine:init', () => {
           title: r.host + (r.overall === 'fail' ? ' is failing' + (r.first_failing ? ' at ' + r.first_failing.toUpperCase() : '') : ': certificate needs attention'),
           detail: r.evidence || (r.cert && r.cert.detail) || '', at: '', href: '/domains' });
       }
-      const setup = bk && bk.setup;
-      const unprotected = setup && setup.supported && setup.state !== 'protected';
-      if (unprotected) {
+      const unprotected = setupRows && !backupSetupDone(setup.state);
+      if (unprotected && setup.state === 'attention') {
+        // Name each server's cause instead of one generic line. Failing and
+        // not-covered servers are named by the backup rows below.
+        for (const sv of arr(setup.servers)) {
+          const st = sv.state;
+          if (backupSetupDone(st) || ['failing', 'not_covered', 'empty', 'all_skipped', 'not_protected',
+            'waiting_first_backup', 'waiting_restore_test'].includes(st)) continue;
+          rows.push({ key: 'protect:' + sv.server, level: backupSetupStateClass(st) === 'red' ? 'bad' : 'warn',
+            title: 'Backups on ' + sv.server + ': ' + backupSetupStateLabel(st),
+            detail: sv.detail || '', at: '', href: '/backups', action: 'See backups' });
+        }
+      } else if (unprotected) {
         rows.push({ key: 'protect', level: setup.state === 'none' ? 'warn' : 'bad', title: setup.headline || 'Your data is not fully protected',
           detail: '', at: '', href: '/backups', action: setup.state === 'none' ? 'Protect my data' : 'See backups' });
       }

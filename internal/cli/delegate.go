@@ -25,6 +25,21 @@ import (
 // every fleet timeout took 20 minutes when it had given up after one.
 const cliTimeout = 20 * time.Minute
 
+// InstallURL is where the teploy CLI's install instructions live (the CLI
+// README's Install section).
+const InstallURL = "https://github.com/useteploy/teploy-cli#install"
+
+// ErrNotInstalled is the one answer for "the teploy binary is not on this
+// host": every invocation below returns it instead of the raw exec error, and
+// the server reports it the same way on every route (503). Its text carries
+// the remediation, so it reads correctly wherever it is wrapped.
+var ErrNotInstalled = errors.New("teploy CLI not found on the dashboard host: install it (" + InstallURL + "), then retry")
+
+// notInstalled maps the exec error for a missing binary onto ErrNotInstalled.
+func notInstalled(err error) bool {
+	return errors.Is(err, exec.ErrNotFound)
+}
+
 // Result holds the output of a CLI command.
 type Result struct {
 	Stdout   string `json:"stdout"`
@@ -190,6 +205,9 @@ func RunStreamStdin(ctx context.Context, stdin string, args []string, timeout ti
 		return result, flushErr
 	}
 	if waitErr != nil {
+		if notInstalled(waitErr) {
+			return result, ErrNotInstalled
+		}
 		if _, ok := waitErr.(*exec.ExitError); !ok {
 			return result, fmt.Errorf("teploy command failed: %w", waitErr)
 		}
@@ -282,6 +300,9 @@ func runBounded(ctx context.Context, stdin string, args ...string) (*Result, err
 
 	err := cmd.Run()
 	result := &Result{Stdout: stdout.String(), Stderr: stderr.String()}
+	if notInstalled(err) {
+		return result, ErrNotInstalled
+	}
 	switch {
 	case stdout.Err != nil:
 		return result, stdout.Err

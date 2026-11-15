@@ -121,7 +121,7 @@
 <div class="cli-banner" x-data="cliStatusBanner" x-show="!loading && !installed" x-cloak>
   <strong>teploy CLI not installed on this host.</strong>
   Most actions (deploy, rollback, logs, env) won't work.
-  <a href="https://teploy.dev" style="color: white; text-decoration: underline;">Install instructions</a>
+  <a href="https://github.com/useteploy/teploy-cli#install" style="color: white; text-decoration: underline;">Install instructions</a>
 </div>
 
 <!-- Content -->
@@ -2011,7 +2011,7 @@
       <!-- Protect my data: where things stand, then the flow. Never forced, and the
            manual controls stay under Advanced below. -->
       <template x-if="!loading && setupSupported() && tab !== 'restore-tests'">
-        <div class="card setup-card" :class="view.setup.state === 'protected' ? '' : 'setup-card-todo'">
+        <div class="card setup-card" :class="setupDone() ? '' : 'setup-card-todo'">
           <div class="setup-head">
             <div>
               <h2 x-text="view.setup.headline"></h2>
@@ -2019,8 +2019,8 @@
               <p class="text-muted" x-show="view.setup.state === 'none'">Set up encrypted backups kept away from your servers. It takes a few minutes.</p>
             </div>
             <div class="header-actions">
-              <button class="btn btn-primary" x-show="!(setupOpen && tab === 'setup') && view.setup.state !== 'protected'" @click="setTab('setup'); openSetup()" x-text="view.setup.turned_on ? 'Continue' : 'Protect my data'"></button>
-              <button class="btn btn-sm" x-show="!(setupOpen && tab === 'setup') && view.setup.state === 'protected'" @click="setTab('setup'); openSetup()">Open setup</button>
+              <button class="btn btn-primary" x-show="!(setupOpen && tab === 'setup') && !setupDone()" @click="setTab('setup'); openSetup()" x-text="view.setup.turned_on ? 'Continue' : 'Protect my data'"></button>
+              <button class="btn btn-sm" x-show="!(setupOpen && tab === 'setup') && setupDone()" @click="setTab('setup'); openSetup()">Open setup</button>
               <button class="btn btn-sm" x-show="setupOpen && tab === 'setup'" @click="closeSetup()">Close</button>
             </div>
           </div>

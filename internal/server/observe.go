@@ -52,6 +52,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/useteploy/teploy-dash/internal/cli"
 	"github.com/useteploy/teploy-dash/internal/durable"
 	"github.com/useteploy/teploy-dash/internal/monitor"
 	"github.com/useteploy/teploy-dash/internal/operation"
@@ -823,7 +824,7 @@ func observeMintKey(ctx context.Context, conn *observeConnection, siteID, label 
 // the CLI's stdin, never argv).
 func (s *Server) writeObserveSecret(r *http.Request, serverName, appName, key, value string) error {
 	if !s.cliInstalled() {
-		return errors.New("teploy CLI not installed")
+		return cli.ErrNotInstalled
 	}
 	target, err := s.appTargetArgs(r.Context(), serverName, appName)
 	if err != nil {

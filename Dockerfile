@@ -1,4 +1,4 @@
-FROM golang:1.27.1-alpine AS builder
+FROM golang:1.27.4-alpine AS builder
 # Build identity (A64): source-built images report the same version/commit/
 # date metadata goreleaser injects, so incident reports from a source build
 # don't masquerade as a clean release ("dev"). CI passes the checked-out

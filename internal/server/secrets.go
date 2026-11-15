@@ -50,7 +50,7 @@ func (s *Server) handleSecretsSet(w http.ResponseWriter, r *http.Request, server
 		return
 	}
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 	target, err := s.appTargetArgs(r.Context(), serverName, appName)
@@ -80,7 +80,7 @@ func (s *Server) handleSecretsDelete(w http.ResponseWriter, r *http.Request, ser
 		return
 	}
 	if !s.cliInstalled() {
-		writeError(w, "teploy CLI not installed")
+		writeCLINotInstalled(w)
 		return
 	}
 	parts := append([]string{"secret", "rm", key}, s.requestActorArgs(r)...)
