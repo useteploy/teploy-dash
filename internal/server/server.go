@@ -4424,8 +4424,10 @@ type homepageData struct {
 // shortcutURLRE-bound validation pieces (A40). Shared links render in href,
 // window.open, and style bindings for every user, so the whole list is
 // validated before it replaces the shared state: bounded count, unique
-// route-safe IDs, absolute HTTP(S) URLs without credentials or fragments,
-// and a narrow color grammar instead of arbitrary CSS fragments.
+// route-safe IDs, absolute HTTP(S) URLs without credentials, and a narrow
+// color grammar instead of arbitrary CSS fragments. A URL fragment is
+// allowed: the http(s) scheme check is what keeps the link safe, and
+// console deep links (AWS, Grafana) live in the fragment.
 var (
 	shortcutColorRE = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 	shortcutIDRE    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -4436,8 +4438,8 @@ const maxHomepageItems = 200
 func validateShortcutURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") ||
-		u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.RawFragment != "" {
-		return fmt.Errorf("shortcut URL %q must be an absolute HTTP(S) URL without credentials or fragment", raw)
+		u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("shortcut URL %q must be an absolute HTTP(S) URL without credentials", raw)
 	}
 	if port := u.Port(); port != "" {
 		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
