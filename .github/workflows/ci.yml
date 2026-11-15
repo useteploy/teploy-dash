@@ -43,7 +43,7 @@ jobs:
           sparse-checkout: lullmail
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.4'
       - name: Build
         run: go build ./...
       - name: Vet
@@ -101,7 +101,7 @@ jobs:
           node validate-contracts.mjs "../teploy-cli/contracts" "${{ steps.pin.outputs.corpus_rev }}"
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.4'
       - name: Decode the pinned corpus through dash's importers
         run: go test ./internal/... -run 'TestContracts' -count=1
         env:

@@ -712,7 +712,7 @@ dash side was ours to do.
 - A56 - notification secrets get keep/replace/clear controls.
 - A57 - resource IDs from crypto.getRandomValues (insecure-context safe);
   restore dialog no longer references undefined editingId state.
-- A59 - CI, release, and source Dockerfile build on Go 1.27.1.
+- A59 - CI, release, and source Dockerfile build on Go 1.27.4.
 - A61 - installer downloads archive + checksums from the same resolved
   tag, requires exactly one matching row, verifies before extraction,
   bounded curl timeouts/retries.
