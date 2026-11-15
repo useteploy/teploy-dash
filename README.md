@@ -439,8 +439,9 @@ the forgejo family answers `/api/v1/version`), short timeout, read-only.
 - Products the CLI does not recognise pass through and render as unrecognised
   labels, so a product newer than the CLI stays visible.
 - The **nav switcher** fills only from confirmed docs' own `dashboard_url`
-  (explicit `TEPLOY_NAV_*_URL` still wins, the fleet-name fallback stays); a
-  confirmed forgejo joins as a plain link. The sweep runs hourly, cached in
+  (explicit `TEPLOY_NAV_*_URL` still wins, the fleet-name fallback stays). A
+  forgejo found on the fleet is not added; set `TEPLOY_NAV_FORGEJO_URL` to
+  list one. The sweep runs hourly, cached in
   `<data>/siblings.json`; **Rescan now** re-reads on demand.
 
 ### Observe connect
@@ -665,6 +666,7 @@ return 404.
 | `TEPLOY_NAV_OBSERVE_URL` | _(none)_ | URL of your Teploy Observe dashboard. When set, it appears in the top-left cross-product switcher. |
 | `TEPLOY_NAV_SHIP_URL` | _(none)_ | URL of your Teploy Ship dashboard. When set, it appears in the top-left cross-product switcher. |
 | `TEPLOY_NAV_CLOUD_URL` | _(none)_ | URL of your Teploy Cloud dashboard (for example `https://cloud.teploy.com`). When set, it appears in the top-left cross-product switcher. |
+| `TEPLOY_NAV_FORGEJO_URL` | _(none)_ | URL of your Forgejo (or Gitea). When set, it appears in the top-left switcher as a plain link. A forge found on the fleet is never added on its own. |
 
 ### Single sign-on (OIDC)
 

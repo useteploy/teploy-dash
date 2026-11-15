@@ -875,22 +875,3 @@ func (s *Server) siblingNavURL(product string) string {
 	}
 	return best
 }
-
-// siblingForgejoNav returns the base URL of the newest confirmed
-// forgejo-family sighting (a plain link; it has no discovery doc).
-func (s *Server) siblingForgejoNav() string {
-	sb := &s.siblings
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	best := ""
-	var bestAt time.Time
-	for _, rec := range sb.snap.Servers {
-		for _, p := range rec.Probes {
-			if p.State != probeConfirmed || !isForgejoFamily(p.Product) || !p.ProbedAt.After(bestAt) {
-				continue
-			}
-			best, bestAt = p.BaseURL, p.ProbedAt
-		}
-	}
-	return best
-}

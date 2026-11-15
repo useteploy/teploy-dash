@@ -4217,9 +4217,10 @@ func (s *Server) teployNav(current string) map[string]interface{} {
 			apps = append(apps, map[string]string{"key": p.key, "label": p.label, "url": url})
 		}
 	}
-	// The forgejo family is not a Teploy product: a confirmed sighting joins
-	// as a plain link to the address that answered.
-	if forgejo := s.siblingForgejoNav(); forgejo != "" {
+	// The forgejo family is not a Teploy product, so the switcher lists it
+	// only when the operator names its URL. A forge found on the fleet still
+	// shows on the siblings page; it does not join the product switcher.
+	if forgejo := strings.TrimSpace(os.Getenv("TEPLOY_NAV_FORGEJO_URL")); forgejo != "" {
 		apps = append(apps, map[string]string{"key": "forgejo", "label": "Forgejo", "url": forgejo})
 	}
 	return map[string]interface{}{"current": current, "apps": apps}
