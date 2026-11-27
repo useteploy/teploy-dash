@@ -93,9 +93,8 @@ const artifacts = {
   "backup-head-envelope": { schema: "backup-head-envelope.schema.json", classes: { valid: "validate" } },
   "backup-detach-envelope": { schema: "backup-detach-envelope.schema.json", classes: { valid: "validate" } },
   // Git-source artifacts (corpus rev 16, plan D4): the connected-source
-  // show envelope, credential provisioning receipts and the poll results.
-  // Dash adopts these surfaces separately (D4); classified here so the
-  // corpus job stays exhaustive.
+  // show envelope, credential provisioning receipts and the poll results,
+  // which the Repository tab and the webhook relay consume (D4, shipped).
   "source-show-envelope": { schema: "source-show-envelope.schema.json", classes: { valid: "validate" } },
   "source-key-envelope": { schema: "source-key-envelope.schema.json", classes: { valid: "validate" } },
   "trigger-poll-envelope": { schema: "trigger-poll-envelope.schema.json", classes: { valid: "validate" } },
