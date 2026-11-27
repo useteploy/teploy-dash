@@ -7,9 +7,9 @@
 // Usage: node validate-contracts.mjs <corpus-dir> <pinned-corpus-rev>
 //
 // Fails (non-zero exit) on: a schema that cannot compile, a valid/ fixture
-// that does not validate, an invalid/ fixture that DOES validate, a fixture
-// the expectation table does not classify (the corpus grew -- update the
-// table and ci/contracts.pin consciously), or a MANIFEST revision mismatch.
+// that does not validate, an invalid/ fixture that DOES validate, a schema or
+// fixture the expectation table does not classify (the corpus grew -- update
+// the table and ci/contracts.pin consciously), or a MANIFEST revision mismatch.
 // Never skips as success.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -99,6 +99,27 @@ const artifacts = {
   "source-show-envelope": { schema: "source-show-envelope.schema.json", classes: { valid: "validate" } },
   "source-key-envelope": { schema: "source-key-envelope.schema.json", classes: { valid: "validate" } },
   "trigger-poll-envelope": { schema: "trigger-poll-envelope.schema.json", classes: { valid: "validate" } },
+  // Teploy Cloud managed-server artifacts (corpus rev 22, cloud-v1):
+  // `teploy cloud ... --json`. Dash does not consume cloud commands;
+  // classified here so the corpus job stays exhaustive without making dash
+  // depend on them.
+  "cloud-status-envelope": { schema: "cloud-status-envelope.schema.json", classes: { valid: "validate" } },
+  "cloud-servers-envelope": { schema: "cloud-servers-envelope.schema.json", classes: { valid: "validate" } },
+  "cloud-providers-envelope": { schema: "cloud-providers-envelope.schema.json", classes: { valid: "validate" } },
+  "cloud-regions-envelope": { schema: "cloud-regions-envelope.schema.json", classes: { valid: "validate" } },
+  "cloud-sizes-envelope": { schema: "cloud-sizes-envelope.schema.json", classes: { valid: "validate" } },
+  "cloud-server-result": { schema: "cloud-server-result.schema.json", classes: { valid: "validate" } },
+  "cloud-server-delete-result": { schema: "cloud-server-delete-result.schema.json", classes: { valid: "validate" } },
+  // Self-hosted sandbox artifacts (corpus rev 23, sandbox-v1):
+  // `teploy sandbox ... --json`. Dash does not consume sandbox commands;
+  // classified here so the corpus job stays exhaustive without making dash
+  // depend on them.
+  "sandbox-run-result": { schema: "sandbox-run-result.schema.json", classes: { valid: "validate" } },
+  "sandbox-runs-envelope": { schema: "sandbox-runs-envelope.schema.json", classes: { valid: "validate" } },
+  "sandbox-exec-result": { schema: "sandbox-exec-result.schema.json", classes: { valid: "validate" } },
+  "sandbox-destroy-result": { schema: "sandbox-destroy-result.schema.json", classes: { valid: "validate" } },
+  "sandbox-copy-result": { schema: "sandbox-copy-result.schema.json", classes: { valid: "validate" } },
+  "sandbox-host-result": { schema: "sandbox-host-result.schema.json", classes: { valid: "validate" } },
 };
 
 const failures = [];
@@ -116,11 +137,20 @@ const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
 
 const validators = {};
+const knownSchemas = new Set();
 for (const [name, spec] of Object.entries(artifacts)) {
+  knownSchemas.add(spec.schema);
   try {
     validators[name] = ajv.compile(JSON.parse(readFileSync(join(corpusDir, "schema", spec.schema), "utf8")));
   } catch (err) {
     fail(`schema ${name} does not compile: ${err.message}`);
+  }
+}
+
+for (const file of readdirSync(join(corpusDir, "schema"))) {
+  if (!file.endsWith(".schema.json")) continue;
+  if (!knownSchemas.has(file)) {
+    fail(`schema/${file} is not in the expectation table (corpus grew; update ci/validate-contracts.mjs and ci/contracts.pin)`);
   }
 }
 

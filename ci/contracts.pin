@@ -2,6 +2,6 @@
 # The authority for corpus revisions is teploy-cli/contracts/MANIFEST.md --
 # this file records WHICH revision dash CI proves it can decode. Bump both
 # lines together, quoting the MANIFEST's revision table, in the same change
-# that updates .github/workflows/ci.yml expectations.
-cli_rev=d4c9bb3736871edcbcc936ec04a4558bfe6dfc7d
-corpus_rev=21
+# that updates ci/validate-contracts.mjs expectations.
+cli_rev=b724995c1551e5ef6c5c588dbbe46184eb2b74d6
+corpus_rev=23
