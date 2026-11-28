@@ -9,6 +9,9 @@ All notable changes to teploy-dash are recorded here.
 - **Switcher:** a Forgejo found on the fleet no longer joins the top-left
   product switcher. Set `TEPLOY_NAV_FORGEJO_URL` to list one.
 
+- Bundles teploy CLI v0.1.56 (adds `teploy cloud` and `teploy sandbox`);
+  contracts corpus rev 23, pinned at the v0.1.56 tag.
+
 ### Fixed
 
 - **Shortcuts:** a link with a `#` in it can be saved.
