@@ -3,5 +3,5 @@
 # this file records WHICH revision dash CI proves it can decode. Bump both
 # lines together, quoting the MANIFEST's revision table, in the same change
 # that updates ci/validate-contracts.mjs expectations.
-cli_rev=b724995c1551e5ef6c5c588dbbe46184eb2b74d6
+cli_rev=6fc1aa77ef68569b5e91e3aeac8276dcbb9a06ec
 corpus_rev=23
